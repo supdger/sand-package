@@ -19,7 +19,7 @@ function packageVersion(string $package): string
         }
     }
 
-    return class_exists(\Composer\InstalledVersions::class, false)
+    return class_exists(\Composer\InstalledVersions::class)
         ? (\Composer\InstalledVersions::getPrettyVersion($package) ?? 'dev-main')
         : 'dev-main';
 }

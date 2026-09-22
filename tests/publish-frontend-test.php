@@ -58,9 +58,14 @@ try {
         $installedPackage . '/sandadmin-artd/src/views/plugin/sandpackage/api/index.ts',
         "export {}\n"
     );
+    mkdir($installedRoot . '/vendor/composer', 0777, true);
+    file_put_contents(
+        $installedRoot . '/vendor/composer/InstalledVersions.php',
+        "<?php\nnamespace Composer;\nfinal class InstalledVersions { public static function getPrettyVersion(string \$package): ?string { return \$package === 'supdger/sand-package' ? '0.1.2' : null; } }\n"
+    );
     file_put_contents(
         $installedRoot . '/vendor/autoload.php',
-        "<?php\nnamespace Composer;\nfinal class InstalledVersions { public static function getPrettyVersion(string \$package): ?string { return \$package === 'supdger/sand-package' ? '0.1.1' : null; } }\n"
+        "<?php\nspl_autoload_register(static function (string \$class): void { if (\$class === 'Composer\\\\InstalledVersions') { require __DIR__ . '/composer/InstalledVersions.php'; } });\n"
     );
     mkdir($installedRoot . '/published', 0777, true);
     file_put_contents($installedRoot . '/published/package.json', "{}\n");
@@ -72,7 +77,7 @@ try {
         (string) file_get_contents($installedRoot . '/published/.sand-package-source-manifest.json'),
         true
     );
-    if ($code !== 0 || ($installedManifest['version'] ?? null) !== '0.1.1') {
+    if ($code !== 0 || ($installedManifest['version'] ?? null) !== '0.1.2') {
         throw new RuntimeException("安装形态未记录 Composer 版本：{$output}");
     }
 
