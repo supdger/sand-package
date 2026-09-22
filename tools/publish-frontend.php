@@ -10,6 +10,20 @@ function fail(string $message): never
     exit(1);
 }
 
+function packageVersion(string $package): string
+{
+    if (!class_exists(\Composer\InstalledVersions::class, false)) {
+        $autoload = dirname(__DIR__, 3) . '/autoload.php';
+        if (is_file($autoload)) {
+            require_once $autoload;
+        }
+    }
+
+    return class_exists(\Composer\InstalledVersions::class, false)
+        ? (\Composer\InstalledVersions::getPrettyVersion($package) ?? 'dev-main')
+        : 'dev-main';
+}
+
 /** @return array<string,string> */
 function packageSourceManifest(string $root): array
 {
@@ -109,9 +123,7 @@ if ($installed === null) {
 }
 
 copyPackageTree($source, $target);
-$version = class_exists(\Composer\InstalledVersions::class)
-    ? (\Composer\InstalledVersions::getPrettyVersion('supdger/sand-package') ?? 'dev-main')
-    : 'dev-main';
+$version = packageVersion('supdger/sand-package');
 $manifest = [
     'schema' => 1,
     'package' => 'supdger/sand-package',
