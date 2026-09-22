@@ -1,0 +1,16 @@
+{
+  "extends": "../../../../../tsconfig.json",
+  "compilerOptions": {
+    "types": ["vite/client", "node", "element-plus/global", "pinia-plugin-persistedstate"],
+    "typeRoots": ["../../../../../node_modules/@types", "../../../../../node_modules"],
+    "rootDirs": [".."]
+  },
+  "include": [
+    "./**/*.ts",
+    "./index.vue",
+    "../api/index.ts",
+    "../store/terminal.ts",
+    "../../../../env.d.ts",
+    "../../../../types/**/*.d.ts"
+  ]
+}

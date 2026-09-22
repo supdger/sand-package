@@ -1,0 +1,31 @@
+{
+  "name": "supdger/sand-package",
+  "description": "SandAdmin plugin package manager for PostgreSQL hosts.",
+  "type": "library",
+  "license": "MIT",
+  "require": {
+    "php": ">=8.2",
+    "supdger/sand-core": "^0.1",
+    "nelexa/zip": "^4.0",
+    "tinywan/jwt": "^1.11",
+    "webman/console": "^2.1",
+    "workerman/webman-framework": "^2.1"
+  },
+  "autoload": {
+    "psr-4": {
+      "SandAdmin\\Package\\": "server/",
+      "plugin\\sandpackage\\": "server/plugin/sandpackage/",
+      "Saithink\\Saipackage\\": "server/compat/Saithink/Saipackage/"
+    }
+  },
+  "archive": {
+    "exclude": [
+      "/sandadmin-artd/node_modules",
+      "/sandadmin-artd/dist",
+      "/sandadmin-artd/.env*",
+      "/**/.DS_Store",
+      "/**/.idea",
+      "/**/.vscode"
+    ]
+  }
+}
