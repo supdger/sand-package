@@ -32,7 +32,8 @@ final class FrontendPublisher
         if ($installed === null) {
             self::assertNoUnmanagedCollision($target, $files);
         } else {
-            self::assertUnmodified($target, $installed['files']);
+            self::assertUnmodified($target, array_intersect_key($installed['files'], $files));
+            self::assertNoUnmanagedCollision($target, array_diff_key($files, $installed['files']));
         }
 
         self::copyTree($source, $target);
