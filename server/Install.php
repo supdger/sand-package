@@ -12,11 +12,13 @@ final class Install
 
     public static function install(): void
     {
+        FrontendPublisher::publish(self::frontendTarget());
         self::installByRelation();
     }
 
     public static function update(): void
     {
+        FrontendPublisher::publish(self::frontendTarget());
         self::installByRelation();
     }
 
@@ -45,5 +47,14 @@ final class Install
             }
             copy_dir(__DIR__ . '/' . $source, $target, true);
         }
+    }
+
+    private static function frontendTarget(): string
+    {
+        $basePath = rtrim(str_replace('\\', '/', base_path()), '/');
+
+        return basename($basePath) === 'server'
+            ? dirname($basePath) . '/sandadmin-artd'
+            : $basePath . '/sandadmin-artd';
     }
 }
