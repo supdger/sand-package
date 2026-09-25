@@ -3594,8 +3594,18 @@ class LegacyInstallLogic
             throw new ApiException('宿主版本非法，不能升级');
         }
         $tokens = explode('|', $support);
-        if ($tokens === [] || array_filter($tokens, static fn (string $token): bool => preg_match('/^\d+\.x$/', $token) !== 1)
-            || !in_array($match[1] . '.x', $tokens, true)) {
+        $valid = $tokens !== [] && !array_filter(
+            $tokens,
+            static fn (string $token): bool => preg_match('/^(?:\d+\.x|>=\d+\.\d+\.\d+)$/', $token) !== 1
+        );
+        $compatible = false;
+        foreach ($tokens as $token) {
+            if ($token === $match[1] . '.x'
+                || (str_starts_with($token, '>=') && version_compare($host, substr($token, 2), '>='))) {
+                $compatible = true;
+            }
+        }
+        if (!$valid || !$compatible) {
             throw new ApiException('升级候选与当前宿主版本不兼容，不能升级');
         }
     }
