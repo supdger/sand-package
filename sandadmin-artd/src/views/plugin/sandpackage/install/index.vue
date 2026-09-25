@@ -1582,10 +1582,23 @@
     }
 
     const supportTokens = support.split('|')
-    if (supportTokens.length === 0 || supportTokens.some((token) => !/^\d+\.x$/.test(token))) {
+    if (
+      supportTokens.length === 0 ||
+      supportTokens.some((token) => !/^(?:\d+\.x|>=\d+\.\d+\.\d+)$/.test(token))
+    ) {
       return false
     }
-    return supportTokens.some((token) => token.slice(0, -2) === match[1])
+    return supportTokens.some((token) => {
+      if (token === `${match[1]}.x`) return true
+      if (!token.startsWith('>=')) return false
+      const minimum = token.slice(2).split('.').map(Number)
+      const host = [Number(match[1]), Number(match[2]), Number(match[3])]
+      for (let i = 0; i < 3; i++) {
+        if (host[i] > minimum[i]) return true
+        if (host[i] < minimum[i]) return false
+      }
+      return !prerelease
+    })
   }
 
   const canInstallLocal = (record: SandpackageInstallRow): boolean =>
