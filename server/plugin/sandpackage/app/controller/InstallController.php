@@ -39,9 +39,9 @@ class InstallController extends BaseController
     static string $warn = 'warn';
 
     static array $needDependentVersion = [
-        'php' => '8.1.0',
-        'sandadmin' => '6.0.0',
-        'sandpackage' => '6.0.0',
+        'php' => '8.2.0',
+        'sandadmin' => '0.1.0',
+        'sandpackage' => '0.1.0',
     ];
 
     /**

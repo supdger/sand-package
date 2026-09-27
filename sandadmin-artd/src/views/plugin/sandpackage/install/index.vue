@@ -22,17 +22,6 @@
                 v-if="!hideGlobalPluginWrites"
                 v-ripple
                 :disabled="pluginOperationBusy"
-                @click="handleUpload"
-              >
-                <template #icon>
-                  <ArtSvgIcon icon="ri:upload-line" />
-                </template>
-                上传插件包
-              </ElButton>
-              <ElButton
-                v-if="!hideGlobalPluginWrites"
-                v-ripple
-                :disabled="pluginOperationBusy"
                 @click="handleTerminal"
               >
                 <template #icon>
@@ -221,19 +210,6 @@
                     >升级包不完整，请联系管理员</ElTag
                   >
                   <ElPopconfirm
-                    v-else-if="canInstallLocal(row)"
-                    title="确定要安装当前插件吗?"
-                    @confirm="handleInstall(row)"
-                    confirm-button-text="确定"
-                    cancel-button-text="取消"
-                  >
-                    <template #reference>
-                      <ElLink type="warning" :disabled="pluginOperationBusy">
-                        <ArtSvgIcon icon="ri:apps-2-add-line" class="mr-1" />安装
-                      </ElLink>
-                    </template>
-                  </ElPopconfirm>
-                  <ElPopconfirm
                     v-if="canUninstallLocal(row)"
                     title="确定要卸载当前插件吗?"
                     @confirm="handleUninstall(row)"
@@ -248,7 +224,6 @@
                   </ElPopconfirm>
                   <ElTag
                     v-if="
-                      !canInstallLocal(row) &&
                       !canUninstallLocal(row) &&
                       row.registration_candidate !== 1 &&
                       !isUpgradeCandidateStage(row)
@@ -277,6 +252,17 @@
               </template>
             </ElInput>
             <ElButton
+              v-if="!hideGlobalPluginWrites"
+              v-ripple
+              :disabled="pluginOperationBusy"
+              @click="handleUpload"
+            >
+              <template #icon>
+                <ArtSvgIcon icon="ri:upload-line" />
+              </template>
+              上传插件包
+            </ElButton>
+            <ElButton
               :loading="repositoryLoading"
               :disabled="repositoryDownloading"
               @click="fetchRepositoryCatalog"
@@ -304,6 +290,26 @@
                 </ElDescriptionsItem>
               </ElDescriptions>
             </ElPopover>
+          </div>
+
+          <div v-if="repositoryCandidateRows.length" class="mb-3">
+            <ElAlert title="待安装插件包" type="info" :closable="false">
+              <ElSpace v-for="row in repositoryCandidateRows" :key="row.app" wrap>
+                <span>{{ row.title || row.app }} v{{ row.version }}</span>
+                <ElPopconfirm
+                  title="确定要安装当前插件包吗?"
+                  confirm-button-text="确定"
+                  cancel-button-text="取消"
+                  @confirm="handleInstall(row)"
+                >
+                  <template #reference>
+                    <ElButton link type="primary" :disabled="repositoryWritesBlocked"
+                      >继续安装</ElButton
+                    >
+                  </template>
+                </ElPopconfirm>
+              </ElSpace>
+            </ElAlert>
           </div>
 
           <div v-if="repositoryLoading" class="repository-state" v-loading="true">
@@ -393,7 +399,7 @@
                   :disabled="repositoryActionDisabled(item, item.versions[0])"
                   @click="handleRepositoryVersionAction(item, item.versions[0])"
                 >
-                  {{ repositoryActionLabel(item.versions[0].action) }}
+                  {{ repositoryVersionActionLabel(item, item.versions[0]) }}
                 </ElButton>
               </div>
             </article>
@@ -1183,7 +1189,7 @@
   }
 
   const refreshAfterUpload = async (): Promise<void> => {
-    await getList()
+    await Promise.all([getList(), fetchRepositoryCatalog()])
   }
 
   const openLocalDetail = (row: SandpackageInstallRow): void => {
@@ -1791,6 +1797,7 @@
 
   const localActionReason = (record: SandpackageInstallRow): string => {
     if (record.state === 1) return '已安装'
+    if (record.state === 0 || canInstallLocal(record)) return '请到插件仓库安装'
     if (record.state === 7) return '已找到安装记录，但未找到插件文件。'
     if (record.state === 5) return '安装目录正被占用，请稍后重试。'
     if (record.state === 6) return '已找到插件文件，尚未完成登记。'
@@ -1810,7 +1817,7 @@
   }
 
   const handleInstall = async (record: SandpackageInstallRow) => {
-    if (pluginOperationBusy.value || !canInstallLocal(record)) return
+    if (repositoryWritesBlocked.value || !canInstallLocal(record)) return
     if (rejectOrdinaryAction(record)) return
     // 检查
     if (version.value?.sandpackage_version?.state === 'fail') {
@@ -1839,7 +1846,7 @@
     } catch {
       // Error already handled by http utility
     } finally {
-      await getList()
+      await Promise.all([getList(), fetchRepositoryCatalog()])
       releaseLocalWrite('install')
     }
   }
@@ -2207,6 +2214,9 @@
   let repositoryDocumentRequestId = 0
 
   const repositoryPlugins = computed(() => repositoryCatalog.value?.plugins ?? [])
+  const repositoryCandidateRows = computed(() =>
+    installList.value.filter((row) => row.state === 2 && canInstallLocal(row))
+  )
   const cleanupRepositoryVersions = computed(
     () =>
       repositoryPlugins.value.find((item) => item.app === cleanupTargetApp.value)?.versions ?? []
@@ -2316,6 +2326,20 @@
       incompatible: '版本不兼容'
     })[action]
 
+  const repositoryVersionActionLabel = (
+    plugin: RepositoryPlugin,
+    item: RepositoryPluginVersion
+  ): string => {
+    if (item.action === 'install' && plugin.local.state === 2) return '继续安装'
+    if (
+      item.action === 'manage' &&
+      repositoryCandidateRows.value.some((row) => row.app === plugin.app)
+    ) {
+      return '上方处理本地包'
+    }
+    return repositoryActionLabel(item.action)
+  }
+
   const repositoryActionType = (
     action: RepositoryVersionAction
   ): 'primary' | 'warning' | 'info' => {
@@ -2327,7 +2351,12 @@
     plugin: RepositoryPlugin | null,
     item: RepositoryPluginVersion
   ): boolean => {
-    if (item.action === 'manage') return pluginOperationBusy.value
+    if (item.action === 'manage') {
+      return (
+        pluginOperationBusy.value ||
+        (plugin !== null && repositoryCandidateRows.value.some((row) => row.app === plugin.app))
+      )
+    }
     if (item.action !== 'install' && item.action !== 'upgrade') return true
     return !plugin || plugin.local.blocked || repositoryWritesBlocked.value
   }
@@ -2444,6 +2473,25 @@
       ) {
         throw new Error('本地插件列表与仓库识别的已安装版本不一致，未执行升级')
       }
+      const continuingCandidate = selectedAction === 'install' && refreshed.plugin.local.state === 2
+      if (
+        continuingCandidate &&
+        (!refreshedLocalRow ||
+          !canInstallLocal(refreshedLocalRow) ||
+          refreshedLocalRow.state !== 2 ||
+          refreshedLocalRow.version !== refreshed.item.version ||
+          refreshed.plugin.local.version !== refreshed.item.version ||
+          refreshed.plugin.local.candidate_sha256 !== refreshed.item.sha256)
+      ) {
+        throw new Error('待安装插件包与仓库版本不一致，请刷新后重试')
+      }
+      if (
+        selectedAction === 'install' &&
+        !continuingCandidate &&
+        refreshed.plugin.local.state !== 0
+      ) {
+        throw new Error('本地插件状态已变化，请刷新仓库后重试')
+      }
 
       try {
         await ElMessageBox.confirm(
@@ -2461,18 +2509,29 @@
         return
       }
 
-      const prepared = await sandpackageApi.downloadRepositoryPlugin({
-        app: refreshed.plugin.app,
-        version: refreshed.item.version,
-        sha256: refreshed.item.sha256
-      })
-      validatePreparedCandidate(
-        prepared,
-        refreshed.plugin.app,
-        refreshed.item.version,
-        selectedAction,
-        fromVersion
-      )
+      if (continuingCandidate) {
+        if (!refreshedLocalRow) throw new Error('待安装插件包不存在，请刷新后重试')
+        validatePreparedCandidate(
+          refreshedLocalRow,
+          refreshed.plugin.app,
+          refreshed.item.version,
+          selectedAction,
+          fromVersion
+        )
+      } else {
+        const prepared = await sandpackageApi.downloadRepositoryPlugin({
+          app: refreshed.plugin.app,
+          version: refreshed.item.version,
+          sha256: refreshed.item.sha256
+        })
+        validatePreparedCandidate(
+          prepared,
+          refreshed.plugin.app,
+          refreshed.item.version,
+          selectedAction,
+          fromVersion
+        )
+      }
 
       await sandpackageApi.installApp({
         appName: refreshed.plugin.app,

@@ -707,11 +707,19 @@ class InstallLogic
                 return ['state' => $state, 'version' => $version, 'installed_version' => $version, 'blocked' => false, 'reason' => ''];
             }
             $reason = match ($state) {
-                self::WAIT_INSTALL => '已有待安装候选，请从已安装插件管理页继续',
+                self::WAIT_INSTALL => '已有待安装候选，请从插件仓库继续',
                 self::CONFLICT_PENDING => '存在依赖冲突候选，请从已安装插件管理页继续',
                 self::DEPENDENT_WAIT_INSTALL => '存在待执行依赖任务，请从已安装插件管理页继续',
                 default => '当前安装状态需要检查，请从已安装插件管理页处理',
             };
+            if ($state === self::WAIT_INSTALL) {
+                return [
+                    'state' => $state, 'version' => $version, 'installed_version' => null,
+                    'blocked' => false, 'reason' => $reason,
+                    'candidate_sha256' => is_string($info['package_sha256'] ?? null) ? $info['package_sha256'] : null,
+                    'candidate_update' => !empty($info['update']),
+                ];
+            }
             return ['state' => $state, 'version' => $version, 'installed_version' => null, 'blocked' => false, 'reason' => $reason];
         } catch (Throwable $error) {
             $reason = match ($state) {
@@ -789,13 +797,34 @@ class InstallLogic
         return $paths;
     }
 
-    private function assertSafePath(string $path): void
+    private function assertSafePath(string $path, ?bool $windows = null): void
     {
-        if (!str_starts_with($path, '/')) throw new ApiException('插件路径必须为绝对路径');
+        $windows ??= DIRECTORY_SEPARATOR === '\\';
+        if (str_contains($path, "\0")) throw new ApiException('插件路径不安全');
         $current = '';
-        foreach (explode('/', trim($path, '/')) as $part) {
+        if ($windows) {
+            $path = str_replace('\\', '/', $path);
+            if (preg_match('~^[a-z]:/~i', $path)) {
+                $current = substr($path, 0, 2);
+                $path = substr($path, 3);
+            } elseif (preg_match('~^//([^/]+)/([^/]+)(?:/|$)~', $path, $match)
+                && !in_array($match[1], ['.', '..', '?'], true)
+                && !in_array($match[2], ['.', '..'], true)) {
+                $current = '//' . $match[1] . '/' . $match[2];
+                $path = substr($path, strlen($match[0]));
+            } else {
+                throw new ApiException('插件路径必须为绝对路径');
+            }
+        } elseif (str_starts_with($path, '/')) {
+            $path = ltrim($path, '/');
+        } else {
+            throw new ApiException('插件路径必须为绝对路径');
+        }
+        if ($path === '') throw new ApiException('插件路径不安全');
+        foreach (explode('/', rtrim($path, '/')) as $part) {
             if ($part === '' || $part === '.' || $part === '..') throw new ApiException('插件路径不安全');
             $current .= '/' . $part;
+            clearstatcache(true, $current);
             if (is_link($current)) throw new ApiException('插件路径不能经过符号链接');
         }
     }
