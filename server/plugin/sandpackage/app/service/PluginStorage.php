@@ -191,13 +191,37 @@ final class PluginStorage
 
     private function assertDirectoryPath(string $path): void
     {
-        if (!str_starts_with($path, '/')) throw new ApiException('插件存储路径必须为绝对路径');
+        if (str_contains($path, "\0")) throw new ApiException('插件存储路径不安全');
         $current = '';
-        foreach (explode('/', trim($path, '/')) as $part) {
-            if ($part === '' || $part === '.' || $part === '..') throw new ApiException('插件存储路径不安全');
-            $current .= '/' . $part;
-            clearstatcache(true, $current);
-            if (is_link($current) || (file_exists($current) && !is_dir($current))) {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $path = str_replace('\\', '/', $path);
+            if (preg_match('~^[a-z]:/~i', $path)) {
+                $current = substr($path, 0, 2);
+                $path = substr($path, 3);
+            } elseif (preg_match('~^//([^/]+)/([^/]+)(?:/|$)~', $path, $match)
+                && !in_array($match[1], ['.', '..', '?'], true)
+                && !in_array($match[2], ['.', '..'], true)) {
+                $current = '//' . $match[1] . '/' . $match[2];
+                $path = substr($path, strlen($match[0]));
+            } else {
+                throw new ApiException('插件存储路径必须为绝对路径');
+            }
+        } elseif (str_starts_with($path, '/')) {
+            $path = ltrim($path, '/');
+        } else {
+            throw new ApiException('插件存储路径必须为绝对路径');
+        }
+        $directories = [$current . '/'];
+        if ($path !== '') {
+            foreach (explode('/', rtrim($path, '/')) as $part) {
+                if ($part === '' || $part === '.' || $part === '..') throw new ApiException('插件存储路径不安全');
+                $current .= '/' . $part;
+                $directories[] = $current;
+            }
+        }
+        foreach ($directories as $directory) {
+            clearstatcache(true, $directory);
+            if (is_link($directory) || (file_exists($directory) && !is_dir($directory))) {
                 throw new ApiException('插件存储目录或父路径不安全');
             }
         }
