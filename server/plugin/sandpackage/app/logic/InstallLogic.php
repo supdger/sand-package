@@ -273,8 +273,8 @@ class InstallLogic
 
     private function freshRecovery(): FreshInstallRecovery
     {
-        return new FreshInstallRecovery($this->appName, rtrim($this->appDir, '/'),
-            $this->getAllowedPath(), rtrim($this->installDir, '/'), $this->recoveryConnection(),
+        return new FreshInstallRecovery($this->appName, rtrim($this->appDir, '/\\'),
+            $this->getAllowedPath(), rtrim($this->installDir, '/\\'), $this->recoveryConnection(),
             $this->getInfo(...));
     }
 
@@ -444,13 +444,13 @@ class InstallLogic
 
     public function cleanupPending(): bool
     {
-        return AbnormalPluginCleanup::pending(rtrim($this->installDir, '/'), $this->appName);
+        return AbnormalPluginCleanup::pending(rtrim($this->installDir, '/\\'), $this->appName);
     }
 
     private function abnormalCleanup(): AbnormalPluginCleanup
     {
-        return new AbnormalPluginCleanup($this->appName, rtrim($this->appDir, '/'),
-            $this->getAllowedPath(), rtrim($this->installDir, '/'), $this->recoveryConnection());
+        return new AbnormalPluginCleanup($this->appName, rtrim($this->appDir, '/\\'),
+            $this->getAllowedPath(), rtrim($this->installDir, '/\\'), $this->recoveryConnection());
     }
 
     private function assertCleanupState(): void

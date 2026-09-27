@@ -448,7 +448,7 @@ final class FreshInstallRecovery
         $files = [];
         foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator($directory, \FilesystemIterator::SKIP_DOTS), \RecursiveIteratorIterator::SELF_FIRST) as $entry) {
             if ($entry->isLink()) throw new ApiException('恢复目录不能包含符号链接');
-            $name = substr($entry->getPathname(), strlen(rtrim($directory, '/')) + 1);
+            $name = substr($entry->getPathname(), strlen(rtrim($directory, '/\\')) + 1);
             if (in_array($name, $exclude, true)) continue;
             if (!$entry->isDir() && !$entry->isFile()) throw new ApiException('恢复目录包含特殊文件');
             $files[$name] = $entry->isDir() ? 'directory' : hash_file('sha256', $entry->getPathname());
@@ -459,10 +459,31 @@ final class FreshInstallRecovery
 
     private static function safePath(string $path): void
     {
+        if (str_contains($path, "\0")) throw new ApiException('恢复路径无效');
         $current = '';
-        foreach (explode('/', trim($path, '/')) as $part) {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $path = str_replace('\\', '/', $path);
+            if (preg_match('~^[a-z]:/~i', $path)) {
+                $current = substr($path, 0, 2);
+                $path = substr($path, 3);
+            } elseif (preg_match('~^//([^/]+)/([^/]+)(?:/|$)~', $path, $match)
+                && !in_array($match[1], ['.', '..', '?'], true)
+                && !in_array($match[2], ['.', '..'], true)) {
+                $current = '//' . $match[1] . '/' . $match[2];
+                $path = substr($path, strlen($match[0]));
+            } else {
+                throw new ApiException('恢复路径必须为绝对路径');
+            }
+        } elseif (str_starts_with($path, '/')) {
+            $path = ltrim($path, '/');
+        } else {
+            throw new ApiException('恢复路径必须为绝对路径');
+        }
+        if ($path === '') throw new ApiException('恢复路径无效');
+        foreach (explode('/', rtrim($path, '/')) as $part) {
             if ($part === '' || $part === '.' || $part === '..') throw new ApiException('恢复路径无效');
             $current .= '/' . $part;
+            clearstatcache(true, $current);
             if (is_link($current)) throw new ApiException('恢复路径不能经过符号链接');
         }
     }

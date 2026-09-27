@@ -1,0 +1,26 @@
+name: Windows native plugin paths
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/windows-native-path.yml'
+      - 'server/plugin/sandpackage/app/logic/InstallLogic.php'
+      - 'server/plugin/sandpackage/app/logic/RepositoryLogic.php'
+      - 'server/plugin/sandpackage/app/service/AbnormalPluginCleanup.php'
+      - 'server/plugin/sandpackage/app/service/FreshInstallRecovery.php'
+      - 'server/plugin/sandpackage/app/service/PluginStorage.php'
+      - 'server/tests/SandPackage/RepositoryInstallStateNativePathTest.php'
+  workflow_dispatch:
+
+jobs:
+  native-path:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: none
+      - name: Exercise native repository install state
+        run: php server/tests/SandPackage/RepositoryInstallStateNativePathTest.php

@@ -360,14 +360,20 @@
               <div class="repository-card-meta">
                 <span class="repository-card-author">{{ item.author }}</span>
                 <ElTooltip
-                  :disabled="!item.local.reason"
-                  :content="item.local.reason"
+                  :disabled="!item.local.reason && item.versions.length > 0"
+                  :content="item.versions.length ? item.local.reason : '尚无可安装版本'"
                   placement="top"
                 >
-                  <ElTag :type="repositoryLocalTagType(item.local)" size="small">
-                    {{ repositoryLocalLabel(item.local) }}
+                  <ElTag :type="item.versions.length ? repositoryLocalTagType(item.local) : 'info'" size="small">
+                    {{ item.versions.length ? repositoryLocalLabel(item.local) : '开发中' }}
                   </ElTag>
                 </ElTooltip>
+              </div>
+              <div
+                v-if="item.versions[0]?.action === 'manage' && !hasLocalManagementRow(item.app)"
+                class="version-action-reason"
+              >
+                {{ listError || item.local.reason || '本地管理列表没有此插件记录，请刷新状态' }}
               </div>
               <div class="repository-card-footer">
                 <div class="repository-card-secondary-actions">
@@ -862,7 +868,14 @@
       >
         <div class="repository-error-row">
           <span>{{ repositoryActionError }}</span>
-          <ElButton size="small" @click="goToPluginManagement">去插件管理</ElButton>
+          <ElButton
+            size="small"
+            @click="currentRepositoryPlugin && hasLocalManagementRow(currentRepositoryPlugin.app)
+              ? goToPluginManagement()
+              : refreshRepositoryState()"
+          >
+            {{ currentRepositoryPlugin && hasLocalManagementRow(currentRepositoryPlugin.app) ? '去插件管理' : '刷新状态' }}
+          </ElButton>
         </div>
       </ElAlert>
       <div class="version-list">
@@ -894,7 +907,7 @@
               :disabled="repositoryActionDisabled(currentRepositoryPlugin, item)"
               @click="handleRepositoryVersionAction(currentRepositoryPlugin, item)"
             >
-              {{ repositoryActionLabel(item.action) }}
+              {{ repositoryVersionActionLabel(currentRepositoryPlugin, item) }}
             </ElButton>
           </ElSpace>
         </div>
@@ -2326,16 +2339,23 @@
       incompatible: '版本不兼容'
     })[action]
 
+  const hasLocalManagementRow = (app: string): boolean =>
+    !listError.value && installList.value.some((row) => row.app === app)
+
   const repositoryVersionActionLabel = (
-    plugin: RepositoryPlugin,
+    plugin: RepositoryPlugin | null,
     item: RepositoryPluginVersion
   ): string => {
-    if (item.action === 'install' && plugin.local.state === 2) return '继续安装'
+    if (item.action === 'install' && plugin?.local.state === 2) return '继续安装'
     if (
       item.action === 'manage' &&
+      plugin !== null &&
       repositoryCandidateRows.value.some((row) => row.app === plugin.app)
     ) {
       return '上方处理本地包'
+    }
+    if (item.action === 'manage' && (!plugin || !hasLocalManagementRow(plugin.app))) {
+      return '刷新状态'
     }
     return repositoryActionLabel(item.action)
   }
@@ -2353,7 +2373,7 @@
   ): boolean => {
     if (item.action === 'manage') {
       return (
-        pluginOperationBusy.value ||
+        pluginOperationBusy.value || loading.value || repositoryLoading.value ||
         (plugin !== null && repositoryCandidateRows.value.some((row) => row.app === plugin.app))
       )
     }
@@ -2364,6 +2384,11 @@
   const goToPluginManagement = (): void => {
     repositoryVersionVisible.value = false
     activeTab.value = 'local'
+  }
+
+  const refreshRepositoryState = async (): Promise<void> => {
+    repositoryVersionVisible.value = false
+    await Promise.all([getList(), fetchRepositoryCatalog()])
   }
 
   const readRepositoryError = (error: unknown, fallback: string): string => {
@@ -2416,7 +2441,8 @@
     if (!plugin) return
     if (selectedItem.action === 'manage') {
       if (pluginOperationBusy.value) return
-      goToPluginManagement()
+      if (hasLocalManagementRow(plugin.app)) goToPluginManagement()
+      else await refreshRepositoryState()
       return
     }
     if (
