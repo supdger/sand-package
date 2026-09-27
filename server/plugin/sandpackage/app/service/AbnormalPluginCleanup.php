@@ -20,7 +20,7 @@ final class AbnormalPluginCleanup
         private string $root,
         private object $pdo,
     ) {
-        if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) || $candidate !== $root . '/' . $app) {
+        if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) || $candidate !== $root . DIRECTORY_SEPARATOR . $app) {
             throw new ApiException('异常清理的插件路径无效');
         }
         $this->journalPath = $root . '/cleanup/' . $app . '.json';
@@ -30,7 +30,7 @@ final class AbnormalPluginCleanup
     public static function pending(string $root, string $app): bool
     {
         if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app)) return false;
-        $path = $root . '/cleanup/' . $app . '.json';
+        $path = rtrim($root, '/\\') . '/cleanup/' . $app . '.json';
         try {
             self::assertSafePath($path);
         } catch (ApiException) {
