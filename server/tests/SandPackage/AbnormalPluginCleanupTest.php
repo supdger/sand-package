@@ -93,6 +93,12 @@ final class CleanupPdo
 
 function check(bool $passed, string $message): void { if (!$passed) throw new RuntimeException($message); echo "[PASS] $message\n"; }
 function rejects(callable $call, string $message): void { try { $call(); } catch (Throwable) { check(true, $message); return; } throw new RuntimeException('Not rejected: ' . $message); }
+$cleanupPath = new ReflectionMethod(AbnormalPluginCleanup::class, 'assertSafePath');
+$cleanupPath->invoke(null, 'C:\\sandadmin\\runtime\\sandpackage\\cleanup\\probe.json', true);
+$cleanupPath->invoke(null, '\\\\server\\share\\runtime\\sandpackage\\cleanup\\probe.json', true);
+check(true, 'Windows drive and UNC absolute cleanup paths are accepted');
+rejects(fn () => $cleanupPath->invoke(null, 'C:relative\\cleanup\\probe.json', true), 'drive-relative cleanup path is rejected');
+rejects(fn () => $cleanupPath->invoke(null, 'C:\\sandadmin\\..\\cleanup\\probe.json', true), 'traversal cleanup path is rejected');
 function setup(): array {
     global $fixtureRoot;
     $root = $fixtureRoot . '/case-' . bin2hex(random_bytes(4)); $candidate = $root . '/probe-package';

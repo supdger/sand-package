@@ -81,6 +81,8 @@ export interface RepositoryPluginLocal {
   state: number
   version: string | null
   installed_version: string | null
+  candidate_sha256?: string | null
+  candidate_update?: boolean
   blocked: boolean
   reason: string
 }

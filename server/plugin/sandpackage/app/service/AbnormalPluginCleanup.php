@@ -31,10 +31,10 @@ final class AbnormalPluginCleanup
     {
         if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app)) return false;
         $path = $root . '/cleanup/' . $app . '.json';
-        $current = '';
-        foreach (explode('/', trim($path, '/')) as $part) {
-            $current .= '/' . $part;
-            if ($part === '' || $part === '.' || $part === '..' || is_link($current)) return true;
+        try {
+            self::assertSafePath($path);
+        } catch (ApiException) {
+            return true;
         }
         if (!is_file($path)) return false;
         if (filesize($path) > 16777216) return true;
@@ -454,11 +454,36 @@ final class AbnormalPluginCleanup
     private function treeHash(string $path): ?string { $tree = FreshInstallRecovery::tree($path); return $tree === null ? null : self::hash($tree); }
     private function safe(string $path): void
     {
-        if (!str_starts_with($path, '/')) throw new ApiException('清理路径必须为绝对路径');
+        self::assertSafePath($path);
+    }
+    private static function assertSafePath(string $path, ?bool $windows = null): void
+    {
+        $windows ??= DIRECTORY_SEPARATOR === '\\';
+        if (str_contains($path, "\0")) throw new ApiException('清理路径无效');
         $current = '';
-        foreach (explode('/', trim($path, '/')) as $part) {
+        if ($windows) {
+            $path = str_replace('\\', '/', $path);
+            if (preg_match('~^[a-z]:/~i', $path)) {
+                $current = substr($path, 0, 2);
+                $path = substr($path, 3);
+            } elseif (preg_match('~^//([^/]+)/([^/]+)(?:/|$)~', $path, $match)
+                && !in_array($match[1], ['.', '..', '?'], true)
+                && !in_array($match[2], ['.', '..'], true)) {
+                $current = '//' . $match[1] . '/' . $match[2];
+                $path = substr($path, strlen($match[0]));
+            } else {
+                throw new ApiException('清理路径必须为绝对路径');
+            }
+        } elseif (str_starts_with($path, '/')) {
+            $path = ltrim($path, '/');
+        } else {
+            throw new ApiException('清理路径必须为绝对路径');
+        }
+        if ($path === '') throw new ApiException('清理路径无效');
+        foreach (explode('/', rtrim($path, '/')) as $part) {
             if ($part === '' || $part === '.' || $part === '..') throw new ApiException('清理路径无效');
-            $current .= '/' . $part; clearstatcache(true, $current);
+            $current .= '/' . $part;
+            clearstatcache(true, $current);
             if (is_link($current)) throw new ApiException('清理路径不能经过符号链接');
         }
     }

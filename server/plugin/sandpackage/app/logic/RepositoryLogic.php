@@ -64,6 +64,9 @@ final class RepositoryLogic
                 if (!in_array($release['action'] ?? null, ['install', 'upgrade'], true)) {
                     throw new ApiException((string) ($release['action_reason'] ?? '当前安装状态不能准备此插件版本'));
                 }
+                if ((new InstallLogic($app))->ordinaryStatus()['state'] === InstallLogic::WAIT_INSTALL) {
+                    throw new ApiException('此版本已下载，请从插件仓库继续安装');
+                }
                 $url = $this->releaseUrl($release);
             } catch (Throwable $error) { $complete(null, $error); return; }
             $this->client->get($url, 5242880, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
@@ -265,6 +268,13 @@ final class RepositoryLogic
         }
         if ($local['state'] === InstallLogic::UNINSTALLED) {
             return ['install', '未安装，可以安装此版本'];
+        }
+        if ($local['state'] === InstallLogic::WAIT_INSTALL
+            && empty($local['candidate_update'])
+            && $local['version'] === $release['version']
+            && is_string($local['candidate_sha256'] ?? null)
+            && hash_equals($release['sha256'], $local['candidate_sha256'])) {
+            return ['install', '此版本已下载，可以继续安装'];
         }
         if ($local['state'] !== InstallLogic::INSTALLED || $local['installed_version'] === null) {
             return ['manage', $local['reason'] !== '' ? $local['reason'] : '当前安装状态需要从已安装插件管理页继续'];

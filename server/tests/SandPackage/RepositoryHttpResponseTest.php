@@ -31,8 +31,8 @@ namespace {
     }
     function config(string $key, mixed $default = null): mixed {
         return [
-            'plugin.sandadmin.app.version' => '6.0.11',
-            'plugin.sandpackage.app.version' => '0.1.0',
+            'plugin.sandadmin.app.version' => '0.1.2',
+            'plugin.sandpackage.app.version' => '0.1.2',
         ][$key] ?? $default;
     }
     function json(mixed $data, int $options = 0): \support\Response {
@@ -160,6 +160,9 @@ namespace {
     file_put_contents($pendingDirectory . '/info.ini', "app = \"index-pending\"\nversion = \"1.0.0\"\nstate = 2\nlifecycle_driver = \"saipackage-pg-v1\"\n");
     $indexResponse = $controller->index(requestFixture());
     $indexData = json_decode($indexResponse->rawBody(), true, 32, JSON_THROW_ON_ERROR);
+    check($indexData['data']['version']['sandadmin_version']['notes'] === '正常'
+        && $indexData['data']['version']['sandpackage_version']['notes'] === '正常',
+        'SandAdmin and installer 0.1.2 do not trigger obsolete 6.0.0 minimum warnings');
     check($indexData['data']['data'][0]['state'] === 2
         && $indexData['data']['data'][0]['ordinary_actions_blocked'] === false, 'installed-plugin index keeps a healthy uploaded state 2 candidate actionable');
     unlink($pendingDirectory . '/info.ini');
