@@ -8,7 +8,7 @@ namespace {
     mkdir($root . '/runtime', 0700, true);
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path === '' ? '' : '/' . $path); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path === '' ? '' : '/' . $path); }
-    require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PluginStorage.php';
 
     function pass(bool $condition, string $message): void {
@@ -22,6 +22,34 @@ namespace {
     function record(string $root, string $app, string $version = '1.0.0'): void {
         mkdir($root . '/' . $app, 0700, true);
         file_put_contents($root . '/' . $app . '/info.ini', "app=\"$app\"\nversion=\"$version\"\nstate=1\n");
+    }
+
+    if (($argv[1] ?? '') === '--windows-paths') {
+        // Exercise Windows path parsing on any CI host; no Windows filesystem I/O is claimed.
+        define('plugin\\sandpackage\\app\\service\\DIRECTORY_SEPARATOR', '\\');
+        $storage = new \plugin\sandpackage\app\service\PluginStorage();
+        $missing = 'sandpackage-missing-' . bin2hex(random_bytes(8));
+        foreach ([
+            'D:\\htdocs\\' . $missing,
+            'D:/htdocs/' . $missing,
+            'D:\\htdocs/' . $missing . '\\storage',
+            '\\\\server\\share\\' . $missing,
+            '//server/share/' . $missing,
+            '\\\\server/share\\' . $missing,
+        ] as $path) {
+            pass($storage->hasData($path) === false, 'accept absent absolute Windows path: ' . $path);
+        }
+        foreach ([
+            '', 'relative/storage', 'D:storage', '\\storage', '/storage',
+            '\\\\server', '\\\\server\\', '\\\\.\\C:\\storage', '\\\\?\\C:\\storage',
+            'D:\\htdocs\\..\\storage', 'D:/htdocs/./storage', 'D:/htdocs//storage',
+            '\\\\server\\share\\..\\storage', '//server/../storage',
+            "D:/storage\0/unsafe",
+        ] as $path) {
+            reject(fn () => $storage->hasData($path), 'reject unsafe or relative Windows path: ' . json_encode($path));
+        }
+        echo "Windows path parsing fixture passed (host filesystem semantics remain native).\n";
+        exit(0);
     }
 
     $storage = new \plugin\sandpackage\app\service\PluginStorage();
