@@ -10,6 +10,7 @@ on:
       - 'server/plugin/sandpackage/app/service/FreshInstallRecovery.php'
       - 'server/plugin/sandpackage/app/service/PluginStorage.php'
       - 'server/tests/SandPackage/RepositoryInstallStateNativePathTest.php'
+      - 'server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php'
   workflow_dispatch:
 
 jobs:
@@ -22,5 +23,21 @@ jobs:
           php-version: '8.2'
           coverage: none
           tools: none
+          extensions: zip
       - name: Exercise native repository install state
         run: php server/tests/SandPackage/RepositoryInstallStateNativePathTest.php
+      - name: Exercise native ZIP staging and install preflight
+        run: php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php
+      - name: Fetch pinned public plugin regression artifact
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip'
+          Invoke-WebRequest 'https://github.com/supdger/sand-iam/releases/download/sand-iam-v0.7.3-preview-21cd4d6/sand-iam-0.7.3-v10-20260921T045559Z-release-unsigned.zip' -OutFile $artifact
+          if ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed') {
+            throw 'Public plugin regression artifact checksum mismatch'
+          }
+      - name: Exercise public plugin install preflight on native Windows
+        shell: pwsh
+        run: |
+          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

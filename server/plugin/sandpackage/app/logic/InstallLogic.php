@@ -793,7 +793,7 @@ class InstallLogic
                 $paths[$source] = $target;
             }
         }
-        if ($deployment && !isset($paths[$this->appDir . 'plugin/' . $this->appName])) throw new ApiException('插件后端目录缺失');
+        if ($deployment && !isset($paths[$this->appDir . 'plugin' . DIRECTORY_SEPARATOR . $this->appName])) throw new ApiException('插件后端目录缺失');
         return $paths;
     }
 
