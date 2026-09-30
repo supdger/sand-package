@@ -3,6 +3,7 @@
 namespace plugin\sandpackage\app\logic;
 
 use Throwable;
+use plugin\sandpackage\app\service\HostVersionCompatibility;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use FilesystemIterator;
@@ -3584,29 +3585,8 @@ class LegacyInstallLogic
     /** @param array<string,mixed> $info */
     private function assertHostSupportsUpgrade(array $info): void
     {
-        $support = $info['support'] ?? null;
-        $host = config('plugin.sandadmin.app.version');
-        if (!is_string($support) || !is_string($host)
-            || !preg_match('/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/', $host, $match)) {
-            throw new ApiException('升级候选兼容信息不完整或宿主版本非法，不能升级');
-        }
-        if (($match[4] ?? '') !== '' && array_filter(explode('.', $match[4]), static fn (string $part): bool => preg_match('/^\d+$/', $part) === 1 && preg_match('/^(0|[1-9]\d*)$/', $part) !== 1)) {
-            throw new ApiException('宿主版本非法，不能升级');
-        }
-        $tokens = explode('|', $support);
-        $valid = $tokens !== [] && !array_filter(
-            $tokens,
-            static fn (string $token): bool => preg_match('/^(?:\d+\.x|>=\d+\.\d+\.\d+)$/', $token) !== 1
-        );
-        $compatible = false;
-        foreach ($tokens as $token) {
-            if ($token === $match[1] . '.x'
-                || (str_starts_with($token, '>=') && version_compare($host, substr($token, 2), '>='))) {
-                $compatible = true;
-            }
-        }
-        if (!$valid || !$compatible) {
-            throw new ApiException('升级候选与当前宿主版本不兼容，不能升级');
+        if (!HostVersionCompatibility::matches($info['support'] ?? null, config('plugin.sandadmin.app.version'))) {
+            throw new ApiException('升级候选兼容信息无效或与当前宿主版本不兼容，不能升级', 400);
         }
     }
 

@@ -70,7 +70,9 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path !== '' ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path !== '' ? '/' . $path : ''); }
     function env(string $name, mixed $default = null): mixed { return $default; }
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.2' : null; }
     require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
@@ -90,7 +92,7 @@ namespace {
         $zip = new ZipArchive();
         $path = $root . '/candidate.zip';
         $zip->open($path, ZipArchive::CREATE);
-        foreach (['info.ini' => "app=probe-package\ntitle=Probe\nabout=Recovery fixture\nauthor=Test\nversion=1.0.0\n",
+        foreach (['info.ini' => "app=probe-package\ntitle=Probe\nabout=Recovery fixture\nauthor=Test\nversion=1.0.0\nsupport=0.1.x\n",
             'config.json' => '{}', 'install.sql' => $sql, 'update.sql' => '', 'uninstall.sql' => $uninstall,
             'plugin/probe-package/config/app.php' => "<?php return ['version'=>'1.0.0'];"] as $name => $contents) $zip->addFromString($name, $contents);
         $zip->close();

@@ -326,6 +326,7 @@ namespace {
 
     require dirname(__DIR__) . '/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__) . '/app/service/PluginStorage.php';
+    require dirname(__DIR__) . '/app/service/HostVersionCompatibility.php';
     require dirname(__DIR__) . '/app/logic/LegacyInstallLogic.php';
     // Keep this historical terminal/lease fixture bound to its legacy backend.
     class_alias(InstallLogic::class, 'plugin\\sandpackage\\app\\logic\\InstallLogic');

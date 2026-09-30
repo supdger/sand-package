@@ -12,6 +12,7 @@ use plugin\sandpackage\app\service\PostgresLifecycleSqlExecutor;
 use plugin\sandpackage\app\service\FreshInstallRecovery;
 use plugin\sandpackage\app\service\PluginStorage;
 use plugin\sandpackage\app\service\AbnormalPluginCleanup;
+use plugin\sandpackage\app\service\HostVersionCompatibility;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -205,12 +206,14 @@ class InstallLogic
      */
     public function install(bool $restart = true, ?string $confirmation = null): array
     {
+        $this->assertHostCompatibility($this->getInfo());
         $this->lock();
         try {
             $this->assertOrdinaryState();
             $state = $this->getInstallState();
             if ($state !== self::WAIT_INSTALL) throw new ApiException('插件不处于等待安装状态');
             $this->checkPackage();
+            $this->assertHostCompatibility($this->getInfo());
             $paths = $this->checkedPaths();
 
             echo '开始安装[' . $this->appName . ']' . PHP_EOL;
@@ -742,6 +745,14 @@ class InstallLogic
             throw new ApiException('插件标识无效或属于宿主保留目录');
         }
     }
+
+    private function assertHostCompatibility(array $info): void
+    {
+        if (!HostVersionCompatibility::matches($info['support'] ?? null, config('plugin.sandadmin.app.version'))) {
+            throw new ApiException('插件兼容范围无效或与当前宿主版本不兼容；未执行插件依赖或数据库脚本', 400);
+        }
+    }
+
 
     private function assertOrdinaryState(): void
     {

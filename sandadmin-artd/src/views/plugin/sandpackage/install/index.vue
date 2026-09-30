@@ -949,6 +949,7 @@
 </template>
 
 <script setup lang="ts">
+  import { checkVersionCompatibility } from './version-compatibility'
   import { ref, reactive, computed, onMounted, watch } from 'vue'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { ColumnOption } from '@/types'
@@ -1579,45 +1580,6 @@
       })
       current.errorMessage = readRecoveryErrorMessage(error, '重新执行升级未完成，请刷新后重试')
     }
-  }
-
-  const checkVersionCompatibility = (
-    support: string | undefined,
-    hostVersion: string | undefined
-  ): boolean => {
-    if (!support || !hostVersion) return false
-
-    const match = hostVersion.match(
-      /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
-    )
-    if (!match) return false
-
-    const prerelease = match[4]
-    if (
-      prerelease &&
-      prerelease.split('.').some((item) => /^\d+$/.test(item) && !/^(0|[1-9]\d*)$/.test(item))
-    ) {
-      return false
-    }
-
-    const supportTokens = support.split('|')
-    if (
-      supportTokens.length === 0 ||
-      supportTokens.some((token) => !/^(?:\d+\.x|>=\d+\.\d+\.\d+)$/.test(token))
-    ) {
-      return false
-    }
-    return supportTokens.some((token) => {
-      if (token === `${match[1]}.x`) return true
-      if (!token.startsWith('>=')) return false
-      const minimum = token.slice(2).split('.').map(Number)
-      const host = [Number(match[1]), Number(match[2]), Number(match[3])]
-      for (let i = 0; i < 3; i++) {
-        if (host[i] > minimum[i]) return true
-        if (host[i] < minimum[i]) return false
-      }
-      return !prerelease
-    })
   }
 
   const canInstallLocal = (record: SandpackageInstallRow): boolean =>

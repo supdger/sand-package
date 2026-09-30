@@ -47,7 +47,9 @@ namespace {
     function base_path($path = ''): string { global $root; return $root . '/server' . ($path ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path ? '/' . $path : ''); }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.2' : null; }
     require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
@@ -65,7 +67,7 @@ namespace {
         $path = $root . '/' . bin2hex(random_bytes(6)) . '.zip';
         $zip = new ZipArchive();
         $zip->open($path, ZipArchive::CREATE);
-        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nsupport = 0.1.x\nstate = 0\n");
         $zip->addFromString('config.json', json_encode($config, JSON_THROW_ON_ERROR));
         $zip->addFromString('install.sql', "CREATE TABLE neutral_sample (id bigint);\n");
         $zip->addFromString('update.sql', "ALTER TABLE neutral_sample ADD COLUMN label text;\n");

@@ -40,7 +40,9 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path !== '' ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path !== '' ? '/' . $path : ''); }
     function env(string $name, mixed $default = null): mixed { return $default; }
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.2' : null; }
     require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
@@ -78,7 +80,7 @@ namespace {
         file_put_contents(dirname(base_path()) . '/sandadmin-artd/package.json', '{"dependencies":{}}');
         ini_set('error_log', $root . '/expected-errors.log');
         $path = $root . '/fixture.zip'; $zip = new ZipArchive(); $zip->open($path, ZipArchive::CREATE);
-        foreach (['info.ini' => "app=host-probe\ntitle=Probe\nabout=Authorized isolated probe\nauthor=Test\nversion=1.0.0\n", 'config.json'=>'{}',
+        foreach (['info.ini' => "app=host-probe\ntitle=Probe\nabout=Authorized isolated probe\nauthor=Test\nversion=1.0.0\nsupport=0.1.x\n", 'config.json'=>'{}',
             'install.sql'=>$sql, 'update.sql'=>'', 'uninstall.sql'=>'DROP TABLE ' . SCHEMA . '.probe_one, ' . SCHEMA . '.probe_two RESTRICT;',
             'plugin/host-probe/config/app.php'=>"<?php return ['version'=>'1.0.0'];"] as $name=>$body) $zip->addFromString($name,$body);
         $zip->close(); (new InstallLogic())->uploadFromPath($path); return new InstallLogic('host-probe');

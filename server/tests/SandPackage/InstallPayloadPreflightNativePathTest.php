@@ -18,12 +18,14 @@ namespace {
     function base_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'server'; }
     function runtime_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'runtime'; }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.2' : null; }
     $server = dirname(__DIR__, 2);
     require $server . '/compat/Saithink/Saipackage/service/Server.php';
     require $server . '/compat/Saithink/Saipackage/service/Filesystem.php';
     require $server . '/plugin/sandpackage/app/service/PluginStorage.php';
     require $server . '/plugin/sandpackage/app/service/AbnormalPluginCleanup.php';
     require $server . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
+    require $server . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require $server . '/plugin/sandpackage/app/logic/InstallLogic.php';
 
     final class ConnectionBoundary extends \RuntimeException {}
@@ -41,7 +43,7 @@ namespace {
     function neutralPackage(string $path): void {
         $zip = new \ZipArchive();
         if ($zip->open($path, \ZipArchive::CREATE) !== true) throw new \RuntimeException('Cannot create fixture ZIP');
-        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nsupport = 0.1.x\nstate = 0\n");
         $zip->addFromString('config.json', '{}');
         foreach (['install', 'update', 'uninstall'] as $action) {
             $zip->addFromString($action . '.sql', '-- never executed');
