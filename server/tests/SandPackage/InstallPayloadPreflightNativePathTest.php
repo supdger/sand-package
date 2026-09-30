@@ -52,7 +52,7 @@ namespace {
         $zip->addFromString('sandadmin-artd/src/views/plugin/neutral-test/index.vue', '<template>Neutral</template>');
         $zip->close();
     }
-    function stageAndPreflight(string $zipPath, string $label, bool $missingBackend = false): void {
+    function stageAndPreflight(string $zipPath, string $label, bool $missingBackend = false, bool $expectIncompatible = false): void {
         global $host;
         mkdir(base_path(), 0700, true);
         $uploader = new InstallLogic();
@@ -72,10 +72,17 @@ namespace {
             $logic->install(false);
             throw new \RuntimeException('Preflight unexpectedly completed installation');
         } catch (ConnectionBoundary) {
-            verify(!$missingBackend && $logic->connectionCalls === 1, "$label: install passed path preflight and stopped at the database connection boundary");
+            verify(!$missingBackend && !$expectIncompatible && $logic->connectionCalls === 1, "$label: install passed path preflight and stopped at the database connection boundary");
         } catch (\plugin\sandadmin\exception\ApiException $error) {
-            verify($missingBackend && $error->getMessage() === '插件后端目录缺失' && $logic->connectionCalls === 0,
-                "$label: missing backend is rejected before the database connection boundary");
+            if ($expectIncompatible) {
+                verify($error->getCode() === 400
+                    && $error->getMessage() === '插件兼容范围无效或与当前宿主版本不兼容；未执行插件依赖或数据库脚本'
+                    && $logic->connectionCalls === 0,
+                    "$label: incompatible historical package is rejected before the database connection boundary");
+            } else {
+                verify($missingBackend && $error->getMessage() === '插件后端目录缺失' && $logic->connectionCalls === 0,
+                    "$label: missing backend is rejected before the database connection boundary");
+            }
         }
         verify(file_get_contents($candidate . '/info.ini') === $before
             && $logic->getInstallState() === InstallLogic::WAIT_INSTALL,
@@ -108,11 +115,16 @@ namespace {
                 || !hash_equals($argv[2], (string) hash_file('sha256', $argv[1]))) {
                 throw new \RuntimeException('External ZIP checksum does not match the pinned artifact');
             }
+            $expectation = $argv[3] ?? 'compatible';
+            if (!in_array($expectation, ['compatible', 'incompatible'], true)) {
+                throw new \RuntimeException('External ZIP compatibility expectation must be compatible or incompatible');
+            }
+            $expectIncompatible = $expectation === 'incompatible';
             $host = $fixture . DIRECTORY_SEPARATOR . 'public-package';
-            stageAndPreflight($argv[1], 'checksum-pinned public ZIP');
+            stageAndPreflight($argv[1], 'checksum-pinned public ZIP', false, $expectIncompatible);
             if (DIRECTORY_SEPARATOR === '\\') {
                 $host = str_replace('\\', '/', $fixture . DIRECTORY_SEPARATOR . 'public-mixed');
-                stageAndPreflight($argv[1], 'mixed-separator public ZIP');
+                stageAndPreflight($argv[1], 'mixed-separator public ZIP', false, $expectIncompatible);
             }
         }
         echo 'Native install payload preflight passed; database installation remains untested.' . PHP_EOL;
