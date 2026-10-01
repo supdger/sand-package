@@ -19,6 +19,7 @@ namespace think\facade {
                     return new class($sql) {
                         public function __construct(private string $sql) {}
                         public function fetchAll(int $mode): array {
+                            if (str_contains($this->sql, 'SELECT EXISTS(')) return [['present' => false]];
                             return str_contains($this->sql, 'current_database()') ? [['database' => 'recording-fixture', 'oid' => '1', 'username' => 'fixture', 'address' => null, 'port' => null, 'started' => 'fixed']] : [];
                         }
                     };
@@ -49,6 +50,17 @@ namespace {
     function env(string $key, mixed $default = null): mixed { return $default; }
     require dirname(__DIR__, 2) . '/vendor/autoload.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
+    $pathGuard = new ReflectionMethod(InstallLogic::class, 'assertSafePath');
+    $uninitialized = (new ReflectionClass(InstallLogic::class))->newInstanceWithoutConstructor();
+    $pathGuard->invoke($uninitialized, 'C:\\host\\plugin/mixed.php', true);
+    $pathGuard->invoke($uninitialized, '\\\\server\\share\\plugin\\file.php', true);
+    $pathGuard->invoke($uninitialized, realpath(sys_get_temp_dir()) . '/plugin/file.php');
+    foreach (['C:relative.php', 'C:\\host\\..\\escape.php', '\\\\server\\..\\file.php'] as $unsafePath) {
+        try {
+            $pathGuard->invoke($uninitialized, $unsafePath, true);
+            throw new RuntimeException('Unsafe Windows path was accepted: ' . $unsafePath);
+        } catch (\plugin\sandadmin\exception\ApiException) {}
+    }
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
 
@@ -132,11 +144,10 @@ namespace {
         if ($failure !== null) throw $failure;
         return $result;
     }
-    function writeInstallRecord(string $app, string $version, int $state, string $driver = 'saipackage-pg-v1', ?string $sha256 = null): void {
+    function writeInstallRecord(string $app, string $version, int $state, string $driver = 'saipackage-pg-v1'): void {
         $directory = runtime_path('sandpackage/' . $app);
         if (!is_dir($directory) && !mkdir($directory, 0755, true) && !is_dir($directory)) throw new RuntimeException('record fixture directory failed');
-        file_put_contents($directory . '/info.ini', "app = \"$app\"\nversion = \"$version\"\nstate = $state\nlifecycle_driver = \"$driver\"\n"
-            . ($sha256 === null ? '' : "package_sha256 = \"$sha256\"\n"));
+        file_put_contents($directory . '/info.ini', "app = \"$app\"\nversion = \"$version\"\nstate = $state\nlifecycle_driver = \"$driver\"\n");
     }
     function addCatalogVersion(array $plugin, string $version): array {
         $entry = $plugin['versions'][0];
@@ -146,13 +157,6 @@ namespace {
     }
 
     try {
-        $safePath = new \ReflectionMethod(InstallLogic::class, 'assertSafePath');
-        $pathLogic = new InstallLogic('neutral-sample');
-        $safePath->invoke($pathLogic, 'C:\\sandadmin\\server/plugin/neutral-sample/config/app.php', true);
-        $safePath->invoke($pathLogic, '\\\\server\\share\\server\\plugin\\neutral-sample', true);
-        check(true, 'Windows drive and UNC absolute paths pass installer safety validation');
-        rejected(fn() => $safePath->invoke($pathLogic, 'C:relative\\plugin', true), 'Windows drive-relative path is rejected');
-        rejected(fn() => $safePath->invoke($pathLogic, 'C:\\sandadmin\\..\\escape', true), 'Windows path traversal is rejected');
         file_put_contents(base_path('composer.json'), '{"name":"test/host","require":{}}');
         file_put_contents($root . '/sandadmin-artd/package.json', '{"name":"test-host","dependencies":{}}');
         $zip = file_get_contents(package('neutral-sample', '1.0.0'));
@@ -245,10 +249,8 @@ namespace {
         mkdir(base_path('plugin/legacy-status/config'), 0755, true);
         file_put_contents(base_path('plugin/legacy-status/config/app.php'), "<?php return ['version' => '1.0.0'];\n");
         $statusPlugins[] = manifest($statusZip, '1.0.0', 'legacy-status')['plugins'][0];
-        writeInstallRecord('pending-status', '1.0.0', InstallLogic::WAIT_INSTALL, 'saipackage-pg-v1', hash('sha256', $statusZip));
+        writeInstallRecord('pending-status', '1.0.0', InstallLogic::WAIT_INSTALL);
         $statusPlugins[] = manifest($statusZip, '1.0.0', 'pending-status')['plugins'][0];
-        writeInstallRecord('different-candidate', '1.0.0', InstallLogic::WAIT_INSTALL, 'saipackage-pg-v1', str_repeat('a', 64));
-        $statusPlugins[] = manifest($statusZip, '1.0.0', 'different-candidate')['plugins'][0];
         mkdir(runtime_path('sandpackage/occupied-status'), 0755, true);
         file_put_contents(runtime_path('sandpackage/occupied-status/junk.txt'), 'occupied');
         $statusPlugins[] = manifest($statusZip, '1.0.0', 'occupied-status')['plugins'][0];
@@ -276,9 +278,7 @@ namespace {
             check($byApp[$managedApp]['local']['blocked'] && $byApp[$managedApp]['versions'][0]['action'] === 'manage', $managedApp . ' remains fail-closed in repository catalog');
         }
         check(!$byApp['pending-status']['local']['blocked']
-            && $byApp['pending-status']['local']['candidate_sha256'] === hash('sha256', $statusZip)
-            && $byApp['pending-status']['versions'][0]['action'] === 'install', 'matching state 2 candidate can continue from repository');
-        check($byApp['different-candidate']['versions'][0]['action'] === 'manage', 'different candidate digest cannot be installed as repository release');
+            && $byApp['pending-status']['versions'][0]['action'] === 'manage', 'healthy state 2 remains available to the installed-plugin workflow');
         check($byApp['occupied-status']['local']['state'] === 5
             && str_contains($byApp['occupied-status']['local']['reason'], '目录已被占用'), 'state 5 has a specific occupied-directory reason');
         check($byApp['orphan-status']['local']['state'] === 6
@@ -292,10 +292,17 @@ namespace {
             && !is_dir(base_path('plugin/neutral-sample')), 'valid download stages an actionable state 2 candidate without deployment');
         $uploadedStatus = (new InstallLogic('neutral-sample'))->ordinaryStatus();
         check($uploadedStatus['state'] === 2 && !$uploadedStatus['blocked']
-            && $uploadedStatus['candidate_sha256'] === hash('sha256', $zip), 'fresh state 2 candidate exposes a matching release digest');
+            && $uploadedStatus['candidate_sha256'] === hash('sha256', $zip)
+            && !$uploadedStatus['candidate_update'], 'fresh state 2 candidate exposes its package digest for safe continuation');
+        $pendingCatalog = catalogFixture(clientFor($zip));
+        check($pendingCatalog['plugins'][0]['versions'][0]['action'] === 'install'
+            && str_contains($pendingCatalog['plugins'][0]['versions'][0]['action_reason'], '继续安装'),
+            'matching repository release continues the already staged candidate');
+        $differentZip = file_get_contents(package('neutral-sample', '1.0.0', [], ['README.md' => 'different package']));
+        check(catalogFixture(clientFor($differentZip))['plugins'][0]['versions'][0]['action'] === 'manage',
+            'same version with a different digest cannot pose as the repository release');
         check(Db::$sql === [], 'successful download executes no SQL');
         check($client->requests[count($client->requests)-1][0] === 'https://github.com/supdger/neutral-sample/releases/download/neutral-sample-v1.0.0/neutral-sample-1.0.0.zip', 'download URL derived only from validated plugin repository and manifest');
-        check(catalogFixture($client)['plugins'][0]['versions'][0]['action'] === 'install', 'downloaded matching release remains installable in repository');
         rejected(fn() => downloadFixture(clientFor($zip)), 'duplicate candidate cannot overwrite pending install');
         $installed = (new InstallLogic('neutral-sample'))->install(false);
         check($installed['state'] === 1 && is_file(base_path('plugin/neutral-sample/config/app.php')), 'downloaded candidate uses existing real file deployment');
@@ -303,6 +310,8 @@ namespace {
         $upgrade = file_get_contents(package('neutral-sample', '1.1.0'));
         $info = downloadFixture(clientFor($upgrade, '1.1.0'), '1.1.0');
         check($info['update'] === 1 && $info['upgrade_from_version'] === '1.0.0', 'repository version becomes upgrade candidate');
+        check(catalogFixture(clientFor($upgrade, '1.1.0'))['plugins'][0]['versions'][0]['action'] === 'manage',
+            'staged upgrade remains in management confirmation flow');
         Db::$sql = [];
         rejected(fn() => (new InstallLogic('neutral-sample'))->install(false, 'incorrect'), 'repository upgrade still needs existing confirmation');
         check(Db::$sql === [], 'failed confirmation does not execute SQL');

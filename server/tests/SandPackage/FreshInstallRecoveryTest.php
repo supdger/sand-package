@@ -54,7 +54,8 @@ namespace {
         }
         public function query(string $sql): object {
             $rows = [];
-            if (str_contains($sql, 'current_database()')) $rows = [['database' => $this->identity, 'oid' => '7', 'username' => 'fixture', 'address' => null, 'port' => null, 'started' => 'fixed']];
+            if (str_contains($sql, 'SELECT EXISTS(')) $rows = [['present' => false]];
+            elseif (str_contains($sql, 'current_database()')) $rows = [['database' => $this->identity, 'oid' => '7', 'username' => 'fixture', 'address' => null, 'port' => null, 'started' => 'fixed']];
             elseif (str_contains($sql, 'pg_event_trigger')) $rows = $this->eventTrigger ? [['evtname' => 'untrusted_event']] : [];
             elseif (str_contains($sql, 'c.relname=') && preg_match("/n.nspname='([^']+)' AND c.relname='([^']+)'/", $sql, $m)) {
                 $table = $this->tables[$m[1] . '.' . $m[2]] ?? null;
@@ -70,7 +71,11 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path !== '' ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path !== '' ? '/' . $path : ''); }
     function env(string $name, mixed $default = null): mixed { return $default; }
-    require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : null; }
+    require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
+    foreach (['HostPayloadManifest', 'HostPayloadPlan', 'HostPayloadOwnership', 'HostPayloadFreshFiles', 'HostPayloadChangeFiles', 'HostPayloadRuntimeChangeFiles', 'HostPayloadDependencyChange', 'HostPayloadCandidateRollback', 'HostPayloadLifecycleJournal'] as $component) {
+        require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/' . $component . '.php';
+    }
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
@@ -90,7 +95,7 @@ namespace {
         $zip = new ZipArchive();
         $path = $root . '/candidate.zip';
         $zip->open($path, ZipArchive::CREATE);
-        foreach (['info.ini' => "app=probe-package\ntitle=Probe\nabout=Recovery fixture\nauthor=Test\nversion=1.0.0\n",
+        foreach (['info.ini' => "app=probe-package\ntitle=Probe\nabout=Recovery fixture\nauthor=Test\nversion=1.0.0\nsupport=\">=0.1.0\"\n",
             'config.json' => '{}', 'install.sql' => $sql, 'update.sql' => '', 'uninstall.sql' => $uninstall,
             'plugin/probe-package/config/app.php' => "<?php return ['version'=>'1.0.0'];"] as $name => $contents) $zip->addFromString($name, $contents);
         $zip->close();
@@ -260,6 +265,51 @@ namespace {
     $inspect = $logic->inspectFreshInstallRecovery();
     $info = $logic->getInfo(); $info['title'] = 'drift'; $logic->setInfo([], $info);
     rejects(fn () => $logic->recoverFreshInstall('cleanup-fresh', $inspect['confirmation']), 'registry drift invalidates a previously confirmed action');
+
+    $logic = fixture('CREATE TABLE probe_one (id bigint);');
+    $candidate = base_path('storage/sandpackage/probe-package');
+    $payloadPath = 'app/Api/Probe/Handler.php';
+    $payload = "<?php namespace app\\Api\\Probe;\n";
+    if (!is_dir(dirname($candidate . '/' . $payloadPath))) {
+        mkdir(dirname($candidate . '/' . $payloadPath), 0700, true);
+    }
+    file_put_contents($candidate . '/' . $payloadPath, $payload);
+    file_put_contents($candidate . '/host-payload.json', json_encode([
+        'schema' => 1, 'app' => 'probe-package',
+        'files' => [['path' => $payloadPath, 'sha256' => hash('sha256', $payload)]],
+    ], JSON_THROW_ON_ERROR));
+    $tree = FreshInstallRecovery::tree($candidate, ['info.ini']);
+    $logic->setInfo(['candidate_tree_sha256' => hash('sha256', json_encode($tree, JSON_THROW_ON_ERROR))]);
+    UserMenuCache::$fail = true;
+    rejects(fn () => $logic->install(false), 'host payload post-copy failure is surfaced');
+    $inspect = $logic->inspectFreshInstallRecovery();
+    expect($inspect['phase'] === 'sql_committed_deploy_pending'
+        && is_file(base_path($payloadPath)), 'published host file participates in failed-install inspection');
+    $count = count(Db::$pdo->executed);
+    UserMenuCache::$fail = false;
+    $logic->recoverFreshInstall('continue-fresh', $inspect['confirmation']);
+    expect(count(Db::$pdo->executed) === $count
+        && $logic->getInstallState() === InstallLogic::INSTALLED,
+        'host payload recovery completes without replaying install SQL');
+
+    $logic = fixture("SELECT 'unterminated;");
+    $candidate = base_path('storage/sandpackage/probe-package');
+    $path = 'app/Api/Probe/Handler.php';
+    if (!is_dir(dirname($candidate . '/' . $path))) {
+        mkdir(dirname($candidate . '/' . $path), 0700, true);
+    }
+    file_put_contents($candidate . '/' . $path, $payload);
+    file_put_contents($candidate . '/host-payload.json', json_encode([
+        'schema' => 1, 'app' => 'probe-package',
+        'files' => [['path' => $path, 'sha256' => hash('sha256', $payload)]],
+    ], JSON_THROW_ON_ERROR));
+    $tree = FreshInstallRecovery::tree($candidate, ['info.ini']);
+    $logic->setInfo(['candidate_tree_sha256' => hash('sha256', json_encode($tree, JSON_THROW_ON_ERROR))]);
+    rejects(fn () => $logic->install(false), 'host payload pre-SQL failure is surfaced');
+    $inspect = $logic->inspectFreshInstallRecovery();
+    $logic->recoverFreshInstall('cleanup-fresh', $inspect['confirmation']);
+    expect($logic->inspectFreshInstallRecovery()['phase'] === 'cleaned'
+        && !is_file(base_path($path)), 'host payload cleanup remains inspectable after candidate archive');
 
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/command/Recover.php';
     $logic = fixture('BEGIN; CREATE TABLE probe_one (id bigint); COMMIT; BEGIN; BROKEN; COMMIT;');

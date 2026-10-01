@@ -11,7 +11,7 @@ use RecursiveIteratorIterator;
 /** Resolves the single persistent plugin registry root and safely discovers local plugins. */
 final class PluginStorage
 {
-    private const RESERVED = ['sandadmin', 'sandpackage', 'saiadmin', 'saipackage', 'locks', 'backups', 'archives', 'uploads', 'replacements', 'quarantine', 'fresh-recovery', 'runtime-restores', 'cleanup'];
+    private const RESERVED = ['sandadmin', 'sandpackage', 'saiadmin', 'saipackage', 'locks', 'backups', 'archives', 'uploads', 'replacements', 'quarantine', 'fresh-recovery', 'runtime-restores', 'cleanup', 'host-payload'];
 
     public function __construct(private ?string $runtime = null, private ?string $server = null)
     {
@@ -96,6 +96,19 @@ final class PluginStorage
             if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) || in_array($app, self::RESERVED, true)) continue;
             if (AbnormalPluginCleanup::pending($root, $app) && !isset($records[$app])) {
                 $records[$app] = ['app' => $app, 'title' => $app, 'version' => '', 'state' => 8];
+            }
+        }
+        $hostPayloadDirectory = $root . '/host-payload';
+        $this->assertDirectoryPath($hostPayloadDirectory);
+        foreach (glob($hostPayloadDirectory . '/*.lifecycle.json') ?: [] as $journal) {
+            if (!preg_match('/^([a-z][a-z0-9-]{1,63})\.lifecycle\.json$/D', basename($journal), $match)
+                || in_array($match[1], self::RESERVED, true)) continue;
+            $app = $match[1];
+            if (HostPayloadLifecycleJournal::pending($hostPayloadDirectory, $app) && !isset($records[$app])) {
+                $records[$app] = [
+                    'app' => $app, 'title' => $app, 'version' => '', 'state' => 8,
+                    '_error' => '受控宿主文件生命周期尚未完成，请检查操作记录',
+                ];
             }
         }
         return $records;

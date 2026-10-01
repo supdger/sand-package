@@ -4,6 +4,14 @@ use Webman\Route;
 
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'registerExisting']);
 Route::post('/app/sandpackage/install/registerExisting', [plugin\sandpackage\app\controller\InstallController::class, 'registerExisting']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectExistingSchemaAttach']);
+Route::post('/app/sandpackage/install/inspectExistingSchemaAttach', [plugin\sandpackage\app\controller\InstallController::class, 'inspectExistingSchemaAttach']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'attachExistingSchema']);
+Route::post('/app/sandpackage/install/attachExistingSchema', [plugin\sandpackage\app\controller\InstallController::class, 'attachExistingSchema']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectExistingSchemaAttachRecovery']);
+Route::post('/app/sandpackage/install/inspectExistingSchemaAttachRecovery', [plugin\sandpackage\app\controller\InstallController::class, 'inspectExistingSchemaAttachRecovery']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'continueExistingSchemaAttach']);
+Route::post('/app/sandpackage/install/continueExistingSchemaAttach', [plugin\sandpackage\app\controller\InstallController::class, 'continueExistingSchemaAttach']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'discardCandidate']);
 Route::post('/app/sandpackage/install/discardCandidate', [plugin\sandpackage\app\controller\InstallController::class, 'discardCandidate']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'verifyFailedUpgradeRecovery']);

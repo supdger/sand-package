@@ -254,8 +254,9 @@ final class GithubRepositoryClient implements RepositoryClient
                 $this->finish($request, null, new ApiException('GitHub 下载内容超过大小限制'));
                 continue;
             }
-            if (($info['result'] ?? CURLE_FAILED_INIT) !== CURLE_OK) {
-                $this->finish($request, null, new ApiException('GitHub 下载请求失败'));
+            $result = (int) ($info['result'] ?? CURLE_FAILED_INIT);
+            if ($result !== CURLE_OK) {
+                $this->finish($request, null, $this->transferError($result));
                 continue;
             }
             if ($this->isRedirect($statusCode)) {
@@ -337,6 +338,12 @@ final class GithubRepositoryClient implements RepositoryClient
             ];
             if (defined('CURLOPT_NETRC')) {
                 $options[CURLOPT_NETRC] = CURL_NETRC_IGNORED;
+            }
+            if (PHP_OS_FAMILY === 'Windows'
+                && defined('CURLOPT_SSL_OPTIONS')
+                && defined('CURLSSLOPT_NATIVE_CA')
+                && trim((string) ini_get('curl.cainfo')) === '') {
+                $options[CURLOPT_SSL_OPTIONS] = CURLSSLOPT_NATIVE_CA;
             }
             if (!curl_setopt_array($handle, $options)) {
                 throw new ApiException('无法配置 GitHub 下载连接');
@@ -504,6 +511,14 @@ final class GithubRepositoryClient implements RepositoryClient
     private function apiError(Throwable $error, string $fallback): ApiException
     {
         return $error instanceof ApiException ? $error : new ApiException($fallback);
+    }
+
+    private function transferError(int $result): ApiException
+    {
+        if ($result === CURLE_SSL_CACERT) {
+            return new ApiException('GitHub TLS 证书验证失败，请检查系统信任的根证书、HTTPS 代理证书或 PHP curl.cainfo 配置');
+        }
+        return new ApiException('GitHub 下载请求失败');
     }
 }
 

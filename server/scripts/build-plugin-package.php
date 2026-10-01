@@ -4,6 +4,9 @@
 declare(strict_types=1);
 
 use plugin\sandpackage\app\logic\RepositoryLogic;
+use plugin\sandpackage\app\service\HostPayloadManifest;
+use plugin\sandpackage\app\service\PluginDependencyPolicy;
+use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
 
 const PACKAGE_MAX_FILES = 2048;
 const PACKAGE_MAX_UNCOMPRESSED_BYTES = 67108864;
@@ -305,6 +308,7 @@ function verifyClosedZip(
     string $runtimeVendorRoot,
     bool $contractExpected,
     ?array $runtimeVendor,
+    array $bundles,
 ): void
 {
     $zip = new ZipArchive();
@@ -317,6 +321,12 @@ function verifyClosedZip(
     try {
         if ($zip->numFiles > PACKAGE_MAX_FILES) {
             fail('安装包文件数量超过 2048');
+        }
+        foreach ($bundles as $relative => $sha256) {
+            $raw = $zip->getFromName($relative);
+            if (!is_string($raw) || !hash_equals($sha256, hash('sha256', $raw))) {
+                fail('ZIP 中的插件依赖工件在打包期间发生变化：' . $relative);
+            }
         }
         $contractStat = $zip->statName('release-build-contract.json');
         if ($contractExpected) {
@@ -434,6 +444,8 @@ function main(array $argv): void
     if (!empty($config['sand_platform'])) {
         fail('config.json 包含非空 sand_platform，依赖旧 Sand 平台安装扩展，不能生成普通发布包');
     }
+    $bundles = PluginDependencyPolicy::verifyBundles($source, $config, $app);
+    PluginServiceCatalogPolicy::declaration($config, $app);
 
     $backend = $source . '/plugin/' . $app;
     assertNoSymlinkComponents($backend);
@@ -470,6 +482,24 @@ function main(array $argv): void
     foreach (PACKAGE_REQUIRED_ROOT_FILES as $name) {
         $files[] = ['source' => $source . '/' . $name, 'archive' => $name, 'size' => filesize($source . '/' . $name)];
     }
+    foreach ($bundles as $relative => $sha256) {
+        $files[] = [
+            'source' => $source . '/' . $relative,
+            'archive' => $relative,
+            'size' => filesize($source . '/' . $relative),
+        ];
+    }
+    if (file_exists($source . '/existing-schema.json') || is_link($source . '/existing-schema.json')) {
+        if (!is_file($source . '/existing-schema.json') || is_link($source . '/existing-schema.json')
+            || filesize($source . '/existing-schema.json') > 16384) {
+            fail('existing-schema.json 不是安全的重接清单');
+        }
+        $files[] = [
+            'source' => $source . '/existing-schema.json',
+            'archive' => 'existing-schema.json',
+            'size' => filesize($source . '/existing-schema.json'),
+        ];
+    }
     if (is_file($source . '/NOTICE')) {
         if (is_link($source . '/NOTICE')) {
             fail('NOTICE 不能是符号链接');
@@ -500,6 +530,13 @@ function main(array $argv): void
             fail('管理端载荷路径必须是普通目录');
         }
         addPayloadTree($frontend, 'sandadmin-artd/src/views/plugin/' . $app, $files);
+    }
+    $hostPayload = HostPayloadManifest::inspectDirectory($source, $app);
+    if ($hostPayload !== []) {
+        $manifest = $source . '/host-payload.json';
+        $files[] = ['source' => $manifest, 'archive' => 'host-payload.json', 'size' => filesize($manifest)];
+        addPayloadTree($source . '/app', 'app', $files);
+        addPayloadTree($source . '/config', 'config', $files);
     }
     if (count($files) > PACKAGE_MAX_FILES) {
         fail('安装包文件数量超过 2048');
@@ -549,7 +586,21 @@ function main(array $argv): void
             'plugin/' . $app . '/vendor',
             $contract !== null,
             $runtimeVendor,
+            $bundles,
         );
+        if ($hostPayload !== []) {
+            $closed = new ZipArchive();
+            if ($closed->open($zipTemp) !== true) {
+                fail('无法重新读取受控宿主载荷');
+            }
+            try {
+                if (HostPayloadManifest::inspectArchive($closed, $app) !== $hostPayload) {
+                    fail('受控宿主载荷在打包期间发生变化');
+                }
+            } finally {
+                $closed->close();
+            }
+        }
         $zipBytes = filesize($zipTemp);
         if ($zipBytes === false || $zipBytes > PACKAGE_MAX_ZIP_BYTES) {
             fail('ZIP 安装包超过 5 MiB');
@@ -604,12 +655,16 @@ function main(array $argv): void
     }
 }
 
-$autoload = dirname(__DIR__) . '/vendor/autoload.php';
+$autoload = getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__) . '/vendor/autoload.php';
 if (!is_file($autoload)) {
     fwrite(STDERR, "server/vendor/autoload.php 不存在，请先在 server/ 安装依赖\n");
     exit(1);
 }
 require $autoload;
+require_once dirname(__DIR__) . '/plugin/sandpackage/app/service/HostPayloadManifest.php';
+require_once dirname(__DIR__) . '/plugin/sandpackage/app/service/HostPayloadPlan.php';
+require_once dirname(__DIR__) . '/plugin/sandpackage/app/service/PluginDependencyPolicy.php';
+require_once dirname(__DIR__) . '/plugin/sandpackage/app/service/PluginServiceCatalogPolicy.php';
 
 try {
     main($argv);

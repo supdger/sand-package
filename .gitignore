@@ -5,3 +5,6 @@
 /sandadmin-artd/dist/
 /server/vendor/
 /server/runtime/
+
+/vendor/
+/composer.lock

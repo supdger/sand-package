@@ -22,7 +22,7 @@ class Recover extends Command
 
     protected function configure(): void
     {
-        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
+        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-host-upgrade|restore-host-upgrade|continue-host-upgrade|inspect-host-uninstall|restore-host-uninstall|continue-host-uninstall|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
             ->addArgument('app', InputArgument::REQUIRED, '插件标识')
             ->addOption('replacement-id', null, InputOption::VALUE_REQUIRED, '已预检替换候选标识')
             ->addOption('archive', null, InputOption::VALUE_REQUIRED, 'prepare 的本地 ZIP 文件')
@@ -47,7 +47,25 @@ class Recover extends Command
         try {
             $normal = new \plugin\sandpackage\app\logic\InstallLogic($app);
             $info = $normal->getInfo();
-            if (str_ends_with($action, '-fresh') || $action === 'inspect' && (($info['lifecycle_driver'] ?? '') === 'saipackage-pg-v1' || is_file((new PluginStorage())->root() . '/fresh-recovery/' . $app . '.json'))) {
+            if ($action === 'inspect-host-upgrade') {
+                $result = $normal->inspectHostUpgradeRecovery();
+            } elseif ($action === 'restore-host-upgrade') {
+                $result = $normal->recoverHostUpgradeRollback((string) $input->getOption('confirmation'));
+            } elseif ($action === 'continue-host-upgrade') {
+                $result = $normal->continueHostUpgrade(
+                    (string) $input->getOption('confirmation'), (bool) $input->getOption('restart'),
+                );
+            } elseif ($action === 'inspect-host-uninstall') {
+                $result = $normal->inspectHostUninstallRecovery();
+            } elseif ($action === 'restore-host-uninstall') {
+                $result = $normal->recoverHostUninstallRollback(
+                    (string) $input->getOption('confirmation'),
+                );
+            } elseif ($action === 'continue-host-uninstall') {
+                $result = $normal->continueHostUninstall(
+                    (string) $input->getOption('confirmation'), (bool) $input->getOption('restart'),
+                );
+            } elseif (str_ends_with($action, '-fresh') || $action === 'inspect' && (($info['lifecycle_driver'] ?? '') === 'saipackage-pg-v1' || is_file((new PluginStorage())->root() . '/fresh-recovery/' . $app . '.json'))) {
                 $planPath = $input->getOption('plan');
                 $plan = null;
                 if (is_string($planPath) && $planPath !== '') {
