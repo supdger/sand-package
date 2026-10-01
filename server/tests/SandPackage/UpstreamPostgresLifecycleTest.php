@@ -47,7 +47,10 @@ namespace {
     function base_path($path = ''): string { global $root; return $root . '/server' . ($path ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path ? '/' . $path : ''); }
     function env(string $key, mixed $default = null): mixed { return $default; }
-    require dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
+    foreach (['HostPayloadManifest', 'HostPayloadPlan', 'HostPayloadOwnership', 'HostPayloadFreshFiles', 'HostPayloadChangeFiles', 'HostPayloadRuntimeChangeFiles', 'HostPayloadUninstallFinalization', 'HostPayloadDependencyChange', 'HostPayloadCandidateRollback', 'HostPayloadLifecycleJournal'] as $component) {
+        require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/' . $component . '.php';
+    }
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PostgresLifecycleSqlExecutor.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
@@ -118,6 +121,17 @@ namespace {
     $zip->close();
     $logic->uploadFromPath($upgrade);
     check($logic->getInfo()['lifecycle_driver'] === 'saipackage-pg-v1', 'verified old installed state can stage an ordinary upgrade');
+    $staged = $logic->getInfo();
+    $backupPath = base_path('storage/sandpackage/backups/' . $staged['upgrade_backup_id']);
+    $oldTree = \plugin\sandpackage\app\service\FreshInstallRecovery::tree($backupPath);
+    check(is_array($oldTree)
+        && hash('sha256', json_encode($oldTree, JSON_THROW_ON_ERROR)) === $staged['upgrade_backup_tree_sha256'],
+        'staged upgrade identifies its exact old package backup');
+    $candidateSql = base_path('storage/sandpackage/neutral-sample/update.sql');
+    $originalSql = file_get_contents($candidateSql);
+    file_put_contents($candidateSql, "SELECT 'changed';\n");
+    rejected(fn() => $logic->checkPackage(), 'staged candidate change is rejected before SQL');
+    file_put_contents($candidateSql, $originalSql);
     Db::$sql = [];
     rejected(fn() => $logic->install(false, 'wrong'), 'upgrade confirmation mismatch executes no SQL');
     check(Db::$sql === [], 'confirmation rejection is side-effect free for SQL');

@@ -1,0 +1,344 @@
+[
+  {
+    "name": "below-min",
+    "support": ">=0.1.0",
+    "host": "0.0.9",
+    "expected": false
+  },
+  {
+    "name": "at-min",
+    "support": ">=0.1.0",
+    "host": "0.1.0",
+    "expected": true
+  },
+  {
+    "name": "above-min",
+    "support": ">=0.1.0",
+    "host": "0.1.2",
+    "expected": true
+  },
+  {
+    "name": "future-major-without-max",
+    "support": ">=0.1.0",
+    "host": "1.0.0",
+    "expected": true
+  },
+  {
+    "name": "prerelease-at-min",
+    "support": ">=0.1.0",
+    "host": "0.1.0-rc.1",
+    "expected": false
+  },
+  {
+    "name": "prerelease-above-min",
+    "support": ">=0.1.0",
+    "host": "0.1.1-rc.1",
+    "expected": true
+  },
+  {
+    "name": "build-ignored",
+    "support": ">=0.1.0",
+    "host": "0.1.0+build.01",
+    "expected": true
+  },
+  {
+    "name": "bounded-below-min",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.0.9",
+    "expected": false
+  },
+  {
+    "name": "bounded-at-min",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.1.0",
+    "expected": true
+  },
+  {
+    "name": "bounded-inside",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.1.2",
+    "expected": true
+  },
+  {
+    "name": "at-max",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.2.0",
+    "expected": true
+  },
+  {
+    "name": "prerelease-at-max",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.2.0-rc.1",
+    "expected": true
+  },
+  {
+    "name": "above-max",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "0.2.1",
+    "expected": false
+  },
+  {
+    "name": "future-major-with-max",
+    "support": ">=0.1.0 <=0.2.0",
+    "host": "1.0.0",
+    "expected": false
+  },
+  {
+    "name": "legacy-major",
+    "support": "6.x",
+    "host": "6.1.0",
+    "expected": true
+  },
+  {
+    "name": "legacy-major-not-reinterpreted",
+    "support": "6.x",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "major-zero-before-min",
+    "support": "0.x",
+    "host": "0.0.1",
+    "expected": true
+  },
+  {
+    "name": "minor-wildcard",
+    "support": "0.1.x",
+    "host": "0.1.2",
+    "expected": true
+  },
+  {
+    "name": "minor-wildcard-outside",
+    "support": "0.1.x",
+    "host": "0.2.0",
+    "expected": false
+  },
+  {
+    "name": "legacy-union",
+    "support": "6.x|7.x",
+    "host": "7.1.0",
+    "expected": true
+  },
+  {
+    "name": "mixed-union",
+    "support": "0.1.x|>=1.0.0 <=2.0.0",
+    "host": "1.1.0",
+    "expected": true
+  },
+  {
+    "name": "wildcard-prerelease",
+    "support": "0.1.x",
+    "host": "0.1.2-rc.1+build",
+    "expected": true
+  },
+  {
+    "name": "invalid-numeric-prerelease",
+    "support": "0.1.x",
+    "host": "0.1.2-01",
+    "expected": false
+  },
+  {
+    "name": "invalid-v-prefix",
+    "support": "0.1.x",
+    "host": "v0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-leading-zero-host",
+    "support": "0.1.x",
+    "host": "00.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-host-newline",
+    "support": "0.1.x",
+    "host": "0.1.2\n",
+    "expected": false
+  },
+  {
+    "name": "incomplete-host",
+    "support": "0.1.x",
+    "host": "0.1",
+    "expected": false
+  },
+  {
+    "name": "equal-bounds",
+    "support": ">=0.1.0 <=0.1.0",
+    "host": "0.1.0",
+    "expected": true
+  },
+  {
+    "name": "invalid-expression-1",
+    "support": "",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-2",
+    "support": ">=0.1",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-3",
+    "support": ">=00.1.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-4",
+    "support": ">=0.1.0 <=0.0.9",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-5",
+    "support": ">=0.1.0 <0.2.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-6",
+    "support": ">=0.1.0,<=0.2.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-7",
+    "support": ">=0.1.0 <=0.2.0 garbage",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-8",
+    "support": "0.1.x|garbage",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-9",
+    "support": "0.x|",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-10",
+    "support": "01.x",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-11",
+    "support": "0.01.x",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-12",
+    "support": ">=0.1.0-rc.1",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-13",
+    "support": ">=0.1.0+build",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-14",
+    "support": "*",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-15",
+    "support": "^0.1.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "invalid-expression-16",
+    "support": ">=0.1.0 >=0.2.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "missing-support",
+    "support": null,
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "missing-host",
+    "support": ">=0.1.0",
+    "host": null,
+    "expected": false
+  },
+  {
+    "name": "non-string-support",
+    "support": 1,
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "non-string-host",
+    "support": ">=0.1.0",
+    "host": 1,
+    "expected": false
+  },
+  {
+    "name": "branch-space-trim",
+    "support": " 0.1.x | >=1.0.0 ",
+    "host": "0.1.2",
+    "expected": true
+  },
+  {
+    "name": "range-tab",
+    "support": ">=0.1.0\t<=0.2.0",
+    "host": "0.1.2",
+    "expected": true
+  },
+  {
+    "name": "expression-newline",
+    "support": "0.x\n",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "range-newline",
+    "support": ">=0.1.0\n<=0.2.0",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "expression-return",
+    "support": ">=0.1.0\r",
+    "host": "0.1.2",
+    "expected": false
+  },
+  {
+    "name": "large-version-below-min",
+    "support": ">=9007199254740993.0.0",
+    "host": "9007199254740992.0.0",
+    "expected": false
+  },
+  {
+    "name": "large-version-at-min",
+    "support": ">=9007199254740993.0.0",
+    "host": "9007199254740993.0.0",
+    "expected": true
+  },
+  {
+    "name": "integer-overflow-bound",
+    "support": ">=9223372036854775808.0.0",
+    "host": "9223372036854775807.0.0",
+    "expected": false
+  },
+  {
+    "name": "arbitrary-size-above-max",
+    "support": ">=888888888888888888888888888888.0.0 <=888888888888888888888888888889.0.0",
+    "host": "999999999999999999999999999999.0.0",
+    "expected": false
+  }
+]

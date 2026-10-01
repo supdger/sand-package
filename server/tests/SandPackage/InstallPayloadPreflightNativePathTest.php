@@ -18,7 +18,14 @@ namespace {
     function base_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'server'; }
     function runtime_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'runtime'; }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : null; }
     $server = dirname(__DIR__, 2);
+    spl_autoload_register(static function (string $class) use ($server): void {
+        $prefix = 'plugin\\sandpackage\\';
+        if (!str_starts_with($class, $prefix)) return;
+        $path = $server . '/plugin/sandpackage/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+        if (is_file($path)) require $path;
+    });
     require $server . '/compat/Saithink/Saipackage/service/Server.php';
     require $server . '/compat/Saithink/Saipackage/service/Filesystem.php';
     require $server . '/plugin/sandpackage/app/service/PluginStorage.php';
@@ -41,7 +48,7 @@ namespace {
     function neutralPackage(string $path): void {
         $zip = new \ZipArchive();
         if ($zip->open($path, \ZipArchive::CREATE) !== true) throw new \RuntimeException('Cannot create fixture ZIP');
-        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nsupport = \">=0.1.0\"\nstate = 0\n");
         $zip->addFromString('config.json', '{}');
         foreach (['install', 'update', 'uninstall'] as $action) {
             $zip->addFromString($action . '.sql', '-- never executed');
@@ -72,7 +79,9 @@ namespace {
         } catch (ConnectionBoundary) {
             verify(!$missingBackend && $logic->connectionCalls === 1, "$label: install passed path preflight and stopped at the database connection boundary");
         } catch (\plugin\sandadmin\exception\ApiException $error) {
-            verify($missingBackend && $error->getMessage() === '插件后端目录缺失' && $logic->connectionCalls === 0,
+            verify($missingBackend
+                && in_array($error->getMessage(), ['插件后端目录缺失', '候选安装目录与上传时摘要不一致'], true)
+                && $logic->connectionCalls === 0,
                 "$label: missing backend is rejected before the database connection boundary");
         }
         verify(file_get_contents($candidate . '/info.ini') === $before

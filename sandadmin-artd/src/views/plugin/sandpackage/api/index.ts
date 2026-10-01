@@ -37,6 +37,35 @@ export interface AppInfo {
   ordinary_actions_blocked?: boolean
   recovery_reason?: string
   cleanup_pending?: boolean
+  existing_schema_available?: number
+  existing_schema_attached?: number
+  existing_schema_attach_pending?: number
+}
+
+export interface ExistingSchemaAttachProof {
+  app: string
+  version: string
+  database: string
+  package_sha256: string
+  candidate_tree_sha256: string
+  manifest_sha256: string
+  identity: string
+  schema: string
+  ledger_rows: number
+  table_count: number
+  token: string
+  confirmation: string
+}
+
+export interface ExistingSchemaAttachRecovery {
+  app: string
+  version: string
+  database: string
+  phase: 'not_started' | 'pending' | 'complete'
+  fingerprint: string
+  confirmation: string
+  sql_executed: false
+  restart_required: true
 }
 
 export interface VersionInfo {
@@ -81,8 +110,7 @@ export interface RepositoryPluginLocal {
   state: number
   version: string | null
   installed_version: string | null
-  candidate_sha256?: string | null
-  candidate_update?: boolean
+  candidate_sha256?: string
   blocked: boolean
   reason: string
 }
@@ -170,6 +198,34 @@ export default {
    */
   installApp(data: { appName: string; confirmation?: string }) {
     return request.post<AppInfo>({ url: '/app/sandpackage/install/install', data })
+  },
+
+  inspectExistingSchemaAttach(data: { appName: string; database: string }) {
+    return request.post<ExistingSchemaAttachProof>({
+      url: '/app/sandpackage/install/inspectExistingSchemaAttach',
+      data
+    })
+  },
+
+  attachExistingSchema(data: { appName: string; database: string; confirmation: string }) {
+    return request.post<AppInfo>({
+      url: '/app/sandpackage/install/attachExistingSchema',
+      data
+    })
+  },
+
+  inspectExistingSchemaAttachRecovery(data: { appName: string }) {
+    return request.post<ExistingSchemaAttachRecovery>({
+      url: '/app/sandpackage/install/inspectExistingSchemaAttachRecovery',
+      data
+    })
+  },
+
+  continueExistingSchemaAttach(data: { appName: string; confirmation: string }) {
+    return request.post<{ app: string; state: number; sql_executed: false; restart_required: true }>({
+      url: '/app/sandpackage/install/continueExistingSchemaAttach',
+      data
+    })
   },
 
   /**

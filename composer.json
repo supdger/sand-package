@@ -25,7 +25,22 @@
       "/sandadmin-artd/.env*",
       "/**/.DS_Store",
       "/**/.idea",
-      "/**/.vscode"
+      "/**/.vscode",
+      "/vendor",
+      "/composer.lock",
+      "/.github",
+      "/.gitattributes",
+      "/tests",
+      "/server/tests",
+      "/server/plugin/sandpackage/tests",
+      "/sandadmin-artd/**/failed-upgrade-recovery.behavior*",
+      "/sandadmin-artd/**/failed-upgrade-recovery.directives-mock.ts",
+      "/sandadmin-artd/**/failed-upgrade-recovery.http-mock.ts",
+      "/sandadmin-artd/**/failed-upgrade-recovery.index-mount.ts",
+      "/sandadmin-artd/**/failed-upgrade-recovery.index-viewport-entry.ts",
+      "/sandadmin-artd/**/failed-upgrade-recovery.tsconfig.json",
+      "/sandadmin-artd/**/failed-upgrade-recovery.viewport.html",
+      "/sandadmin-artd/**/failed-upgrade-recovery.vite.config.mts"
     ]
   }
 }

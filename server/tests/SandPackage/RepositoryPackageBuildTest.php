@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 use plugin\sandpackage\app\logic\RepositoryLogic;
 
-require dirname(__DIR__, 2) . '/vendor/autoload.php';
+require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
 
 function packageBuildExpect(bool $condition, string $message): void
 {
@@ -157,6 +157,7 @@ try {
     $app = 'repository-fixture';
     $version = '1.2.3';
     $source = packageBuildFixture($root, $app, $version);
+    packageBuildWrite($source . '/existing-schema.json', "{}\n");
     $executionMarker = $root . '/plugin-php-was-executed';
     packageBuildWrite(
         $source . '/plugin/' . $app . '/config/app.php',
@@ -182,10 +183,39 @@ try {
     $zip = new ZipArchive();
     packageBuildExpect($zip->open($zipPath) === true, 'opens the generated ZIP');
     foreach (['info.ini', 'config.json', 'install.sql', 'update.sql', 'uninstall.sql', 'README.md', 'LICENSE', 'NOTICE',
+        'existing-schema.json',
         'plugin/' . $app . '/config/app.php', 'sandadmin-artd/src/views/plugin/' . $app . '/index.vue'] as $name) {
         packageBuildExpect($zip->locateName($name) !== false, 'ZIP contains ' . $name);
     }
     $zip->close();
+
+    $hostApp = 'host-payload-fixture';
+    $hostSource = packageBuildFixture($root, $hostApp, '1.0.0');
+    $hostFiles = [
+        'app/service/Ping.php' => "<?php\nreturn true;\n",
+        'config/host_payload_fixture_ai.php' => "<?php\nreturn [];\n",
+    ];
+    $hostManifest = ['schema' => 1, 'app' => $hostApp, 'files' => []];
+    foreach ($hostFiles as $path => $contents) {
+        packageBuildWrite($hostSource . '/' . $path, $contents);
+        $hostManifest['files'][] = ['path' => $path, 'sha256' => hash('sha256', $contents)];
+    }
+    packageBuildWrite(
+        $hostSource . '/host-payload.json',
+        json_encode($hostManifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+    );
+    $hostOutput = $root . '/host-output';
+    mkdir($hostOutput, 0700);
+    $result = packageBuildRun([$hostSource, $hostOutput, 'v1.0.0', '6.0.0']);
+    packageBuildExpect($result['code'] === 0, 'builds a declared host app and config payload');
+    $hostZip = new ZipArchive();
+    packageBuildExpect($hostZip->open($hostOutput . '/' . $hostApp . '-1.0.0.zip') === true, 'opens the host payload ZIP');
+    foreach (['host-payload.json', ...array_keys($hostFiles)] as $path) {
+        packageBuildExpect($hostZip->locateName($path) !== false, 'ZIP contains ' . $path);
+    }
+    $hostZip->close();
+    packageBuildWrite($hostSource . '/app/service/Ping.php', "<?php\nreturn false;\n");
+    packageBuildExpectRejected($root, $hostSource, 'rejects a host file changed after declaration', '摘要不匹配');
 
     $mismatch = packageBuildFixture($root, 'version-mismatch', '2.0.0');
     packageBuildWrite($mismatch . '/plugin/version-mismatch/config/app.php', "<?php return ['version' => '2.0.1'];\n");
