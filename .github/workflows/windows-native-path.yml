@@ -36,8 +36,13 @@ jobs:
           if ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed') {
             throw 'Public plugin regression artifact checksum mismatch'
           }
-      - name: Exercise public plugin install preflight on native Windows
+      - name: Exercise legacy public plugin on matching 6.x host
         shell: pwsh
         run: |
-          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed
+          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed 6.0.11
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reject legacy public plugin on modern host before database connection
+        shell: pwsh
+        run: |
+          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed 0.1.0 --expect-incompatible
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
