@@ -178,6 +178,18 @@ final class GithubRepositoryClient implements RepositoryClient
         });
     }
 
+    /** Revalidate mutable catalogues without changing immutable release asset caching. */
+    private static function requestHeaders(string $url): array
+    {
+        $headers = ['Accept: application/octet-stream'];
+        if (parse_url($url, PHP_URL_HOST) === 'raw.githubusercontent.com'
+            && str_ends_with((string) parse_url($url, PHP_URL_PATH), '/catalog.json')) {
+            $headers[] = 'Cache-Control: no-cache';
+            $headers[] = 'Pragma: no-cache';
+        }
+        return $headers;
+    }
+
     private function stopTimer(): void
     {
         if ($this->timerId === null) {
@@ -315,7 +327,7 @@ final class GithubRepositoryClient implements RepositoryClient
                 CURLOPT_SSL_VERIFYPEER => true,
                 CURLOPT_SSL_VERIFYHOST => 2,
                 CURLOPT_USERAGENT => 'SandPackage-GitHub-Client/1.0',
-                CURLOPT_HTTPHEADER => ['Accept: application/octet-stream'],
+                CURLOPT_HTTPHEADER => self::requestHeaders($request->url),
                 CURLOPT_WRITEFUNCTION => static function (CurlHandle $unused, string $chunk) use ($request): int {
                     $length = strlen($chunk);
                     $request->receivedBytes += $length;
