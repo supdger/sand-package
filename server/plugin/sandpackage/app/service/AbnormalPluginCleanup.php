@@ -20,7 +20,8 @@ final class AbnormalPluginCleanup
         private string $root,
         private object $pdo,
     ) {
-        if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) || $candidate !== $root . DIRECTORY_SEPARATOR . $app) {
+        if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app)
+            || rtrim(str_replace('\\', '/', $candidate), '/') !== rtrim(str_replace('\\', '/', $root), '/') . '/' . $app) {
             throw new ApiException('异常清理的插件路径无效');
         }
         $this->journalPath = $root . '/cleanup/' . $app . '.json';
@@ -32,8 +33,8 @@ final class AbnormalPluginCleanup
         if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app)) return false;
         $path = rtrim($root, '/\\') . '/cleanup/' . $app . '.json';
         try {
-            self::assertSafePath($path);
-        } catch (ApiException) {
+            HostPayloadPlan::assertSafePath($path);
+        } catch (\RuntimeException) {
             return true;
         }
         if (!is_file($path)) return false;
@@ -454,37 +455,10 @@ final class AbnormalPluginCleanup
     private function treeHash(string $path): ?string { $tree = FreshInstallRecovery::tree($path); return $tree === null ? null : self::hash($tree); }
     private function safe(string $path): void
     {
-        self::assertSafePath($path);
-    }
-    private static function assertSafePath(string $path, ?bool $windows = null): void
-    {
-        $windows ??= DIRECTORY_SEPARATOR === '\\';
-        if (str_contains($path, "\0")) throw new ApiException('清理路径无效');
-        $current = '';
-        if ($windows) {
-            $path = str_replace('\\', '/', $path);
-            if (preg_match('~^[a-z]:/~i', $path)) {
-                $current = substr($path, 0, 2);
-                $path = substr($path, 3);
-            } elseif (preg_match('~^//([^/]+)/([^/]+)(?:/|$)~', $path, $match)
-                && !in_array($match[1], ['.', '..', '?'], true)
-                && !in_array($match[2], ['.', '..'], true)) {
-                $current = '//' . $match[1] . '/' . $match[2];
-                $path = substr($path, strlen($match[0]));
-            } else {
-                throw new ApiException('清理路径必须为绝对路径');
-            }
-        } elseif (str_starts_with($path, '/')) {
-            $path = ltrim($path, '/');
-        } else {
-            throw new ApiException('清理路径必须为绝对路径');
-        }
-        if ($path === '') throw new ApiException('清理路径无效');
-        foreach (explode('/', rtrim($path, '/')) as $part) {
-            if ($part === '' || $part === '.' || $part === '..') throw new ApiException('清理路径无效');
-            $current .= '/' . $part;
-            clearstatcache(true, $current);
-            if (is_link($current)) throw new ApiException('清理路径不能经过符号链接');
+        try {
+            HostPayloadPlan::assertSafePath($path);
+        } catch (\RuntimeException) {
+            throw new ApiException('清理路径无效或经过符号链接');
         }
     }
     private function rows(string $sql): array

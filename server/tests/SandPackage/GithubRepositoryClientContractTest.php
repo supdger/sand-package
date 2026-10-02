@@ -90,12 +90,31 @@ githubTransportExpect(
 );
 GithubRepositoryClient::shared()->close();
 
+$transferError = (new ReflectionClass(GithubRepositoryClient::class))->getMethod('transferError');
+$client = new GithubRepositoryClient();
+$certificateError = $transferError->invoke($client, CURLE_SSL_CACERT);
+githubTransportExpect(
+    $certificateError instanceof ApiException
+        && str_contains($certificateError->getMessage(), '证书验证失败'),
+    'reports certificate verification failures without hiding errno 60',
+);
+$otherError = $transferError->invoke($client, CURLE_OPERATION_TIMEDOUT);
+githubTransportExpect(
+    $otherError instanceof ApiException
+        && $otherError->getMessage() === 'GitHub 下载请求失败',
+    'keeps the existing message for other cURL failures',
+);
+
 $source = file_get_contents(dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/GithubRepositoryClient.php');
 githubTransportExpect(is_string($source), 'loads the transport source for security contract checks');
 foreach ([
     'CURLOPT_FOLLOWLOCATION => false' => 'manual redirect handling stays enabled',
     'CURLOPT_SSL_VERIFYPEER => true' => 'TLS peer verification stays enabled',
     'CURLOPT_SSL_VERIFYHOST => 2' => 'TLS hostname verification stays enabled',
+    "PHP_OS_FAMILY === 'Windows'" => 'native CA is limited to Windows',
+    "defined('CURLSSLOPT_NATIVE_CA')" => 'native CA requires runtime support',
+    "ini_get('curl.cainfo')" => 'explicit curl.cainfo remains authoritative',
+    '$options[CURLOPT_SSL_OPTIONS] = CURLSSLOPT_NATIVE_CA' => 'native CA is enabled when eligible',
     'private const MAX_REDIRECTS = 3' => 'redirects stay bounded to three',
     'private const MAX_CONCURRENCY = 2' => 'per-process concurrency stays bounded to two',
     'private const MAX_TOTAL_REQUESTS = 8' => 'active and pending requests stay bounded to eight',

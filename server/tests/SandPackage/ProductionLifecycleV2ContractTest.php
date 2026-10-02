@@ -72,7 +72,6 @@ namespace {
     require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/FailedUpgradeRecoveryAudit.php';
     require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/FailedUpgradeRecoveryFileTransaction.php';
     require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/FailedUpgradeRecoveryCoordinator.php';
-    require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/LegacyInstallLogic.php';
 
     function runtime_path(): string { return $GLOBALS['sandpackage_fixture_root'] . '/runtime'; }

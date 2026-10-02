@@ -19,6 +19,8 @@ final class FreshInstallRecovery
         private string $root,
         private object $pdo,
         private $readInfo,
+        private ?HostPayloadFreshFiles $hostPayload = null,
+        private ?HostPayloadDependencyChange $dependencyChange = null,
     ) {
         $this->journalPath = $root . '/fresh-recovery/' . $app . '.json';
         self::safePath($this->journalPath);
@@ -109,7 +111,11 @@ final class FreshInstallRecovery
             default => ['manual-cleanup-fresh'],
         };
         if ($plan !== null) $this->validatePlan($plan, $binding);
-        $fingerprint = self::hash(['app' => $this->app, 'binding' => $binding, 'journal' => $record, 'plan' => $plan]);
+        $dependency = $this->dependencyChange?->hasJournal()
+            ? $this->dependencyChange->inspectSnapshot() : null;
+        $fingerprint = self::hash(['app' => $this->app, 'binding' => $binding, 'journal' => $record,
+            'plan' => $plan, 'host_payload' => $this->hostPayload?->snapshot(),
+            'dependency_change' => $dependency]);
         return ['app' => $this->app, 'version' => ($this->readInfo)()['version'], 'phase' => $phase,
             'binding' => $binding, 'fingerprint' => $fingerprint, 'actions' => $actions,
             'confirmation' => strtoupper($actions[0]) . ' ' . $this->app . ' ' . $fingerprint,
@@ -156,7 +162,13 @@ final class FreshInstallRecovery
             foreach ($this->paths as $target) {
                 if (file_exists($target)) throw new ApiException('清理要求运行部署目录不存在；不得猜测删除运行文件');
             }
+            $this->hostPayload?->assertCleanupSafe();
             if ($action === 'manual-cleanup-fresh') $this->cleanupDatabase($plan, $inspection['binding']['database']);
+            $this->hostPayload?->cleanupIfStarted();
+            if ($this->dependencyChange?->hasJournal()) {
+                $this->dependencyChange->restore();
+                $this->dependencyChange->archiveFinished();
+            }
             $record = $this->journalRequired();
             $record['cleanup_stage'] = 'archive_pending';
             $record['cleanup_expected_database'] ??= $inspection['binding']['database'];
@@ -195,7 +207,8 @@ final class FreshInstallRecovery
         $database = $this->database();
         if (($record['cleanup_stage'] ?? '') === 'commit_intent' && $database === $record['binding']['database']) return null;
         if ($database !== ($record['cleanup_expected_database'] ?? null)) throw new ApiException('清理提交未能确认或数据库再次变化；必须人工核对');
-        $fingerprint = self::hash(['app' => $this->app, 'record' => $record, 'database' => $database, 'directory' => $directory]);
+        $fingerprint = self::hash(['app' => $this->app, 'record' => $record, 'database' => $database,
+            'directory' => $directory, 'host_payload' => $this->hostPayload?->snapshot()]);
         return ['app' => $this->app, 'phase' => 'sql_commit_unknown', 'cleanup_stage' => $record['cleanup_stage'],
             'binding' => $record['binding'], 'fingerprint' => $fingerprint, 'actions' => ['finish-cleanup-fresh'],
             'confirmation' => 'FINISH-CLEANUP-FRESH ' . $this->app . ' ' . $fingerprint,

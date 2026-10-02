@@ -9,7 +9,17 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path === '' ? '' : '/' . $path); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path === '' ? '' : '/' . $path); }
     require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadManifest.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadPlan.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadLifecycleJournal.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadOwnership.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadChangeFiles.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadRemovalFiles.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadUninstallFinalization.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/HostPayloadCandidateRollback.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/PluginStorage.php';
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
 
     function pass(bool $condition, string $message): void {
         if (!$condition) throw new RuntimeException($message);
@@ -135,6 +145,44 @@ namespace {
     file_put_contents($pendingPath, json_encode(['app' => 'orphan-cleanup', 'phase' => 'cleaned']));
     pass(!isset($storage->managedRecords()['orphan-cleanup']), 'finished cleanup no longer appears in plugin inventory');
     pass((new \plugin\sandpackage\app\logic\InstallLogic('orphan-cleanup'))->getInstallState() === 0, 'finished cleanup permits uninstalled state');
+    $hostPayloadDirectory = runtime_path('sandpackage/host-payload');
+    $journal = new \plugin\sandpackage\app\service\HostPayloadLifecycleJournal(
+        $hostPayloadDirectory, 'orphan-host-files', 'uninstall', str_repeat('a', 64),
+    );
+    $journal->begin();
+    $journal->observe('sql_committed_deploy_pending');
+    $orphanPath = 'app/Api/Neutral/Orphan.php';
+    $orphanBody = "<?php // orphan\n";
+    mkdir(dirname(base_path($orphanPath)), 0700, true);
+    file_put_contents(base_path($orphanPath), $orphanBody);
+    $orphanOwned = [['path' => $orphanPath, 'sha256' => hash('sha256', $orphanBody)]];
+    file_put_contents($hostPayloadDirectory . '/orphan-host-files.owned.json', json_encode(
+        ['schema' => 1, 'app' => 'orphan-host-files', 'files' => $orphanOwned], JSON_THROW_ON_ERROR,
+    ));
+    $orphanChange = new \plugin\sandpackage\app\service\HostPayloadChangeFiles(
+        base_path(), $hostPayloadDirectory, runtime_path('sandpackage/orphan-host-files'),
+        'orphan-host-files', [],
+    );
+    $orphanChange->begin();
+    $orphanChange->apply();
+    pass(($storage->managedRecords()['orphan-host-files']['state'] ?? null) === 8,
+        'unfinished host-file uninstall remains visible after candidate deletion');
+    pass((new \plugin\sandpackage\app\logic\InstallLogic('orphan-host-files'))->getInstallState() === 8,
+        'unfinished host-file uninstall blocks ordinary reinstall without candidate');
+    $inspection = (new \plugin\sandpackage\app\logic\InstallLogic('orphan-host-files'))->inspectHostUninstallRecovery();
+    pass($inspection['sql_phase'] === 'sql_committed_deploy_pending'
+        && $inspection['candidate_present'] === false
+        && $inspection['actions'] === [],
+        'orphaned host-file uninstall has a read-only fingerprint without inventing recovery actions');
+    require dirname(__DIR__, 2) . '/plugin/sandpackage/app/command/Recover.php';
+    $tester = new \Symfony\Component\Console\Tester\CommandTester(
+        new \plugin\sandpackage\app\command\Recover(),
+    );
+    $status = $tester->execute(['action' => 'inspect-host-uninstall', 'app' => 'orphan-host-files']);
+    $cliInspection = json_decode(trim($tester->getDisplay()), true);
+    pass($status === 0 && ($cliInspection['fingerprint'] ?? null) === $inspection['fingerprint'],
+        'official recovery CLI exposes the orphaned uninstall inspection');
+    pass(!isset($storage->managedRecords()['host-payload']), 'host-payload journal directory is not a plugin');
     file_put_contents(base_path('storage/sandpackage/unknown.lock'), 'not a disposable lock');
     reject(fn () => $storage->root(), 'unknown non-empty lock file counts as data and detects dual roots');
     echo "Plugin storage fixture passed (temporary filesystem only; no existing host data or database changed).\n";

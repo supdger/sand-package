@@ -123,11 +123,9 @@ class Server
     public static function installByRelation($pathRelation): void
     {
         foreach ($pathRelation as $source => $dest) {
-            if ($pos = strrpos($dest, '/')) {
-                $parent_dir = substr($dest, 0, $pos);
-                if (!is_dir($parent_dir)) {
-                    mkdir($parent_dir, 0777, true);
-                }
+            $parent_dir = dirname($dest);
+            if (!is_dir($parent_dir)) {
+                mkdir($parent_dir, 0777, true);
             }
             copy_dir($source, $dest, true);
         }

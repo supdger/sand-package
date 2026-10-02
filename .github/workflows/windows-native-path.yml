@@ -6,10 +6,14 @@ on:
       - '.github/workflows/windows-native-path.yml'
       - 'server/plugin/sandpackage/app/logic/InstallLogic.php'
       - 'server/plugin/sandpackage/app/logic/RepositoryLogic.php'
+      - 'server/plugin/sandpackage/app/service/PluginVersion.php'
+      - 'server/plugin/sandpackage/app/service/GithubRepositoryClient.php'
       - 'server/plugin/sandpackage/app/service/AbnormalPluginCleanup.php'
       - 'server/plugin/sandpackage/app/service/FreshInstallRecovery.php'
       - 'server/plugin/sandpackage/app/service/PluginStorage.php'
       - 'server/tests/SandPackage/RepositoryInstallStateNativePathTest.php'
+      - 'server/tests/SandPackage/RepositoryRecommendationTest.php'
+      - 'server/tests/SandPackage/RepositoryUpgradeVersionParityTest.php'
       - 'server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php'
   workflow_dispatch:
 
@@ -24,6 +28,10 @@ jobs:
           coverage: none
           tools: none
           extensions: zip
+      - name: Exercise latest compatible repository recommendations
+        run: php server/tests/SandPackage/RepositoryRecommendationTest.php
+      - name: Exercise repository and upload version parity
+        run: php server/tests/SandPackage/RepositoryUpgradeVersionParityTest.php
       - name: Exercise native repository install state
         run: php server/tests/SandPackage/RepositoryInstallStateNativePathTest.php
       - name: Exercise native ZIP staging and install preflight
@@ -36,9 +44,13 @@ jobs:
           if ((Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed') {
             throw 'Public plugin regression artifact checksum mismatch'
           }
-      - name: Reject historical 6.x public plugin on a 0.1.2 Windows host
+      - name: Exercise legacy public plugin on matching 6.x host
         shell: pwsh
         run: |
-          # The pinned historical artifact declares 6.x; preserve its metadata and expect host rejection.
-          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed incompatible
+          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed 6.0.11
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reject legacy public plugin on modern host before database connection
+        shell: pwsh
+        run: |
+          php server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php (Join-Path $env:RUNNER_TEMP 'sand-iam-0.7.3.zip') a3648de10a47c1de263a24c5db5885c0199ab76efd28a1f41fcb7a99e92954ed 0.1.0 --expect-incompatible
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -172,6 +172,55 @@ class InstallController extends BaseController
         return $this->success($info);
     }
 
+    /** Inspect an uploaded candidate against the existing sandai schema. */
+    public function inspectExistingSchemaAttach(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('重接预检仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够预检现有 schema', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        $database = trim((string) $request->post('database', ''));
+        if ($appName === '' || $database === '') throw new ApiException('请填写插件标识和数据库名', 400);
+        return $this->success((new InstallLogic($appName))->inspectExistingSchemaAttach($database), '现有 schema 重接预检完成');
+    }
+
+    /** Install package files and register the plugin without replaying install.sql. */
+    public function attachExistingSchema(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('现有 schema 重接仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够重接现有 schema', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        $database = trim((string) $request->post('database', ''));
+        $confirmation = (string) $request->post('confirmation', '');
+        if ($appName === '' || $database === '' || $confirmation === '') throw new ApiException('请填写插件标识、数据库名和完整重接确认内容', 400);
+        $info = (new InstallLogic($appName))->install(false, $confirmation, true, $database);
+        UserMenuCache::clearMenuCache();
+        return $this->success($info, '插件已重接现有 schema');
+    }
+
+    /** Read-only inspection of a failed existing-schema attachment. */
+    public function inspectExistingSchemaAttachRecovery(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('重接恢复检查仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够检查重接恢复', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        return $this->success((new InstallLogic($appName))->inspectExistingSchemaAttachRecovery(), '重接恢复现场已核对');
+    }
+
+    /** Resume only checksum-verified file deployment; existing database data is untouched. */
+    public function continueExistingSchemaAttach(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('重接恢复仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够继续重接恢复', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        $confirmation = (string) $request->post('confirmation', '');
+        if ($appName === '' || $confirmation === '') throw new ApiException('请填写插件标识和完整恢复确认内容', 400);
+        return $this->success(
+            (new InstallLogic($appName))->continueExistingSchemaAttach($confirmation),
+            '现有 schema 重接文件已恢复',
+        );
+    }
+
     /**
      * Formally register a plugin that is already deployed on this host.
      * This endpoint never imports SQL or deploys package files.

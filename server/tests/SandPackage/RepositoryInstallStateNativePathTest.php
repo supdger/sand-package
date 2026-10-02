@@ -35,6 +35,12 @@ namespace {
     }
     function env(string $key, mixed $default = null): mixed { return $default; }
     $source = dirname(__DIR__, 2) . '/plugin/sandpackage/app/';
+    spl_autoload_register(static function (string $class) use ($source): void {
+        $prefix = 'plugin\\sandpackage\\app\\';
+        if (!str_starts_with($class, $prefix)) return;
+        $path = $source . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+        if (is_file($path)) require $path;
+    });
     require $source . 'service/PluginStorage.php';
     require $source . 'service/AbnormalPluginCleanup.php';
     require $source . 'service/FreshInstallRecovery.php';

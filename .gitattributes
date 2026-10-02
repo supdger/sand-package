@@ -1,0 +1,13 @@
+/.github export-ignore
+/.gitattributes export-ignore
+/tests export-ignore
+/server/tests export-ignore
+/server/plugin/sandpackage/tests export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.behavior* export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.directives-mock.ts export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.http-mock.ts export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.index-mount.ts export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.index-viewport-entry.ts export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.tsconfig.json export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.viewport.html export-ignore
+/sandadmin-artd/**/failed-upgrade-recovery.vite.config.mts export-ignore

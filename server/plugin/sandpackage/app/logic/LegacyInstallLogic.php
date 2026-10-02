@@ -3,7 +3,6 @@
 namespace plugin\sandpackage\app\logic;
 
 use Throwable;
-use plugin\sandpackage\app\service\HostVersionCompatibility;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use FilesystemIterator;
@@ -18,6 +17,7 @@ use plugin\sandpackage\app\service\PostgresLifecycleSqlExecutor;
 use support\Log;
 use think\facade\Db;
 use plugin\sandpackage\app\service\PluginStorage;
+use plugin\sandpackage\app\service\HostVersionCompatibility;
 
 /** Compatibility only: pre-upstream recovery records. Not used for new installs. */
 class LegacyInstallLogic

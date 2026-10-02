@@ -18,14 +18,20 @@ namespace {
     function base_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'server'; }
     function runtime_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'runtime'; }
     function env(string $key, mixed $default = null): mixed { return $default; }
-    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.2' : null; }
+    $hostVersion = '0.1.0';
+    function config(string $key): mixed { global $hostVersion; return $key === 'plugin.sandadmin.app.version' ? $hostVersion : null; }
     $server = dirname(__DIR__, 2);
+    spl_autoload_register(static function (string $class) use ($server): void {
+        $prefix = 'plugin\\sandpackage\\';
+        if (!str_starts_with($class, $prefix)) return;
+        $path = $server . '/plugin/sandpackage/' . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+        if (is_file($path)) require $path;
+    });
     require $server . '/compat/Saithink/Saipackage/service/Server.php';
     require $server . '/compat/Saithink/Saipackage/service/Filesystem.php';
     require $server . '/plugin/sandpackage/app/service/PluginStorage.php';
     require $server . '/plugin/sandpackage/app/service/AbnormalPluginCleanup.php';
     require $server . '/plugin/sandpackage/app/service/FreshInstallRecovery.php';
-    require $server . '/plugin/sandpackage/app/service/HostVersionCompatibility.php';
     require $server . '/plugin/sandpackage/app/logic/InstallLogic.php';
 
     final class ConnectionBoundary extends \RuntimeException {}
@@ -43,7 +49,7 @@ namespace {
     function neutralPackage(string $path): void {
         $zip = new \ZipArchive();
         if ($zip->open($path, \ZipArchive::CREATE) !== true) throw new \RuntimeException('Cannot create fixture ZIP');
-        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nsupport = 0.1.x\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = neutral-test\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = \"1.0.0\"\nsupport = \">=0.1.0\"\nstate = 0\n");
         $zip->addFromString('config.json', '{}');
         foreach (['install', 'update', 'uninstall'] as $action) {
             $zip->addFromString($action . '.sql', '-- never executed');
@@ -75,12 +81,15 @@ namespace {
             verify(!$missingBackend && !$expectIncompatible && $logic->connectionCalls === 1, "$label: install passed path preflight and stopped at the database connection boundary");
         } catch (\plugin\sandadmin\exception\ApiException $error) {
             if ($expectIncompatible) {
-                verify($error->getCode() === 400
+                verify(!$missingBackend
+                    && $error->getCode() === 400
                     && $error->getMessage() === '插件兼容范围无效或与当前宿主版本不兼容；未执行插件依赖或数据库脚本'
                     && $logic->connectionCalls === 0,
-                    "$label: incompatible historical package is rejected before the database connection boundary");
+                    "$label: incompatible host is rejected before the database connection boundary");
             } else {
-                verify($missingBackend && $error->getMessage() === '插件后端目录缺失' && $logic->connectionCalls === 0,
+                verify($missingBackend
+                    && in_array($error->getMessage(), ['插件后端目录缺失', '候选安装目录与上传时摘要不一致'], true)
+                    && $logic->connectionCalls === 0,
                     "$label: missing backend is rejected before the database connection boundary");
             }
         }
@@ -91,7 +100,7 @@ namespace {
             && !is_dir(dirname(base_path()) . '/sandadmin-artd/src/views/plugin/' . $app)
             && !is_dir((new PluginStorage())->root() . '/fresh-recovery'),
             "$label: no payload deployment or fresh-install journal was created");
-        if (!$missingBackend) {
+        if (!$missingBackend && !$expectIncompatible) {
             $paths = (new \ReflectionMethod(InstallLogic::class, 'checkedPaths'))->invoke($logic);
             verify(count($paths) === 2 && is_dir(array_keys($paths)[0]) && is_dir(array_keys($paths)[1]),
                 "$label: both payload mappings remain available for deployment");
@@ -115,16 +124,13 @@ namespace {
                 || !hash_equals($argv[2], (string) hash_file('sha256', $argv[1]))) {
                 throw new \RuntimeException('External ZIP checksum does not match the pinned artifact');
             }
-            $expectation = $argv[3] ?? 'compatible';
-            if (!in_array($expectation, ['compatible', 'incompatible'], true)) {
-                throw new \RuntimeException('External ZIP compatibility expectation must be compatible or incompatible');
-            }
-            $expectIncompatible = $expectation === 'incompatible';
+            $hostVersion = $argv[3] ?? '0.1.0';
+            $expectIncompatible = ($argv[4] ?? '') === '--expect-incompatible';
             $host = $fixture . DIRECTORY_SEPARATOR . 'public-package';
-            stageAndPreflight($argv[1], 'checksum-pinned public ZIP', false, $expectIncompatible);
+            stageAndPreflight($argv[1], 'checksum-pinned public ZIP on host ' . $hostVersion, false, $expectIncompatible);
             if (DIRECTORY_SEPARATOR === '\\') {
                 $host = str_replace('\\', '/', $fixture . DIRECTORY_SEPARATOR . 'public-mixed');
-                stageAndPreflight($argv[1], 'mixed-separator public ZIP', false, $expectIncompatible);
+                stageAndPreflight($argv[1], 'mixed-separator public ZIP on host ' . $hostVersion, false, $expectIncompatible);
             }
         }
         echo 'Native install payload preflight passed; database installation remains untested.' . PHP_EOL;
