@@ -368,10 +368,24 @@
                   </ElTooltip>
                   <div class="repository-card-version">
                     {{ item.app }}
-                    <template v-if="item.versions[0]">
-                      · 仓库版本 v{{ item.versions[0].version }}
+                    <template v-if="item.recommended">
+                      · 最新兼容版本 v{{ item.recommended.version }}
+                    </template>
+                    <template v-else>
+                      ·
+                      {{
+                        item.recommended_version === undefined
+                          ? '请更新安装器后查看推荐版本'
+                          : '暂无兼容版本'
+                      }}
                     </template>
                   </div>
+                  <ElTag
+                    v-if="item.recommended && isRepositoryPrerelease(item.recommended)"
+                    size="small"
+                    type="warning"
+                    >预发布</ElTag
+                  >
                 </div>
               </div>
               <p class="repository-card-about">{{ item.about }}</p>
@@ -390,11 +404,11 @@
               <div class="repository-card-footer">
                 <div class="repository-card-secondary-actions">
                   <ElButton
-                    v-if="item.versions[0]"
+                    v-if="item.recommended"
                     link
                     type="primary"
                     size="small"
-                    @click="openRepositoryDocument(item, item.versions[0])"
+                    @click="openRepositoryDocument(item, item.recommended)"
                   >
                     查看文档
                   </ElButton>
@@ -409,20 +423,20 @@
                   </ElButton>
                 </div>
                 <ElButton
-                  v-if="item.versions[0]"
+                  v-if="item.recommended"
                   class="repository-card-primary-action"
                   size="small"
-                  :type="repositoryActionType(item.versions[0].action)"
-                  :loading="downloadingKey === repositoryVersionKey(item, item.versions[0])"
-                  :disabled="repositoryActionDisabled(item, item.versions[0])"
-                  @click="handleRepositoryVersionAction(item, item.versions[0])"
+                  :type="repositoryActionType(item.recommended.action)"
+                  :loading="downloadingKey === repositoryVersionKey(item, item.recommended)"
+                  :disabled="repositoryActionDisabled(item, item.recommended)"
+                  @click="handleRepositoryVersionAction(item, item.recommended)"
                 >
                   {{
-                    downloadingKey === repositoryVersionKey(item, item.versions[0])
-                      ? item.versions[0].action === 'upgrade'
+                    downloadingKey === repositoryVersionKey(item, item.recommended)
+                      ? item.recommended.action === 'upgrade'
                         ? '正在升级'
                         : '正在安装'
-                      : repositoryVersionActionLabel(item, item.versions[0])
+                      : repositoryVersionActionLabel(item, item.recommended)
                   }}
                 </ElButton>
               </div>
@@ -899,6 +913,7 @@
             <div class="version-info-row">
               <span class="version-name">v{{ item.version }}</span>
               <ElTag size="small" type="info">{{ item.tag }}</ElTag>
+              <ElTag v-if="isRepositoryPrerelease(item)" size="small" type="warning">预发布</ElTag>
             </div>
             <div class="version-compatibility">
               兼容 SandAdmin {{ item.host_min
@@ -966,7 +981,7 @@
 </template>
 
 <script setup lang="ts">
-  import { ref, reactive, computed, onMounted, watch } from 'vue'
+  import { ref, reactive, computed, onMounted, onActivated, onDeactivated, watch } from 'vue'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { ColumnOption } from '@/types'
   import type { UploadFile } from 'element-plus'
@@ -2306,7 +2321,14 @@
   let repositoryRequestId = 0
   let repositoryDocumentRequestId = 0
 
-  const repositoryPlugins = computed(() => repositoryCatalog.value?.plugins ?? [])
+  const repositoryPlugins = computed(() =>
+    (repositoryCatalog.value?.plugins ?? []).map((plugin) => ({
+      ...plugin,
+      recommended: plugin.versions.find((release) => release.version === plugin.recommended_version)
+    }))
+  )
+  const isRepositoryPrerelease = (release: RepositoryPluginVersion): boolean =>
+    /(?:preview|alpha|beta|rc)(?:[.\d-]|$)/i.test(release.tag) || release.version.includes('-')
   const repositoryCandidateRows = computed(() =>
     installList.value.filter((row) => row.state === 2 && canInstallLocal(row))
   )
@@ -2367,6 +2389,9 @@
     const requestId = ++repositoryRequestId
     repositoryLoading.value = true
     repositoryError.value = ''
+    repositoryCatalog.value = null
+    currentRepositoryPlugin.value = null
+    repositoryVersionVisible.value = false
     try {
       const response = await sandpackageApi.getRepositoryCatalog()
       if (requestId !== repositoryRequestId) return
@@ -2430,6 +2455,8 @@
     ) {
       return '上方处理本地包'
     }
+    if (item.action === 'upgrade') return `升级到 v${item.version}`
+    if (item.action === 'install') return `安装 v${item.version}`
     return repositoryActionLabel(item.action)
   }
 
@@ -2444,6 +2471,7 @@
     plugin: RepositoryPlugin | null,
     item: RepositoryPluginVersion
   ): boolean => {
+    if (repositoryLoading.value || repositoryError.value !== '') return true
     if (item.action === 'manage') {
       return (
         pluginOperationBusy.value ||
@@ -2723,7 +2751,7 @@
 
   // 监听 tab 切换
   watch(activeTab, (val) => {
-    if (val === 'repository' && !repositoryLoaded.value && !repositoryLoading.value) {
+    if (val === 'repository' && !repositoryLoading.value) {
       fetchRepositoryCatalog()
     }
   })
@@ -2739,6 +2767,19 @@
     if (!row || (localDetailRecoveryExpected.value && !isLegacyFailedUpgradeRecovery(row))) {
       closeLocalDetail()
     }
+  })
+
+  let repositoryWasDeactivated = false
+  onDeactivated(() => {
+    repositoryWasDeactivated = true
+    repositoryRequestId += 1
+    repositoryLoading.value = false
+  })
+  onActivated(() => {
+    if (!repositoryWasDeactivated) return
+    repositoryWasDeactivated = false
+    getList()
+    if (activeTab.value === 'repository') fetchRepositoryCatalog()
   })
 
   onMounted(() => {

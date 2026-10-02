@@ -6,10 +6,14 @@ on:
       - '.github/workflows/windows-native-path.yml'
       - 'server/plugin/sandpackage/app/logic/InstallLogic.php'
       - 'server/plugin/sandpackage/app/logic/RepositoryLogic.php'
+      - 'server/plugin/sandpackage/app/service/PluginVersion.php'
+      - 'server/plugin/sandpackage/app/service/GithubRepositoryClient.php'
       - 'server/plugin/sandpackage/app/service/AbnormalPluginCleanup.php'
       - 'server/plugin/sandpackage/app/service/FreshInstallRecovery.php'
       - 'server/plugin/sandpackage/app/service/PluginStorage.php'
       - 'server/tests/SandPackage/RepositoryInstallStateNativePathTest.php'
+      - 'server/tests/SandPackage/RepositoryRecommendationTest.php'
+      - 'server/tests/SandPackage/RepositoryUpgradeVersionParityTest.php'
       - 'server/tests/SandPackage/InstallPayloadPreflightNativePathTest.php'
   workflow_dispatch:
 
@@ -24,6 +28,10 @@ jobs:
           coverage: none
           tools: none
           extensions: zip
+      - name: Exercise latest compatible repository recommendations
+        run: php server/tests/SandPackage/RepositoryRecommendationTest.php
+      - name: Exercise repository and upload version parity
+        run: php server/tests/SandPackage/RepositoryUpgradeVersionParityTest.php
       - name: Exercise native repository install state
         run: php server/tests/SandPackage/RepositoryInstallStateNativePathTest.php
       - name: Exercise native ZIP staging and install preflight

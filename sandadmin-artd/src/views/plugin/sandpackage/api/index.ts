@@ -122,6 +122,7 @@ export interface RepositoryPlugin {
   about: string
   author: string
   local: RepositoryPluginLocal
+  recommended_version?: string | null
   versions: RepositoryPluginVersion[]
 }
 

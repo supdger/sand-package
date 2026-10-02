@@ -28,6 +28,7 @@ use plugin\sandpackage\app\service\ExistingSchemaManifest;
 use plugin\sandpackage\app\service\PluginDependencyPolicy;
 use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
 use plugin\sandpackage\app\service\HostVersionCompatibility;
+use plugin\sandpackage\app\service\PluginVersion;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -195,7 +196,7 @@ class InstallLogic
             $old = $this->getInfo();
             $state = $this->getInstallState();
             $upgrade = $state === self::INSTALLED;
-            if ($upgrade && !version_compare((string) ($info['version'] ?? ''), (string) $old['version'], '>')) {
+            if ($upgrade && PluginVersion::compare((string) ($info['version'] ?? ''), (string) $old['version']) <= 0) {
                 throw new ApiException('升级包版本必须高于已安装版本');
             }
             if (!$upgrade && $state !== self::UNINSTALLED) throw new ApiException('已有安装目录或待处理候选，不能覆盖');

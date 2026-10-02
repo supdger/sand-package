@@ -6,6 +6,7 @@ namespace plugin\sandpackage\app\logic;
 
 use plugin\sandadmin\exception\ApiException;
 use plugin\sandpackage\app\service\RepositoryClient;
+use plugin\sandpackage\app\service\PluginVersion;
 use Throwable;
 use ZipArchive;
 
@@ -247,7 +248,12 @@ final class RepositoryLogic
         foreach ($catalog['plugins'] as &$plugin) {
             $local = (new InstallLogic($plugin['app']))->ordinaryStatus();
             $plugin['local'] = $local;
+            usort($plugin['versions'], static fn(array $left, array $right): int => PluginVersion::compare($right['version'], $left['version']));
+            $plugin['recommended_version'] = null;
             foreach ($plugin['versions'] as &$release) {
+                if ($plugin['recommended_version'] === null && $this->compatible($release)) {
+                    $plugin['recommended_version'] = $release['version'];
+                }
                 [$release['action'], $release['action_reason']] = $this->releaseAction($local, $release);
             }
             unset($release);
@@ -279,7 +285,7 @@ final class RepositoryLogic
         if ($local['state'] !== InstallLogic::INSTALLED || $local['installed_version'] === null) {
             return ['manage', $local['reason'] !== '' ? $local['reason'] : '当前安装状态需要从已安装插件管理页继续'];
         }
-        $comparison = version_compare($release['version'], $local['installed_version']);
+        $comparison = PluginVersion::compare($release['version'], $local['installed_version']);
         if ($comparison === 0) return ['installed', '当前已经安装此版本'];
         if ($comparison < 0) return ['downgrade', '所选版本低于已安装版本，禁止降级'];
         return ['upgrade', '可从 ' . $local['installed_version'] . ' 升级到此版本'];
