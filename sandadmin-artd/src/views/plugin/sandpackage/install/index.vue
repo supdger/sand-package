@@ -443,6 +443,9 @@
             </article>
           </div>
         </ElTabPane>
+        <ElTabPane label="系统更新" name="system" lazy>
+          <SystemUpdate :external-busy="existingPluginOperationBusy || hideGlobalPluginWrites" @busy="systemUpdateBusy = $event" />
+        </ElTabPane>
       </ElTabs>
     </ElCard>
 
@@ -1000,6 +1003,7 @@
   import { checkVersionCompatibility } from './version-compatibility'
   import InstallForm from './install-box.vue'
   import TerminalBox from './terminal.vue'
+  import SystemUpdate from './system-update.vue'
   import { TaskStatus, useTerminalStore } from '../store/terminal'
   import {
     FAILED_UPGRADE_BLOCKED_MESSAGE,
@@ -2369,7 +2373,8 @@
       cleanupPackageLoading.value ||
       cleanupReloading.value
   )
-  const pluginOperationBusy = computed(
+  const systemUpdateBusy = ref(false)
+  const existingPluginOperationBusy = computed(
     () =>
       repositoryDownloading.value ||
       localWriteBusy.value ||
@@ -2377,6 +2382,7 @@
       terminalOperationBusy.value ||
       cleanupOperationBusy.value
   )
+  const pluginOperationBusy = computed(() => existingPluginOperationBusy.value || systemUpdateBusy.value)
   const repositoryWritesBlocked = computed(
     () => hideGlobalPluginWrites.value || pluginOperationBusy.value
   )
