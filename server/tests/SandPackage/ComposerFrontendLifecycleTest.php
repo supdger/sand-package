@@ -48,6 +48,36 @@ try {
     Install::update();
     composerHookExpect(hash_file('sha256', $manifestPath) === hash('sha256', json_encode(
         $manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . PHP_EOL), 'Composer update is idempotent');
+    $legacy = base_path() . '/plugin/sandpackage/tests/lifecycle_non_db_contract_test.php';
+    composerHookExpect(!file_exists($legacy), 'exact official legacy test payload is retired after publication');
+    if (!is_dir(dirname($legacy))) mkdir(dirname($legacy), 0700, true);
+    copy($source . '/plugin/sandpackage/tests/lifecycle_non_db_contract_test.php', $legacy);
+    file_put_contents($legacy, "\n// consumer edit\n", FILE_APPEND);
+    $legacyHash = hash_file('sha256', $legacy);
+    try {
+        Install::update();
+        throw new RuntimeException('Modified legacy test was silently removed');
+    } catch (RuntimeException $error) {
+        composerHookExpect(str_contains($error->getMessage(), '历史官方测试载荷已被修改')
+            && hash_file('sha256', $legacy) === $legacyHash, 'modified historical test is preserved and upgrade refused');
+    }
+    unlink($legacy);
+    $linkedLegacy = $fixture . '/official-legacy.php';
+    copy($source . '/plugin/sandpackage/tests/lifecycle_non_db_contract_test.php', $linkedLegacy);
+    symlink($linkedLegacy, $legacy);
+    try {
+        Install::update();
+        throw new RuntimeException('Symlink legacy test was accepted');
+    } catch (RuntimeException $error) {
+        composerHookExpect(str_contains($error->getMessage(), '历史官方测试载荷路径不安全')
+            && is_link($legacy) && is_file($linkedLegacy), 'symlink historical test is refused and target preserved');
+    }
+    unlink($legacy);
+    $unknown = dirname($legacy) . '/customer-check.php';
+    file_put_contents($unknown, 'customer-owned');
+    Install::update();
+    composerHookExpect(file_get_contents($unknown) === 'customer-owned' && !file_exists($legacy),
+        'only known official test is retired; unrelated customer file remains unchanged');
     $managed = $fixture . '/sandadmin-artd/src/views/plugin/sandpackage/api/index.ts';
     file_put_contents($managed, "\n// consumer edit\n", FILE_APPEND);
     $changed = hash_file('sha256', $managed);
