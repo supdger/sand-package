@@ -25,11 +25,16 @@ final class SystemUpdate
     public function status(): array
     {
         $checks = $this->environmentChecks();
+        $installed = $this->installed();
+        $versions = array_column($installed, 'version', 'package');
         $releases = [];
-        try { $releases = $this->releases(); }
+        try {
+            $releases = array_values(array_filter($this->releases(), static fn (array $release): bool =>
+                isset($versions[$release['package']]) && version_compare($release['version'], $versions[$release['package']], '>')));
+        }
         catch (Throwable $error) { $checks[] = $this->check('repository', '官方发行', false, $error->getMessage()); }
         return [
-            'installed' => $this->installed(), 'releases' => $releases,
+            'installed' => $installed, 'releases' => $releases,
             'active_task' => $this->latest(), 'checks' => $checks,
             'capabilities' => ['supported' => !$this->failed($checks), 'reason' => implode('；', array_column(array_filter($checks, static fn (array $check): bool => $check['state'] === 'fail'), 'message'))],
         ];

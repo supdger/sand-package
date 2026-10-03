@@ -124,6 +124,16 @@ try {
     $deadline=microtime(true)+10;
     do {$finished=$api->task($started['id']);if(in_array($finished['state'],['succeeded','failed'],true))break;usleep(100000);}while(microtime(true)<$deadline);
     expect($finished['state']==='succeeded','detached runner survives parent lock handoff and completes');
+    $cachedReleases = [];
+    foreach (['0.1.9', '0.2.0', '0.2.1'] as $version) {
+        $release = $plan['targets'][0];
+        $release['version'] = $version;
+        $cachedReleases[] = $release;
+    }
+    j($plan['root'] . '/releases.json', ['time' => time(), 'releases' => $cachedReleases]);
+    $available = $api->status()['releases'];
+    expect(count($available) === 1 && $available[0]['version'] === '0.2.1',
+        'real status excludes equal and older cached releases and preserves the newer release');
     j($plan['root'] . '/releases.json',['time'=>time(),'releases'=>[]]);
     expect($api->status()['active_task']['state']==='succeeded','status preserves latest terminal task after refresh');
     [$plan, $job] = fixture($workspace . '/recover-api', 'failure');
