@@ -44,3 +44,15 @@ Route::post('/tool/install/cleanup/inspect', [plugin\sandpackage\app\controller\
 Route::post('/tool/install/cleanup', [plugin\sandpackage\app\controller\InstallController::class, 'cleanup']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'repositoryCleanupPackage']);
 Route::post('/tool/install/cleanup/package', [plugin\sandpackage\app\controller\InstallController::class, 'repositoryCleanupPackage']);
+
+// System package updates are explicit, super-admin-only endpoints.
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'status']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'inspect']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'start']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'task']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'recover']);
+Route::get('/app/sandpackage/systemUpdate/status', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'status']);
+Route::post('/app/sandpackage/systemUpdate/inspect', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'inspect']);
+Route::post('/app/sandpackage/systemUpdate/start', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'start']);
+Route::get('/app/sandpackage/systemUpdate/task', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'task']);
+Route::post('/app/sandpackage/systemUpdate/recover', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'recover']);
