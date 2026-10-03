@@ -5,7 +5,7 @@
   "license": "MIT",
   "require": {
     "php": ">=8.2",
-    "supdger/sand-core": "^0.1",
+    "supdger/sand-core": "^0.2",
     "nelexa/zip": "^4.0",
     "tinywan/jwt": "^1.11",
     "webman/console": "^2.1",

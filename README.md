@@ -16,7 +16,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 
 下列后端命令在宿主 `server/` 目录执行，需要 PHP ≥8.2 和 Composer，并保留宿主 `composer.json` 中 `support\Plugin::install` 的 `post-package-install`、`post-package-update` 钩子。安装前备份现有配置和前端修改；冲突时先核对发布清单，不强行覆盖。
 
-先完成 [Sand Core](https://github.com/supdger/sand-core) 的前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
+本版本要求 [Sand Core 0.2.0](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
 composer require supdger/sand-package:^0.2
