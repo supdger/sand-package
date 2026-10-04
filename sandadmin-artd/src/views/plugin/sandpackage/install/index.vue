@@ -2998,6 +2998,7 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-width: 0;
     padding: 16px;
     background: var(--el-bg-color);
     border: 1px solid var(--el-border-color);
@@ -3079,6 +3080,7 @@
   }
 
   .repository-card-meta {
+    margin-top: auto;
     font-size: 12px;
     color: var(--el-text-color-secondary);
   }
@@ -3100,6 +3102,10 @@
     gap: 4px;
     align-items: center;
     min-width: 0;
+  }
+
+  .repository-card-footer {
+    min-height: 24px;
   }
 
   .repository-card-primary-action {
