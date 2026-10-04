@@ -17,7 +17,7 @@ final class SystemUpdate
 
     public function __construct()
     {
-        $this->server = rtrim(base_path(), '/');
+        $this->server = \SandSystemUpdateRuntime::normalizePath(base_path());
         $this->root = $this->server . '/runtime/system-update';
         $this->settings = config('plugin.sandpackage.system_update', []);
     }
@@ -166,11 +166,16 @@ final class SystemUpdate
     private function launch(string $directory, bool $recover): void
     {
         $plan = \SandSystemUpdateRuntime::readJson($directory . '/plan.json');
-        $pipes = [];
-        $process = proc_open([$plan['php'], $directory . '/worker.php', $directory, $recover ? 'detach-recover' : 'detach-run'], [0 => ['file', '/dev/null', 'r'], 1 => ['file', $directory . '/worker.log', 'a'], 2 => ['file', $directory . '/worker.log', 'a']], $pipes, $this->server, null, ['bypass_shell' => true]);
-        if (!is_resource($process) || proc_close($process) !== 0) {
+        try {
+            if (PHP_OS_FAMILY === 'Windows') \SandSystemUpdateRuntime::detachWindows($plan, $directory, $recover);
+            else {
+                $pipes = [];
+                $process = proc_open([$plan['php'], $directory . '/worker.php', $directory, $recover ? 'detach-recover' : 'detach-run'], [0 => ['file', \SandSystemUpdateRuntime::nullDevice(), 'r'], 1 => ['file', $directory . '/worker.log', 'a'], 2 => ['file', $directory . '/worker.log', 'a']], $pipes, $this->server, null, ['bypass_shell' => true]);
+                if (!is_resource($process) || proc_close($process) !== 0) throw new RuntimeException('无法启动独立更新进程');
+            }
+        } catch (Throwable $error) {
             $task = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
-            $task['state'] = 'failed'; $task['error'] = '无法启动独立更新进程';
+            $task['state'] = 'failed'; $task['error'] = \SandSystemUpdateRuntime::redact($error->getMessage());
             \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $task);
             throw new ApiException('无法启动独立更新进程，请检查 PHP CLI 与进程权限', 400);
         }
@@ -230,7 +235,7 @@ final class SystemUpdate
 
     private function plan(array $targets): array
     {
-        return [
+        $plan = [
             'server' => $this->server, 'root' => $this->root,
             'frontend' => $this->settings['frontend'] ?? dirname($this->server) . '/sandadmin-artd',
             'static' => $this->settings['static'] ?? '', 'storage' => (new PluginStorage())->root(),
@@ -238,13 +243,20 @@ final class SystemUpdate
             'composer' => $this->settings['composer'] ?? ['composer'], 'pnpm' => $this->settings['pnpm'] ?? ['pnpm'],
             'reload' => $this->settings['reload'] ?? [], 'health' => $this->settings['health'] ?? [], 'targets' => $targets, 'pinned' => $this->pins(),
         ];
+        foreach (['server', 'root', 'frontend', 'static', 'storage', 'php'] as $key) $plan[$key] = \SandSystemUpdateRuntime::normalizePath($plan[$key]);
+        return $plan;
     }
 
     private function environmentChecks(): array
     {
         $plan = $this->plan([]);
-        $native = PHP_OS_FAMILY !== 'Windows' && function_exists('proc_open') && function_exists('pcntl_fork') && function_exists('pcntl_exec') && function_exists('posix_setsid') && function_exists('posix_kill');
-        $checks = [$this->check('platform', '独立执行器', $native, $native ? '本机支持独立 PHP CLI 更新进程' : '需要 Linux/macOS PHP CLI、proc_open、pcntl 和 posix；当前平台暂不支持')];
+        $native = function_exists('proc_open');
+        $reason = '';
+        if (PHP_OS_FAMILY === 'Windows') {
+            try { \SandSystemUpdateRuntime::powershell(); }
+            catch (Throwable $error) { $native = false; $reason = $error->getMessage(); }
+        } else $native = $native && function_exists('pcntl_fork') && function_exists('pcntl_exec') && function_exists('posix_setsid') && function_exists('posix_kill');
+        $checks = [$this->check('platform', '独立执行器', $native, $native ? '本机支持独立 PHP CLI 更新进程' : ($reason !== '' ? $reason : 'Windows 需要 proc_open 与 PowerShell；Linux/macOS 需要 proc_open、pcntl 和 posix'))];
         foreach (['reload' => '服务重载', 'health' => '健康检查', 'composer' => 'Composer', 'pnpm' => '前端构建'] as $key => $label) {
             $ok = is_array($plan[$key]) && array_is_list($plan[$key]) && count($plan[$key]) > 0;
             $checks[] = $this->check($key, $label, $ok, $ok ? '管理员固定命令已配置' : '请先在宿主 config/sand_system_update.php 配置 ' . $key);

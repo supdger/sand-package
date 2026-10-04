@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.0](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2
+composer require supdger/sand-package:^0.2.2
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -35,7 +35,7 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 
 问题与建议请提交到 [Issues](https://github.com/supdger/sand-package/issues)。
 
-## 系统更新（0.2.0）
+## 系统更新（0.2.2）
 
 安装本版本后，超级管理员可从「插件管理 → 系统更新」查看宿主核心与插件管理器的官方版本，检查所选升级并确认执行。任务保存进度和恢复入口，刷新或断线后可继续查询；通过健康检查才显示成功，本地修改、插件不兼容或环境未就绪时会阻止升级。
 
@@ -45,6 +45,14 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 php vendor/supdger/sand-package/tools/prepare-system-update.php --frontend=/srv/sandadmin/sandadmin-artd --static=/srv/sandadmin/server/public/admin
 ```
 
-成功会显示核对文件数量并写入基线清单；文件缺失、多余或变化时拒绝，保留当前部署。静态目录须与前端源码及宿主运行目录分离。当前支持 Linux/macOS，PHP CLI 需支持 `proc_open`、`pcntl` 和 `posix`；仅允许带有效更新契约、明确无数据库或宿主骨架变更的稳定发行，Windows 后台执行暂不支持。
+成功会显示核对文件数量并写入基线清单；文件缺失、多余或变化时拒绝，保留当前部署。静态目录须与前端源码及宿主运行目录分离。Linux/macOS 的 PHP CLI 需支持 `proc_open`、`pcntl` 和 `posix`；仅允许带有效更新契约、明确无数据库或宿主骨架变更的稳定发行。
+
+Windows 后台执行要求 Windows 8 / Server 2012 及以上、Windows PowerShell 5.1、PHP CLI ≥8.2 且启用 `proc_open`，不需要 `pcntl/posix`。执行器通过 `SystemRoot` 定位系统 PowerShell；使用本地盘符目录，不支持 UNC、设备路径或 reparse point。配置示例按平台提供参数数组：Windows 使用实际 `php.exe + composer.phar`、`node.exe + pnpm.cjs` 路径，命令首项必须是 `.exe`，不能直接填 `composer.bat` 或 `pnpm.cmd`。重载和健康检查仍须指向管理员维护的真实宿主脚本；使用 PowerShell 脚本时按示例配置固定 `powershell.exe -File` 参数。Windows 的静态基线命令见下例，在宿主 `server/` 的 PowerShell 中执行并替换实际路径：
+
+```powershell
+& 'C:/tools/php/php.exe' vendor/supdger/sand-package/tools/prepare-system-update.php --frontend='D:/sandadmin/sandadmin-artd' --static='D:/sandadmin/server/public/admin'
+```
+
+Windows 支持从 0.2.2 起提供。Windows 服务账户须允许独立进程后台启动；宿主进程作业禁止脱离时明确报告启动失败。Windows 8 / Server 2012 是实现所需最低条件，本次实测环境为 Windows 10、PHP 8.2.12、Windows PowerShell 5.1，尚未覆盖所有服务部署方式。本次 Windows 10 隔离验收通过后台任务启动、进度查询、失败恢复及文件占用回归；既有部署的服务重载和登录业务仍须按实际宿主验收。
 
 升级影响见 [版本更新与升级影响](https://github.com/supdger/sandadmin/wiki/plugin-updates)。既有真实宿主的服务重载、登录业务和故障恢复尚需部署验收；本地验证不能代替这些结果。

@@ -12,6 +12,7 @@ final class SandSystemUpdateRuntime
 
     public function __construct(string $directory)
     {
+        $directory = self::normalizePath($directory);
         self::safePath($directory);
         $this->directory = $directory;
         $this->job = self::readJson($directory . '/task.json');
@@ -31,23 +32,64 @@ final class SandSystemUpdateRuntime
         $temp = $file . '.' . bin2hex(random_bytes(8)) . '.tmp';
         if (file_put_contents($temp, json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR)) === false) throw new RuntimeException('无法保存更新记录');
         chmod($temp, 0600);
-        if (!rename($temp, $file)) throw new RuntimeException('无法原子保存更新记录');
+        try {
+            // Windows readers may briefly deny FILE_SHARE_DELETE. Keep the old record intact,
+            // retry only the atomic replacement, and never create an unlink/read gap.
+            $deadline = microtime(true) + (PHP_OS_FAMILY === 'Windows' ? 2.0 : 0.0);
+            do {
+                if (@rename($temp, $file)) return;
+                $error = error_get_last()['message'] ?? 'rename 失败';
+                if (microtime(true) >= $deadline) throw new RuntimeException('无法原子保存更新记录：' . $error);
+                usleep(10000);
+            } while (true);
+        } finally {
+            if (is_file($temp)) unlink($temp);
+        }
+    }
+
+    public static function normalizePath(string $path): string
+    {
+        if (preg_match('#^[A-Za-z]:[\\\\/]#', $path)) $path = str_replace('\\', '/', $path);
+        return rtrim($path, '/');
+    }
+
+    /** Comparison uses Windows separator/case semantics, including paths not yet created. */
+    public static function pathKey(string $path): string
+    {
+        $path = self::normalizePath($path);
+        return preg_match('#^[A-Za-z]:/#', $path) ? strtolower($path) : $path;
+    }
+
+    public static function overlaps(string $a, string $b): bool
+    {
+        $a = self::pathKey($a); $b = self::pathKey($b);
+        return $a === $b || str_starts_with($a . '/', $b . '/') || str_starts_with($b . '/', $a . '/');
     }
 
     public static function safePath(string $path): void
     {
-        if ($path === '' || $path[0] !== '/' || str_contains($path, "\0") || preg_match('#(?:^|/)\.\.?(/|$)#', $path)) throw new RuntimeException('更新路径必须为规范绝对路径');
-        $current = '';
-        foreach (explode('/', $path) as $part) {
+        $path = self::normalizePath($path);
+        $windows = preg_match('#^[A-Za-z]:/#', $path) === 1;
+        if ($path === '' || (!$windows && $path[0] !== '/') || str_contains($path, '\\') || preg_match('/[\x00-\x1f\x7f]/', $path)
+            || str_contains($path, '//') || preg_match('#(?:^|/)\.\.?(/|$)#', $path)
+            || (PHP_OS_FAMILY === 'Windows' && !$windows)) throw new RuntimeException('更新路径必须为规范绝对路径（Windows 使用本地盘符目录）');
+        $current = $windows ? substr($path, 0, 2) : '';
+        foreach (explode('/', $windows ? substr($path, 3) : $path) as $part) {
             if ($part === '') continue;
+            if ($windows && (preg_match('/[<>:"|?*]/', $part) || preg_match('/[. ]$/', $part) || preg_match('/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i', $part))) throw new RuntimeException('Windows 更新路径含保留名称或路径别名');
             $current .= '/' . $part;
             if (is_link($current)) throw new RuntimeException('更新路径不能经过符号链接');
+            if (PHP_OS_FAMILY === 'Windows' && file_exists($current)) {
+                $resolved = realpath($current);
+                if ($resolved === false || self::pathKey($resolved) !== self::pathKey($current)) throw new RuntimeException('更新路径不能经过目录联接、重解析点或路径别名');
+            }
         }
     }
 
     /** Relative-path to hash map. Links are preserved only when confined to this tree. */
     public static function tree(string $root, array $exclude = []): array
     {
+        $root = self::normalizePath($root);
         self::safePath($root);
         if (!file_exists($root)) return [];
         if (is_file($root)) return ['' => hash_file('sha256', $root)];
@@ -56,10 +98,11 @@ final class SandSystemUpdateRuntime
             foreach (new FilesystemIterator($directory, FilesystemIterator::SKIP_DOTS) as $item) {
                 $relative = $prefix . $item->getFilename();
                 if (in_array(explode('/', $relative)[0], $exclude, true)) continue;
+                if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
                 if ($item->isLink()) {
                     $link = readlink($item->getPathname());
                     $resolved = realpath($item->getPathname());
-                    if ($resolved === false || !str_starts_with($resolved, $root . '/')) throw new RuntimeException('更新目录含有外部或悬空链接：' . $relative);
+                    if ($resolved === false || !str_starts_with(self::pathKey($resolved), self::pathKey($root) . '/')) throw new RuntimeException('更新目录含有外部或悬空链接：' . $relative);
                     $files[$relative] = 'link:' . $link;
                 } elseif ($item->isDir()) $walk($item->getPathname(), $relative . '/');
                 elseif ($item->isFile()) $files[$relative] = hash_file('sha256', $item->getPathname());
@@ -80,6 +123,7 @@ final class SandSystemUpdateRuntime
                 foreach (new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS) as $item) {
                     $relative = $prefix . $item->getFilename();
                     if (in_array(explode('/', $relative)[0], $exclude, true) || $item->isLink()) continue;
+                    if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
                     $result[$relative] = fileperms($item->getPathname()) & 0777;
                     if ($item->isDir()) $walk($item->getPathname(), $relative . '/');
                 }
@@ -110,12 +154,12 @@ final class SandSystemUpdateRuntime
     public static function assertManaged(array $plan): void
     {
         foreach (['server', 'frontend', 'static', 'storage', 'root'] as $key) self::safePath($plan[$key]);
-        if ($plan['frontend'] === $plan['server'] || str_starts_with($plan['frontend'], $plan['server'] . '/') || str_starts_with($plan['server'], $plan['frontend'] . '/')) throw new RuntimeException('前端目录与宿主目录重叠');
-        if ($plan['static'] === $plan['frontend'] || $plan['static'] === $plan['server'] || str_starts_with($plan['server'], $plan['static'] . '/')
-            || str_starts_with($plan['static'], $plan['frontend'] . '/') || str_starts_with($plan['frontend'], $plan['static'] . '/')
-            || str_starts_with($plan['static'], $plan['server'] . '/app') || str_starts_with($plan['static'], $plan['server'] . '/config') || str_starts_with($plan['static'], $plan['server'] . '/storage') || str_starts_with($plan['static'], $plan['server'] . '/runtime')
-            || str_starts_with($plan['static'], $plan['server'] . '/vendor') || str_starts_with($plan['static'], $plan['server'] . '/plugin')
-            || str_starts_with($plan['static'], $plan['root'] . '/') || $plan['static'] === $plan['root']) throw new RuntimeException('静态发布目录与更新源码或状态目录重叠');
+        if (self::overlaps($plan['frontend'], $plan['server'])) throw new RuntimeException('前端目录与宿主目录重叠');
+        if (self::overlaps($plan['static'], $plan['frontend']) || str_starts_with(self::pathKey($plan['server']) . '/', self::pathKey($plan['static']) . '/')
+            || self::overlaps($plan['static'], $plan['root'])) throw new RuntimeException('静态发布目录与更新源码或状态目录重叠');
+        foreach (['app', 'config', 'storage', 'runtime', 'vendor', 'plugin'] as $protected) {
+            if (self::overlaps($plan['static'], $plan['server'] . '/' . $protected)) throw new RuntimeException('静态发布目录与更新源码或状态目录重叠');
+        }
         foreach (self::PACKAGES as $package => $plugin) {
             $source = $plan['server'] . '/vendor/' . $package . '/server/plugin/' . $plugin;
             if (!is_dir($source) || self::tree($source) !== self::tree($plan['server'] . '/plugin/' . $plugin)) throw new RuntimeException($plugin . ' 后端存在本地修改或发布基线缺失');
@@ -174,7 +218,10 @@ final class SandSystemUpdateRuntime
 
     public static function relative(string $path): void
     {
-        if ($path === '' || $path[0] === '/' || str_contains($path, '\\') || str_contains($path, "\0") || preg_match('#(?:^|/)\.\.?(/|$)#', $path)) throw new RuntimeException('发布清单路径无效');
+        if ($path === '' || $path[0] === '/' || str_contains($path, '\\') || str_contains($path, ':') || preg_match('/[\x00-\x1f\x7f]/', $path) || preg_match('#(?:^|/)\.\.?(/|$)#', $path)) throw new RuntimeException('发布清单路径无效');
+        if (PHP_OS_FAMILY === 'Windows') foreach (explode('/', $path) as $part) {
+            if ($part === '' || preg_match('/[<>:"|?*]/', $part) || preg_match('/[. ]$/', $part) || preg_match('/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)/i', $part)) throw new RuntimeException('发行文件含 Windows 保留名称或路径别名');
+        }
     }
 
     /** @return list<resource> */
@@ -215,10 +262,247 @@ final class SandSystemUpdateRuntime
         foreach (array_reverse($handles) as $handle) { flock($handle, LOCK_UN); fclose($handle); }
     }
 
+    public static function nullDevice(): string { return PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null'; }
+
+    public static function powershell(): string
+    {
+        $system = getenv('SystemRoot');
+        if (!is_string($system) || $system === '') throw new RuntimeException('Windows SystemRoot 未配置');
+        $binary = self::normalizePath($system) . '/System32/WindowsPowerShell/v1.0/powershell.exe';
+        self::safePath($binary);
+        if (!is_file($binary)) throw new RuntimeException('Windows PowerShell 不可用');
+        return $binary;
+    }
+
+    /** Scripts are fixed source; data travels as JSON/base64, never executable shell text. */
+    private static function powershellArguments(string $script, array $data): array
+    {
+        $payload = base64_encode(json_encode($data, JSON_THROW_ON_ERROR));
+        $script = '$ErrorActionPreference="Stop"; $ProgressPreference="SilentlyContinue"; $data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("' . $payload . '")) | ConvertFrom-Json;' . "\n" . $script;
+        // All source and the base64 payload are ASCII; EncodedCommand requires UTF-16LE.
+        $wide = '';
+        for ($i = 0, $length = strlen($script); $i < $length; $i++) $wide .= $script[$i] . "\0";
+        return [self::powershell(), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', base64_encode($wide)];
+    }
+
+    private static function windowsNativeSource(): string
+    {
+        return <<<'CSHARP'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class SandUpdateCommand {
+    [StructLayout(LayoutKind.Sequential)] struct Basic {
+        public long ProcessTime, JobTime; public uint Flags;
+        public UIntPtr MinWorkingSet, MaxWorkingSet; public uint ActiveProcesses;
+        public UIntPtr Affinity; public uint Priority, Scheduling;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct Counters { public ulong ReadOps, WriteOps, OtherOps, ReadBytes, WriteBytes, OtherBytes; }
+    [StructLayout(LayoutKind.Sequential)] struct Extended {
+        public Basic Basic; public Counters IO;
+        public UIntPtr ProcessMemory, JobMemory, PeakProcessMemory, PeakJobMemory;
+    }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateJobObject(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetInformationJobObject(IntPtr job, int info, ref Extended limits, uint length);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential)] struct Security { public int Length; public IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] public bool Inherit; }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
+        public int Size; public string Reserved, Desktop, Title; public uint X,Y,Width,Height,CharsX,CharsY,Fill,Flags;
+        public short Show, ReservedLength; public IntPtr ReservedBytes, Input, Output, Error;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFile(string name, uint access, uint share, ref Security security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool CreateProcess(string executable, StringBuilder commandLine, IntPtr processSecurity, IntPtr threadSecurity, bool inherit, uint flags, IntPtr environment, string cwd, ref Startup startup, out ProcessInfo process);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool present);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetStdHandle(int identifier);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle, uint timeout);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+    public static string Quote(string value) {
+        var result = new StringBuilder("\""); int slashes = 0;
+        foreach (char c in value) {
+            if (c == '\\') { slashes++; continue; }
+            if (c == '"') result.Append('\\', slashes * 2 + 1).Append(c);
+            else result.Append('\\', slashes).Append(c);
+            slashes = 0;
+        }
+        return result.Append('\\', slashes * 2).Append('"').ToString();
+    }
+    public static int Run(string executable, string[] args, string cwd, int parentId, string identityFile, string acknowledgement) {
+        var parent = Process.GetProcessById(parentId);
+        // Capture the process handle before command startup, avoiding PID reuse.
+        var parentHandle = parent.Handle;
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        var limits = new Extended(); limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE; no breakaway.
+        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(typeof(Extended))) ||
+            !AssignProcessToJobObject(job, Process.GetCurrentProcess().Handle))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        var self = Process.GetCurrentProcess();
+        Console.OutputEncoding = new UTF8Encoding(false);
+        System.IO.File.WriteAllText(identityFile, "{\"pid\":" + self.Id + ",\"started\":\"" + self.StartTime.ToUniversalTime().Ticks + "\"}", new UTF8Encoding(false));
+        var wait = Stopwatch.StartNew();
+        // Persist the exact launcher identity before any product-mutating child may run.
+        while (!System.IO.File.Exists(acknowledgement)) {
+            if (parent.HasExited || wait.ElapsedMilliseconds > 30000) { CloseHandle(job); return 126; }
+            System.Threading.Thread.Sleep(50);
+        }
+        var commandLine = new StringBuilder(Quote(executable));
+        foreach (string arg in args) commandLine.Append(' ').Append(Quote(arg));
+        var startup = new Startup(); startup.Size = Marshal.SizeOf(typeof(Startup)); startup.Flags = 0x100;
+        startup.Input = GetStdHandle(-10); startup.Output = GetStdHandle(-11); startup.Error = GetStdHandle(-12);
+        foreach (IntPtr handle in new[] {startup.Input, startup.Output, startup.Error})
+            if (!SetHandleInformation(handle, 1, 1)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        ProcessInfo child;
+        if (!CreateProcess(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true, 0x08000000, IntPtr.Zero, cwd, ref startup, out child))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        CloseHandle(child.Thread);
+        try {
+            uint waitResult;
+            while ((waitResult = WaitForSingleObject(child.Process, 100)) == 258) {
+                if (parent.HasExited) { CloseHandle(job); return 126; }
+            }
+            if (waitResult != 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            uint code;
+            if (!GetExitCodeProcess(child.Process, out code)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            return unchecked((int)code);
+        } finally { CloseHandle(child.Process); }
+        // The job handle intentionally lives until this launcher exits; closing kills remaining descendants.
+    }
+    public static void Detach(string executable, string[] args, string cwd, string output, string error) {
+        var security = new Security(); security.Length = Marshal.SizeOf(typeof(Security)); security.Inherit = true;
+        IntPtr input = IntPtr.Zero, stdout = IntPtr.Zero, stderr = IntPtr.Zero;
+        var invalid = new IntPtr(-1);
+        try {
+            input = CreateFile("NUL", 0x80000000, 3, ref security, 3, 0, IntPtr.Zero);
+            stdout = CreateFile(output, 4, 3, ref security, 4, 0, IntPtr.Zero);
+            stderr = CreateFile(error, 4, 3, ref security, 4, 0, IntPtr.Zero);
+            if (input == invalid || stdout == invalid || stderr == invalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+            var startup = new Startup(); startup.Size = Marshal.SizeOf(typeof(Startup)); startup.Flags = 0x100;
+            startup.Input = input; startup.Output = stdout; startup.Error = stderr;
+            var commandLine = new StringBuilder(Quote(executable));
+            foreach (string arg in args) commandLine.Append(' ').Append(Quote(arg));
+            bool inJob;
+            if (!IsProcessInJob(Process.GetCurrentProcess().Handle, IntPtr.Zero, out inJob)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            // Detach from host console and any hosting job, so host reload cannot terminate this worker.
+            uint flags = 0x8 | 0x200;
+            if (inJob) flags |= 0x1000000; // CREATE_BREAKAWAY_FROM_JOB; refusal is an explicit startup failure.
+            ProcessInfo process;
+            if (!CreateProcess(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true, flags, IntPtr.Zero, cwd, ref startup, out process))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            CloseHandle(process.Thread); CloseHandle(process.Process);
+        } finally {
+            foreach (IntPtr handle in new[] {input, stdout, stderr}) if (handle != IntPtr.Zero && handle != invalid) CloseHandle(handle);
+        }
+    }
+}
+CSHARP;
+    }
+
+    /** A Job Object binds the complete child tree to this command and to its PHP owner. */
+    private static function windowsCommand(array $argv, string $cwd, callable $output, int $timeout): string
+    {
+        $script = "Add-Type -TypeDefinition @'\n" . self::windowsNativeSource() . "\n" . <<<'POWERSHELL'
+'@
+$application = Get-Command -Name ([string]$data.argv[0]) -CommandType Application -ErrorAction Stop
+if ([IO.Path]::GetExtension($application.Source) -ine '.exe') { throw 'Configure a native executable argv; use PHP for Composer PHAR and node.exe for pnpm CLI, not .cmd/.bat.' }
+$arguments = @($data.argv | Select-Object -Skip 1)
+$exitCode = [SandUpdateCommand]::Run($application.Source, [string[]]$arguments, [string]$data.cwd, [int]$data.parent, [string]$data.identity, [string]$data.ack)
+exit $exitCode
+POWERSHELL;
+        $stdout = tempnam(sys_get_temp_dir(), 'sand-update-out-');
+        $stderr = tempnam(sys_get_temp_dir(), 'sand-update-err-');
+        $identityFile = tempnam(sys_get_temp_dir(), 'sand-update-process-');
+        if ($stdout === false || $stderr === false || $identityFile === false) throw new RuntimeException('无法创建更新命令日志');
+        chmod($stdout, 0600); chmod($stderr, 0600); chmod($identityFile, 0600);
+        $ack = $stdout . '.ready';
+        $process = null; $readers = []; $identity = ''; $code = -1; $captured = ''; $pending = '';
+        $consume = static function (string $chunk) use (&$captured, &$pending, $output): void {
+            if (strlen($captured) < 1048576) $captured .= substr($chunk, 0, 1048576 - strlen($captured));
+            $pending .= $chunk;
+            while (($newline = strpos($pending, "\n")) !== false) {
+                $line = rtrim(substr($pending, 0, $newline), "\r"); $pending = substr($pending, $newline + 1);
+                $output(self::redact($line));
+            }
+            if (strlen($pending) > 4096) { $output(self::redact(substr($pending, 0, 4096))); $pending = ''; }
+        };
+        try {
+            $process = proc_open(self::powershellArguments($script, ['argv' => $argv, 'cwd' => $cwd, 'parent' => getmypid(), 'identity' => $identityFile, 'ack' => $ack]),
+                [0 => ['file', 'NUL', 'r'], 1 => ['file', $stdout, 'a'], 2 => ['file', $stderr, 'a']], $pipes, $cwd, null, ['bypass_shell' => true]);
+            if (!is_resource($process)) throw new RuntimeException('无法启动 Windows 更新命令');
+            $readers = [fopen($stdout, 'rb'), fopen($stderr, 'rb')];
+            if (in_array(false, $readers, true)) throw new RuntimeException('无法读取更新命令日志');
+            $start = microtime(true);
+            do {
+                if ($identity === '') {
+                    $record = json_decode((string) file_get_contents($identityFile), true);
+                    if (is_array($record) && is_int($record['pid'] ?? null) && $record['pid'] > 0 && is_string($record['started'] ?? null) && preg_match('/^[0-9]+$/D', $record['started'])) {
+                        $identity = $record['pid'] . ':' . $record['started'];
+                        $output('@system-windows-process:' . $identity);
+                        if (file_put_contents($ack, 'ready') === false) throw new RuntimeException('无法确认更新子进程启动');
+                    }
+                }
+                foreach ($readers as $reader) { $chunk = stream_get_contents($reader); if ($chunk !== false && $chunk !== '') $consume($chunk); }
+                $status = proc_get_status($process);
+                if (!$status['running']) { $code = $status['exitcode']; break; }
+                if (microtime(true) - $start > $timeout) {
+                    // The launcher owns the sole job handle. Terminating it closes that handle and all descendants.
+                    if (!proc_terminate($process)) throw new RuntimeException('无法终止超时的 Windows 更新进程');
+                    throw new RuntimeException('更新命令超时，Windows 作业进程树已终止');
+                }
+                usleep(50000);
+            } while (true);
+            foreach ($readers as $reader) { $tail = stream_get_contents($reader); if ($tail !== false) $consume($tail); }
+            if ($pending !== '') $output(self::redact($pending));
+        } finally {
+            foreach ($readers as $reader) if (is_resource($reader)) fclose($reader);
+            if (is_resource($process)) {
+                if (proc_get_status($process)['running']) proc_terminate($process);
+                $closed = proc_close($process); if ($code < 0) $code = $closed;
+            }
+            if ($identity !== '') $output('@system-windows-process-exited:' . $identity);
+            foreach ([$stdout, $stderr, $identityFile, $ack] as $file) if (is_file($file)) unlink($file);
+        }
+        if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code);
+        return $captured;
+    }
+
+    public static function processActive(mixed $identity): bool
+    {
+        if (is_int($identity)) return function_exists('posix_kill') ? posix_kill(-$identity, 0) : throw new RuntimeException('无法在此平台核验历史 Unix 进程组');
+        if (!is_array($identity) || !isset($identity['pid'], $identity['started']) || !is_int($identity['pid']) || $identity['pid'] <= 0 || !preg_match('/^[0-9]+$/D', $identity['started'])) throw new RuntimeException('更新进程身份记录无效');
+        $script = <<<'POWERSHELL'
+$process = Get-Process -Id ([int]$data.pid) -ErrorAction SilentlyContinue
+if ($null -eq $process) { exit 0 }
+if ($process.StartTime.ToUniversalTime().Ticks.ToString() -eq [string]$data.started) { [Console]::WriteLine('ACTIVE') }
+POWERSHELL;
+        $text = self::command(self::powershellArguments($script, $identity), self::normalizePath(sys_get_temp_dir()), static function (string $line): void {}, 30);
+        return str_contains($text, 'ACTIVE');
+    }
+
+    /** Native detached creation gives the worker its own handles, console and hosting-job lifetime. */
+    public static function detachWindows(array $plan, string $directory, bool $recover): void
+    {
+        $script = "Add-Type -TypeDefinition @'\n" . self::windowsNativeSource() . "\n" . <<<'POWERSHELL'
+'@
+$application = Get-Command -Name ([string]$data.php) -CommandType Application -ErrorAction Stop
+if ([IO.Path]::GetExtension($application.Source) -ine '.exe') { throw 'Configure the PHP CLI executable, not a batch wrapper.' }
+[SandUpdateCommand]::Detach($application.Source, [string[]]@($data.arguments), [string]$data.server, [string]$data.output, [string]$data.error)
+POWERSHELL;
+        $log = $directory . '/dispatch.log';
+        $process = proc_open(self::powershellArguments($script, ['php' => $plan['php'], 'arguments' => [$directory . '/worker.php', $directory, $recover ? 'recover' : 'run'], 'server' => $plan['server'], 'output' => $directory . '/worker.log', 'error' => $directory . '/worker-error.log']),
+            [0 => ['file', 'NUL', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes, $plan['server'], null, ['bypass_shell' => true]);
+        if (!is_resource($process) || proc_close($process) !== 0) throw new RuntimeException('Windows 独立进程启动失败，请检查任务 dispatch.log');
+    }
+
     public static function command(array $argv, string $cwd, callable $output, int $timeout = 1800): string
     {
         if (!$argv || !array_is_list($argv)) throw new RuntimeException('更新命令未配置');
         foreach ($argv as $argument) if (!is_string($argument) || $argument === '' || str_contains($argument, "\0")) throw new RuntimeException('更新命令参数无效');
+        if (PHP_OS_FAMILY === 'Windows') return self::windowsCommand($argv, self::normalizePath($cwd), $output, $timeout);
         $pipes = [];
         $launcher = <<<'NATIVE'
 if (posix_setsid() < 0) exit(126);
@@ -280,6 +564,12 @@ NATIVE;
 
     private function emit(string $stage, string $message): void
     {
+        if (preg_match('/^@system-windows-process(-exited)?:([0-9]+):([0-9]+)$/D', $message, $windows)) {
+            $identities = $this->job['windows_processes'] ?? [];
+            if ($windows[1] === '') { $identities[$windows[2]] = ['pid' => (int) $windows[2], 'started' => $windows[3]]; $message = 'Windows 作业子进程已启动'; }
+            else { unset($identities[$windows[2]]); $message = 'Windows 作业子进程已退出'; }
+            $this->job['windows_processes'] = $identities;
+        }
         if (preg_match('/^@system-process(-exited)?:([0-9]+)$/D', $message, $match)) {
             $groups = $this->job['process_groups'] ?? [];
             if ($match[1] === '') { $groups[] = (int) $match[2]; $message = '独立子进程已启动'; }
@@ -462,7 +752,7 @@ NATIVE;
         $handles = self::locks($plan);
         try {
             $this->job = self::readJson($this->directory . '/task.json');
-            foreach ($this->job['process_groups'] ?? [] as $group) if (posix_kill(-$group, 0)) throw new RuntimeException('中断任务仍有子进程活动，拒绝恢复，请先完成进程收尾');
+            foreach ([...($this->job['process_groups'] ?? []), ...array_values($this->job['windows_processes'] ?? [])] as $identity) if (self::processActive($identity)) throw new RuntimeException('中断任务仍有子进程活动，拒绝恢复，请先完成进程收尾');
             if (!in_array($this->job['state'], ['recovery_required', 'failed'], true) || !is_file($this->directory . '/backup.json')) throw new RuntimeException('此任务没有可检查的中断备份');
             $entries = self::readJson($this->directory . '/backup.json');
             $scopes = self::scopes($plan);
@@ -486,7 +776,7 @@ NATIVE;
         $handles = self::locks($plan);
         try {
             $this->job = self::readJson($this->directory . '/task.json');
-            foreach ($this->job['process_groups'] ?? [] as $group) if (posix_kill(-$group, 0)) throw new RuntimeException('中断任务仍有子进程活动，拒绝恢复');
+            foreach ([...($this->job['process_groups'] ?? []), ...array_values($this->job['windows_processes'] ?? [])] as $identity) if (self::processActive($identity)) throw new RuntimeException('中断任务仍有子进程活动，拒绝恢复');
             $record = self::readJson($this->directory . '/manual-inspection.json');
             if (!in_array($this->job['state'], ['recovery_required', 'failed'], true) || $record['expires_at'] < time() || !hash_equals($record['confirmation_hash'], hash('sha256', $confirmation)) || !hash_equals($record['fingerprint'], $fingerprint) || !hash_equals($fingerprint, self::fingerprint(self::scopes($plan)))) throw new RuntimeException('手工恢复确认无效、已过期或现场变化');
             $entries = self::readJson($this->directory . '/backup.json');
@@ -548,6 +838,7 @@ NATIVE;
         $walk = static function (string $directory, bool $top) use (&$walk, $exclude, $keepRoot): void {
             foreach (new FilesystemIterator($directory, FilesystemIterator::SKIP_DOTS) as $item) {
                 if ($top && in_array($item->getFilename(), $exclude, true)) continue;
+                if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
                 if ($item->isDir() && !$item->isLink()) $walk($item->getPathname(), false);
                 elseif (!unlink($item->getPathname())) throw new RuntimeException('文件恢复失败');
             }

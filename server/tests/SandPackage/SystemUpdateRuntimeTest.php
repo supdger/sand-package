@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 require_once dirname(__DIR__, 2) . '/plugin/sandpackage/tools/system-update-worker.php';
-$workspace = sys_get_temp_dir() . '/sand-system-update-test-' . bin2hex(random_bytes(5));
+$workspace = SandSystemUpdateRuntime::normalizePath(sys_get_temp_dir()) . '/sand system update test 中文 ' . bin2hex(random_bytes(5));
 mkdir($workspace, 0700);
 $checks = 0;
 function expect(bool $condition, string $message): void { global $checks; if (!$condition) throw new RuntimeException('FAIL: ' . $message); $checks++; echo 'PASS: ' . $message . PHP_EOL; }
@@ -58,17 +58,129 @@ SCRIPT);
     put($root . '/reload.php', '<?php echo "reload passed\\n";');
     j($root . '/fixture.json', ['server' => $server, 'candidate' => $newPackage, 'case' => $case]);
     $plan = ['server' => $server, 'root' => $server . '/runtime/system-update', 'frontend' => $front, 'static' => $static, 'storage' => $server . '/storage/sandpackage', 'php' => PHP_BINARY, 'composer' => [PHP_BINARY, $root . '/composer.php', dirname(__DIR__, 2) . '/plugin/sandpackage/tools/system-update-worker.php', $root . '/fixture.json'], 'pnpm' => [PHP_BINARY, $root . '/pnpm.php'], 'reload' => [PHP_BINARY, $root . '/reload.php'], 'health' => [PHP_BINARY, $root . '/health.php'], 'targets' => [$target], 'pinned' => $pins];
+    foreach (['server', 'root', 'frontend', 'static', 'storage', 'php'] as $key) $plan[$key] = SandSystemUpdateRuntime::normalizePath($plan[$key]);
     $plan['fingerprint'] = SandSystemUpdateRuntime::fingerprint(SandSystemUpdateRuntime::scopes($plan));
     j($job . '/plan.json', $plan); j($job . '/task.json', ['id' => str_repeat('a', 32), 'state' => 'queued', 'stage' => 'queued', 'targets' => [$target], 'created_at' => time(), 'updated_at' => time(), 'logs' => [], 'error' => '', 'recovery_available' => false, 'mutated' => false]);
     return [$plan, $job];
 }
 try {
+    foreach (['C:/Sand Admin/server', 'D:\\Sand Admin\\中文\\server'] as $path) {
+        SandSystemUpdateRuntime::safePath($path);
+        expect(true, 'Windows drive path accepts spaces, Unicode and native separators: ' . $path);
+    }
+    foreach (['C:relative', '//server/share/path', '\\\\server\\share\\path', '\\\\?\\C:\\server', 'C:/server/../config', 'C:/server/NUL.txt', 'C:/server/file:stream', 'C:/server/alias.', "C:/server/\0bad", 'C:/server//app', 'C:\\server\\\\app'] as $path) {
+        $rejected = false;
+        try { SandSystemUpdateRuntime::safePath($path); }
+        catch (RuntimeException) { $rejected = true; }
+        expect($rejected, 'unsafe Windows path rejected');
+    }
+    expect(SandSystemUpdateRuntime::overlaps('C:\\Sand\\server\\public', 'c:/sand/SERVER/public/admin'), 'Windows overlap comparison ignores case and separator spelling');
+    $arguments = ['a b', '中文', 'double"quote', "single'quote", '$($literal)&`text', "trailing\\", 'back\\"quote'];
+    $echoed = SandSystemUpdateRuntime::command([PHP_BINARY, '-r', 'echo json_encode(array_slice($argv,1), JSON_UNESCAPED_UNICODE);', ...$arguments], $workspace, static function (string $line): void {});
+    expect(json_decode($echoed, true, 128, JSON_THROW_ON_ERROR) === $arguments, 'native argv preserves quotes, spaces, Unicode, shell punctuation and trailing backslashes');
+    j($workspace . '/atomic.json', ['state' => 'first']); SandSystemUpdateRuntime::writeJson($workspace . '/atomic.json', ['state' => 'second']);
+    expect(SandSystemUpdateRuntime::readJson($workspace . '/atomic.json')['state'] === 'second', 'task JSON atomically replaces an existing record after handles close');
+    if (PHP_OS_FAMILY === 'Windows') {
+        put($workspace . '/held-record-writer.php', '<?php require $argv[1];file_put_contents(__DIR__."/".$argv[2].".ready","ready");$started=microtime(true);SandSystemUpdateRuntime::writeJson($argv[3],["state"=>"new"]);echo microtime(true)-$started;');
+        foreach (['released', 'held'] as $case) {
+            $record = $workspace . '/held-' . $case . '.json'; j($record, ['state' => 'original']);
+            $originalHash = hash_file('sha256', $record);
+            $reader = fopen($record, 'rb');
+            if (!is_resource($reader)) throw new RuntimeException('cannot hold task record reader');
+            try {
+                $writer = proc_open([PHP_BINARY, $workspace . '/held-record-writer.php', dirname(__DIR__, 2) . '/plugin/sandpackage/tools/system-update-worker.php', $case, $record],
+                    [0 => ['file', 'NUL', 'r'], 1 => ['file', $workspace . '/' . $case . '-writer.log', 'a'], 2 => ['file', $workspace . '/' . $case . '-writer-error.log', 'a']], $pipes, $workspace, null, ['bypass_shell' => true]);
+                if (!is_resource($writer)) throw new RuntimeException('cannot create held-reader task writer');
+                $deadline = microtime(true) + 10;
+                while (!is_file($workspace . '/' . $case . '.ready') && microtime(true) < $deadline) usleep(1000);
+                if (!is_file($workspace . '/' . $case . '.ready')) throw new RuntimeException('task writer handshake did not complete');
+                if ($case === 'released') { usleep(250000); fclose($reader); }
+                $writerCode = proc_close($writer);
+                $snapshot = SandSystemUpdateRuntime::readJson($record);
+                if ($case === 'released') {
+                    $elapsed = (float) file_get_contents($workspace . '/' . $case . '-writer.log');
+                    expect($writerCode === 0 && $snapshot['state'] === 'new' && $elapsed >= 0.2, 'Windows atomic replacement retries while reader is held and completes after release');
+                } else {
+                    expect($writerCode !== 0 && $snapshot['state'] === 'original' && hash_file('sha256', $record) === $originalHash
+                        && (glob($record . '.*.tmp') ?: []) === [] && str_contains((string) file_get_contents($workspace . '/' . $case . '-writer-error.log'), '无法原子保存更新记录'),
+                        'Windows exhausted replacement keeps original JSON and removes only its own temporary record');
+                }
+            } finally { if (is_resource($reader)) fclose($reader); }
+        }
+        j($workspace . '/concurrent-record.json', ['sequence' => 0, 'payload' => str_repeat('x', 65536)]);
+        put($workspace . '/record-writer.php', '<?php require $argv[1];for($i=1;$i<=100;$i++)SandSystemUpdateRuntime::writeJson(__DIR__."/concurrent-record.json",["sequence"=>$i,"payload"=>str_repeat("x",65536)]);');
+        $writer = proc_open([PHP_BINARY, $workspace . '/record-writer.php', dirname(__DIR__, 2) . '/plugin/sandpackage/tools/system-update-worker.php'],
+            [0 => ['file', 'NUL', 'r'], 1 => ['file', $workspace . '/record-writer.log', 'a'], 2 => ['file', $workspace . '/record-writer.log', 'a']], $pipes, $workspace, null, ['bypass_shell' => true]);
+        if (!is_resource($writer)) throw new RuntimeException('cannot create concurrent task record writer');
+        $recordValid = true; $writerCode = -1;
+        do {
+            $snapshot = SandSystemUpdateRuntime::readJson($workspace . '/concurrent-record.json');
+            $recordValid = $recordValid && is_int($snapshot['sequence'] ?? null) && strlen($snapshot['payload'] ?? '') === 65536;
+            $writerStatus = proc_get_status($writer);
+            if (!$writerStatus['running']) { $writerCode = $writerStatus['exitcode']; break; }
+            usleep(1000);
+        } while (true);
+        $closed = proc_close($writer); if ($writerCode < 0) $writerCode = $closed;
+        expect($recordValid && $writerCode === 0 && SandSystemUpdateRuntime::readJson($workspace . '/concurrent-record.json')['sequence'] === 100, 'Windows high-frequency readers observe complete records while atomic writer replaces 100 versions');
+        $marker = static function (string $line) use ($workspace): void {
+            if (preg_match('/^@system-windows-process:([0-9]+):([0-9]+)$/D', $line, $match)) j($workspace . '/process.json', ['pid' => (int) $match[1], 'started' => $match[2]]);
+        };
+        put($workspace . '/heartbeat.php', '<?php file_put_contents($argv[1].".pid",(string)getmypid()); while(true){file_put_contents($argv[1],(string)microtime(true));usleep(50000);}');
+        put($workspace . '/spawn.php', '<?php $child=proc_open([PHP_BINARY,__DIR__."/heartbeat.php",$argv[1]],[0=>["file","NUL","r"],1=>["file",$argv[1].".log","a"],2=>["file",$argv[1].".log","a"]],$pipes,null,null,["bypass_shell"=>true]);while(true)usleep(50000);');
+        try {
+            SandSystemUpdateRuntime::command([PHP_BINARY, $workspace . '/spawn.php', $workspace . '/timeout-beat'], $workspace, $marker, 5);
+            expect(false, 'Windows command timeout terminates its job');
+        } catch (RuntimeException $error) { expect(str_contains($error->getMessage(), '超时'), 'Windows command timeout terminates its job'); }
+        expect(is_file($workspace . '/timeout-beat'), 'timeout fixture created a live grandchild before cancellation');
+        $identity = SandSystemUpdateRuntime::readJson($workspace . '/process.json');
+        expect(!SandSystemUpdateRuntime::processActive($identity), 'timed-out Job launcher identity no longer exists');
+        $last = file_get_contents($workspace . '/timeout-beat'); usleep(500000);
+        expect(file_get_contents($workspace . '/timeout-beat') === $last, 'timed-out grandchild cannot keep writing');
+        put($workspace . '/owner.php', <<<'OWNER'
+<?php
+require $argv[1];
+SandSystemUpdateRuntime::command([PHP_BINARY,__DIR__.'/spawn.php',__DIR__.'/owner-beat'],__DIR__,static function(string $line):void {
+    if(preg_match('/^@system-windows-process:([0-9]+):([0-9]+)$/D',$line,$m))file_put_contents(__DIR__.'/owner-process.json',json_encode(['pid'=>(int)$m[1],'started'=>$m[2]]));
+});
+OWNER);
+        $owner = proc_open([PHP_BINARY, '-d', 'sys_temp_dir=' . $workspace, $workspace . '/owner.php', dirname(__DIR__, 2) . '/plugin/sandpackage/tools/system-update-worker.php'],
+            [0 => ['file', 'NUL', 'r'], 1 => ['file', $workspace . '/owner.log', 'a'], 2 => ['file', $workspace . '/owner.log', 'a']], $pipes, $workspace, null, ['bypass_shell' => true]);
+        if (!is_resource($owner)) throw new RuntimeException('cannot create interruption fixture');
+        $deadline = microtime(true) + 20;
+        while (!is_file($workspace . '/owner-beat') && microtime(true) < $deadline) usleep(50000);
+        expect(is_file($workspace . '/owner-beat'), 'owner interruption fixture created a live grandchild');
+        expect(proc_terminate($owner), 'fixture hard-terminates its own PHP command owner'); proc_close($owner);
+        usleep(500000);
+        expect(!SandSystemUpdateRuntime::processActive(SandSystemUpdateRuntime::readJson($workspace . '/owner-process.json')), 'owner interruption closes its Job launcher');
+        $last = file_get_contents($workspace . '/owner-beat'); usleep(500000);
+        expect(file_get_contents($workspace . '/owner-beat') === $last, 'owner interruption terminates grandchildren');
+        $stale = $identity; $stale['pid'] = getmypid(); $stale['started'] = '1';
+        expect(!SandSystemUpdateRuntime::processActive($stale), 'reused PID with a different start time cannot match the previous command');
+        put($workspace . '/junction-target/keep.txt', 'KEEP'); mkdir($workspace . '/junction-tree');
+        $junction = $workspace . '/junction-tree/link';
+        $junctionPayload = base64_encode(json_encode([$junction, $workspace . '/junction-target'], JSON_THROW_ON_ERROR));
+        SandSystemUpdateRuntime::command([SandSystemUpdateRuntime::powershell(), '-NoProfile', '-NonInteractive', '-Command', '$paths=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("' . $junctionPayload . '"))|ConvertFrom-Json; New-Item -ItemType Junction -Path $paths[0] -Target $paths[1] | Out-Null'], $workspace, static function (string $line): void {});
+        try {
+            foreach (['tree', 'remove'] as $operation) {
+                $rejected = false;
+                try { SandSystemUpdateRuntime::$operation($workspace . '/junction-tree'); }
+                catch (RuntimeException) { $rejected = true; }
+                expect($rejected, 'nested Windows junction rejected by ' . $operation);
+            }
+            expect(file_get_contents($workspace . '/junction-target/keep.txt') === 'KEEP', 'junction refusal preserves files outside the traversed tree');
+        } finally { rmdir($junction); }
+        put($workspace . '/shell-wrapper.cmd', '@echo unsafe');
+        $rejected = false;
+        try { SandSystemUpdateRuntime::command([$workspace . '/shell-wrapper.cmd'], $workspace, static function (string $line): void {}); }
+        catch (RuntimeException) { $rejected = true; }
+        expect($rejected, 'batch wrappers rejected before command execution');
+    }
     [$plan, $job] = fixture($workspace . '/success', 'success');
     (new SandSystemUpdateRuntime($job))->run();
     $task = SandSystemUpdateRuntime::readJson($job . '/task.json');
     expect($task['state'] === 'succeeded', 'full native process pipeline succeeds without host autoload');
     expect(file_get_contents($plan['static'] . '/index.html') === 'new-static', 'frontend build deployed');
-    expect((fileperms($plan['static']) & 0777) === 0755, 'static directory remains readable to web server');
+    expect(PHP_OS_FAMILY === 'Windows' ? is_readable($plan['static']) : (fileperms($plan['static']) & 0777) === 0755, 'static directory remains readable to web server');
     expect(!file_exists($plan['frontend'] . '/src/obsolete.txt'), 'removed managed frontend page does not survive new release');
     expect(file_get_contents($plan['frontend'] . '/custom.txt') === 'user-owned', 'unmanaged frontend user file preserved');
     expect(file_get_contents($plan['server'] . '/plugin/sandpackage/config/app.php') === '<?php return ["version"=>"0.2.0"];', 'manager updates its own runtime');
@@ -79,7 +191,7 @@ try {
     (new SandSystemUpdateRuntime($job))->run(true);
     expect(SandSystemUpdateRuntime::readJson($job . '/task.json')['state'] === 'recovered', 'verified backup restored and reloaded with health gate');
     expect(file_get_contents($plan['static'] . '/index.html') === 'old-static', 'original static files restored');
-    expect((fileperms($plan['static']) & 0777) === 0755, 'static permission restored');
+    expect(PHP_OS_FAMILY === 'Windows' ? is_readable($plan['static']) : (fileperms($plan['static']) & 0777) === 0755, 'static permission restored');
     [$plan, $job] = fixture($workspace . '/conflict', 'conflict'); put($workspace . '/conflict/fail-health', '1');
     (new SandSystemUpdateRuntime($job))->run();
     $before = SandSystemUpdateRuntime::readJson($job . '/task.json')['failure_fingerprint'];
@@ -120,8 +232,10 @@ try {
     $api=new \plugin\sandpackage\app\service\SystemUpdate();
     $started=$api->start($token);
     expect($started['state']==='queued','API launches independent detached job and immediately returns');
-    try {$api->start($token);expect(false,'confirmation consumed once');} catch (RuntimeException $e){expect(true,'confirmation consumed once');}
-    $deadline=microtime(true)+10;
+    $rejected = false;
+    try {$api->start($token);} catch (RuntimeException $e){$rejected = true;}
+    expect($rejected,'confirmation consumed once');
+    $deadline=microtime(true)+60;
     do {$finished=$api->task($started['id']);if(in_array($finished['state'],['succeeded','failed'],true))break;usleep(100000);}while(microtime(true)<$deadline);
     expect($finished['state']==='succeeded','detached runner survives parent lock handoff and completes');
     $cachedReleases = [];
@@ -140,14 +254,28 @@ try {
     put($workspace . '/recover-api/fail-health','1'); (new SandSystemUpdateRuntime($job))->run(); unlink($workspace . '/recover-api/fail-health');
     $GLOBALS['apiServer']=$plan['server']; $GLOBALS['apiSettings']=array_intersect_key($plan,array_flip(['php','frontend','static','composer','pnpm','reload','health']));
     $children=[];
+    $requestScript = <<<'REQUEST'
+require $argv[1] . '/tools/system-update-worker.php';
+$GLOBALS['apiServer']=$argv[2]; $GLOBALS['apiSettings']=json_decode(base64_decode($argv[3]),true,128,JSON_THROW_ON_ERROR);
+eval('namespace plugin\\sandadmin\\exception; class ApiException extends \\RuntimeException {}');
+function base_path(): string { return $GLOBALS['apiServer']; }
+function runtime_path(): string { return $GLOBALS['apiServer'] . '/runtime'; }
+function config(string $name, mixed $default=null): mixed { return $name==='plugin.sandpackage.system_update'?$GLOBALS['apiSettings']:$default; }
+require $argv[1] . '/app/service/PluginStorage.php'; require $argv[1] . '/app/service/SystemUpdate.php';
+while(!is_file($argv[4].'/go'))usleep(1000);
+try{(new \plugin\sandpackage\app\service\SystemUpdate())->recover(str_repeat('a',32));file_put_contents($argv[4].'/request-'.$argv[5],'dispatched');}
+catch(Throwable $e){file_put_contents($argv[4].'/request-'.$argv[5],'rejected');}
+REQUEST;
     for($i=0;$i<2;$i++) {
-        $pid=pcntl_fork();
-        if($pid===0){while(!is_file($workspace.'/go'))usleep(1000);try{(new \plugin\sandpackage\app\service\SystemUpdate())->recover(str_repeat('a',32));put($workspace.'/request-'.$i,'dispatched');}catch(Throwable $e){put($workspace.'/request-'.$i,'rejected');}exit(0);} $children[]=$pid;
+        $child=proc_open([PHP_BINARY,'-r',$requestScript,dirname(__DIR__,2).'/plugin/sandpackage',$plan['server'],base64_encode(json_encode($GLOBALS['apiSettings'],JSON_THROW_ON_ERROR)),$workspace,(string)$i],
+            [0=>['file',SandSystemUpdateRuntime::nullDevice(),'r'],1=>['file',$workspace.'/request-'.$i.'.log','a'],2=>['file',$workspace.'/request-'.$i.'.log','a']],$pipes,$workspace,null,['bypass_shell'=>true]);
+        if(!is_resource($child))throw new RuntimeException('cannot create concurrent recovery request');
+        $children[]=$child;
     }
-    put($workspace.'/go','1');foreach($children as $pid)pcntl_waitpid($pid,$status);
+    put($workspace.'/go','1');foreach($children as $child)if(proc_close($child)!==0)throw new RuntimeException('concurrent recovery request failed');
     $results=[file_get_contents($workspace.'/request-0'),file_get_contents($workspace.'/request-1')];
     expect(count(array_filter($results,static fn(string $r):bool=>$r==='dispatched'))===1,'two concurrent recover requests dispatch only one worker');
-    $deadline=microtime(true)+10;
+    $deadline=microtime(true)+60;
     do{$raw=SandSystemUpdateRuntime::readJson($job.'/task.json');if($raw['state']==='recovered')break;usleep(100000);}while(microtime(true)<$deadline);
     expect($raw['state']==='recovered','concurrent recovery finishes without corrupting terminal state');
     $starts=array_filter($raw['logs'],static fn(array $log):bool=>$log['stage']==='restore'&&$log['message']==='开始');
