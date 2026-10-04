@@ -160,20 +160,7 @@ final class SandSystemUpdateRuntime
         foreach (['app', 'config', 'storage', 'runtime', 'vendor', 'plugin'] as $protected) {
             if (self::overlaps($plan['static'], $plan['server'] . '/' . $protected)) throw new RuntimeException('静态发布目录与更新源码或状态目录重叠');
         }
-        foreach (self::PACKAGES as $package => $plugin) {
-            $source = $plan['server'] . '/vendor/' . $package . '/server/plugin/' . $plugin;
-            if (!is_dir($source) || self::tree($source) !== self::tree($plan['server'] . '/plugin/' . $plugin)) throw new RuntimeException($plugin . ' 后端存在本地修改或发布基线缺失');
-        }
-        foreach (['.sand-core-source-manifest.json', '.sand-package-source-manifest.json'] as $manifest) {
-            $data = self::readJson($plan['frontend'] . '/' . $manifest);
-            if (!is_array($data['files'] ?? null) || !$data['files']) throw new RuntimeException('前端发布清单缺失');
-            foreach ($data['files'] as $relative => $hash) {
-                self::relative($relative);
-                $file = $plan['frontend'] . '/' . $relative;
-                self::safePath($file);
-                if (!is_file($file) || !hash_equals($hash, (string) hash_file('sha256', $file))) throw new RuntimeException('前端存在本地修改：' . $relative);
-            }
-        }
+        self::assertManagedSources($plan);
         $manifest = self::readJson($plan['static'] . '/' . self::STATIC_MANIFEST);
         $actual = self::tree($plan['static']);
         unset($actual[self::STATIC_MANIFEST]);
@@ -192,6 +179,24 @@ final class SandSystemUpdateRuntime
         if (isset($composer['config']['vendor-dir']) && $composer['config']['vendor-dir'] !== 'vendor') throw new RuntimeException('仅支持标准 Composer vendor 安装路径');
         foreach (self::readJson($plan['server'] . '/composer.lock')['packages'] ?? [] as $package) {
             if (in_array($package['type'] ?? '', ['composer-plugin', 'composer-installer'], true)) throw new RuntimeException('宿主依赖安装需要 Composer 插件，不能安全禁用安装插件');
+        }
+    }
+
+    public static function assertManagedSources(array $plan): void
+    {
+        foreach (self::PACKAGES as $package => $plugin) {
+            $source = $plan['server'] . '/vendor/' . $package . '/server/plugin/' . $plugin;
+            if (!is_dir($source) || self::tree($source) !== self::tree($plan['server'] . '/plugin/' . $plugin)) throw new RuntimeException($plugin . ' 后端存在本地修改或发布基线缺失');
+        }
+        foreach (['.sand-core-source-manifest.json', '.sand-package-source-manifest.json'] as $manifest) {
+            $data = self::readJson($plan['frontend'] . '/' . $manifest);
+            if (!is_array($data['files'] ?? null) || !$data['files']) throw new RuntimeException('前端发布清单缺失');
+            foreach ($data['files'] as $relative => $hash) {
+                self::relative($relative);
+                $file = $plan['frontend'] . '/' . $relative;
+                self::safePath($file);
+                if (!is_file($file) || !hash_equals($hash, (string) hash_file('sha256', $file))) throw new RuntimeException('前端存在本地修改：' . $relative);
+            }
         }
     }
 
@@ -405,7 +410,7 @@ CSHARP;
     /** A Job Object binds the complete child tree to this command and to its PHP owner. */
     private static function windowsCommand(array $argv, string $cwd, callable $output, int $timeout): string
     {
-        $script = "Add-Type -TypeDefinition @'\n" . self::windowsNativeSource() . "\n" . <<<'POWERSHELL'
+        $script = '$data = [IO.File]::ReadAllText([string]$data.payload_file) | ConvertFrom-Json;' . "\n" . "Add-Type -TypeDefinition @'\n" . self::windowsNativeSource() . "\n" . <<<'POWERSHELL'
 '@
 $application = Get-Command -Name ([string]$data.argv[0]) -CommandType Application -ErrorAction Stop
 if ([IO.Path]::GetExtension($application.Source) -ine '.exe') { throw 'Configure a native executable argv; use PHP for Composer PHAR and node.exe for pnpm CLI, not .cmd/.bat.' }
@@ -416,8 +421,9 @@ POWERSHELL;
         $stdout = tempnam(sys_get_temp_dir(), 'sand-update-out-');
         $stderr = tempnam(sys_get_temp_dir(), 'sand-update-err-');
         $identityFile = tempnam(sys_get_temp_dir(), 'sand-update-process-');
-        if ($stdout === false || $stderr === false || $identityFile === false) throw new RuntimeException('无法创建更新命令日志');
-        chmod($stdout, 0600); chmod($stderr, 0600); chmod($identityFile, 0600);
+        $payloadFile = tempnam(sys_get_temp_dir(), 'sand-update-argv-');
+        if ($stdout === false || $stderr === false || $identityFile === false || $payloadFile === false) throw new RuntimeException('无法创建更新命令日志');
+        chmod($stdout, 0600); chmod($stderr, 0600); chmod($identityFile, 0600); chmod($payloadFile, 0600);
         $ack = $stdout . '.ready';
         $process = null; $readers = []; $identity = ''; $code = -1; $captured = ''; $pending = '';
         $consume = static function (string $chunk) use (&$captured, &$pending, $output): void {
@@ -430,7 +436,8 @@ POWERSHELL;
             if (strlen($pending) > 4096) { $output(self::redact(substr($pending, 0, 4096))); $pending = ''; }
         };
         try {
-            $process = proc_open(self::powershellArguments($script, ['argv' => $argv, 'cwd' => $cwd, 'parent' => getmypid(), 'identity' => $identityFile, 'ack' => $ack]),
+            self::writeJson(self::normalizePath($payloadFile), ['argv' => $argv, 'cwd' => $cwd, 'parent' => getmypid(), 'identity' => $identityFile, 'ack' => $ack]);
+            $process = proc_open(self::powershellArguments($script, ['payload_file' => self::normalizePath($payloadFile)]),
                 [0 => ['file', 'NUL', 'r'], 1 => ['file', $stdout, 'a'], 2 => ['file', $stderr, 'a']], $pipes, $cwd, null, ['bypass_shell' => true]);
             if (!is_resource($process)) throw new RuntimeException('无法启动 Windows 更新命令');
             $readers = [fopen($stdout, 'rb'), fopen($stderr, 'rb')];
@@ -464,10 +471,44 @@ POWERSHELL;
                 $closed = proc_close($process); if ($code < 0) $code = $closed;
             }
             if ($identity !== '') $output('@system-windows-process-exited:' . $identity);
-            foreach ([$stdout, $stderr, $identityFile, $ack] as $file) if (is_file($file)) unlink($file);
+            foreach ([$stdout, $stderr, $identityFile, $ack, $payloadFile] as $file) if (is_file($file)) unlink($file);
         }
         if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code);
         return $captured;
+    }
+
+    public static function unixHostMaster(string $server, string $pidFile, int $requestParent): array
+    {
+        self::safePath($pidFile);
+        $text = is_file($pidFile) ? trim((string)file_get_contents($pidFile)) : '';
+        if (!ctype_digit($text) || (int)$text !== $requestParent || $requestParent <= 1 || !posix_kill($requestParent, 0)) throw new RuntimeException('宿主主进程记录与当前 HTTP 进程归属不一致，框架已拒绝重载');
+        $identity = trim(self::command(['/bin/ps', '-p', (string)$requestParent, '-o', 'lstart=', '-o', 'args='], $server, static function (string $line): void {}, 10));
+        $start = self::normalizePath(realpath($server . '/start.php') ?: $server . '/start.php');
+        if (!str_contains($identity, 'master process') || !str_contains($identity, 'start_file=' . $start)) throw new RuntimeException('主进程不是当前宿主的 Workerman 实例，框架已拒绝重载');
+        return ['pid' => $requestParent, 'identity' => $identity];
+    }
+
+    /** Bind Windows reload to the running request's actual standard supervisor ancestry. */
+    public static function windowsSupervisor(string $server, int $requestPid): array
+    {
+        $script = <<<'POWERSHELL'
+$currentId = [int]$data.pid
+for ($depth = 0; $depth -lt 12; $depth++) {
+    $current = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $currentId) -ErrorAction Stop
+    if ($null -eq $current) { break }
+    if ([string]$current.CommandLine -match '(?i)(?:^|[\s"\\/])windows\.php(?:"|\s|$)') {
+        $native = Get-Process -Id $currentId -ErrorAction Stop
+        [Console]::WriteLine((@{pid=$currentId; started=$native.StartTime.ToUniversalTime().Ticks.ToString()} | ConvertTo-Json -Compress)); exit 0
+    }
+    $currentId = [int]$current.ParentProcessId
+    if ($currentId -le 0) { break }
+}
+throw 'The current HTTP worker has no standard Windows supervisor ancestor'
+POWERSHELL;
+        $text = self::command(self::powershellArguments($script, ['pid' => $requestPid]), $server, static function (string $line): void {}, 30);
+        $identity = json_decode(trim($text), true, 16, JSON_THROW_ON_ERROR);
+        if (!is_array($identity) || !self::processActive($identity)) throw new RuntimeException('Windows 宿主监督器进程身份无法核验');
+        return $identity;
     }
 
     public static function processActive(mixed $identity): bool
@@ -647,7 +688,11 @@ NATIVE;
             });
             $this->phase('frontend', function () use ($plan): void {
                 self::command([...$plan['pnpm'], 'install', '--frozen-lockfile'], $plan['frontend'], fn (string $line) => $this->emit('frontend', $line));
-                self::command([...$plan['pnpm'], 'run', 'build'], $plan['frontend'], fn (string $line) => $this->emit('frontend', $line));
+                $previousBase = getenv('VITE_BASE_URL');
+                try {
+                    if (isset($plan['frontend_base'])) putenv('VITE_BASE_URL=' . $plan['frontend_base']);
+                    self::command([...$plan['pnpm'], 'run', 'build'], $plan['frontend'], fn (string $line) => $this->emit('frontend', $line));
+                } finally { if (isset($plan['frontend_base'])) putenv($previousBase === false ? 'VITE_BASE_URL' : 'VITE_BASE_URL=' . $previousBase); }
                 $dist = $plan['frontend'] . '/dist';
                 if (!is_file($dist . '/index.html')) throw new RuntimeException('前端构建未生成 index.html');
                 self::remove($plan['static'], [], true);
@@ -737,13 +782,88 @@ NATIVE;
             }
         });
         $this->phase('frontend-restore', fn () => self::command([...$plan['pnpm'], 'install', '--frozen-lockfile'], $plan['frontend'], fn (string $line) => $this->emit('frontend-restore', $line)));
-        $this->reloadAndHealth($plan);
+        $this->reloadAndHealth($plan, true);
     }
 
-    private function reloadAndHealth(array $plan): void
+    private function reloadAndHealth(array $plan, bool $restoring = false): void
     {
-        $this->phase('reload', fn () => self::command($plan['reload'], $plan['server'], fn (string $line) => $this->emit('reload', $line), 120));
-        $this->phase('health', fn () => self::command($plan['health'], $plan['server'], fn (string $line) => $this->emit('health', $line), 120));
+        $probe = $plan['root'] . '/health-probe.json';
+        $token = bin2hex(random_bytes(32));
+        if (!$plan['health']) self::writeJson($probe, ['token' => $token, 'expires_at' => time() + 150]);
+        try {
+            $this->phase('reload', function () use ($plan): void {
+                if ($plan['reload']) { self::command($plan['reload'], $plan['server'], fn (string $line) => $this->emit('reload', $line), 120); return; }
+                $deployment = $plan['deployment'];
+                if ($deployment['reload_mode'] === 'windows-monitor') {
+                    // The standard Windows supervisor owns restart; only mtime changes here.
+                    if (!self::processActive($deployment['supervisor'])) throw new RuntimeException('Windows 宿主监督器已变化，已停止升级后的重载操作');
+                    $trigger = $deployment['trigger']; self::safePath($trigger);
+                    if (!is_file($trigger)) throw new RuntimeException('宿主重载监测文件已消失');
+                    sleep(2);
+                    if (!touch($trigger)) throw new RuntimeException('框架无法触发宿主进程监督器重载');
+                    $this->emit('reload', '已通知 Windows 宿主监督器重载');
+                } else {
+                    $master = $deployment['master'];
+                    if (self::unixHostMaster($plan['server'], $deployment['pid_file'], $master['pid']) !== $master) throw new RuntimeException('宿主主进程身份已变化，框架已拒绝重载');
+                    if (!posix_kill($master['pid'], SIGUSR1)) throw new RuntimeException('框架无法向当前宿主发送重载信号');
+                    $this->emit('reload', '已向当前 Workerman 宿主发送重载信号');
+                }
+            });
+            $this->phase('health', function () use ($plan, $token, $restoring): void {
+                if ($plan['health']) { self::command($plan['health'], $plan['server'], fn (string $line) => $this->emit('health', $line), 120); return; }
+                if (!function_exists('curl_init')) throw new RuntimeException('PHP cURL 不可用，框架无法验证重载后的服务');
+                $expected = [];
+                foreach (self::PACKAGES as $package => $plugin) {
+                    $config = require $plan['server'] . '/plugin/' . $plugin . '/config/app.php';
+                    $expected[$package] = $config['version'] ?? null;
+                }
+                $url = $plan['deployment']['url'] . $plan['deployment']['probe'];
+                $deadline = microtime(true) + 90; $nextMessage = 0;
+                do {
+                    $handle = curl_init($url);
+                    curl_setopt_array($handle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 1, CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '', CURLOPT_HTTPHEADER => ['X-Sand-Update-Probe: ' . $token]]);
+                    $body = curl_exec($handle); $code = curl_getinfo($handle, CURLINFO_RESPONSE_CODE); curl_close($handle);
+                    $data = is_string($body) ? json_decode($body, true) : null;
+                    if ($code === 200 && is_array($data) && hash_equals($token, $data['token'] ?? '') && ($data['versions'] ?? null) === $expected) {
+                        $manifest = self::readJson($plan['static'] . '/' . self::STATIC_MANIFEST);
+                        if ($restoring && ($manifest['files'] ?? null) === [] && self::tree($plan['static']) === [self::STATIC_MANIFEST => hash_file('sha256', $plan['static'] . '/' . self::STATIC_MANIFEST)]) { $this->emit('health', '原服务版本已恢复；原部署没有受管理静态页面'); return; }
+                        $staticHandle = curl_init($plan['deployment']['url'] . $plan['deployment']['static_uri']);
+                        curl_setopt_array($staticHandle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 1, CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '']);
+                        $index = curl_exec($staticHandle); $staticCode = curl_getinfo($staticHandle, CURLINFO_RESPONSE_CODE); curl_close($staticHandle);
+                        if ($staticCode === 200 && is_string($index) && is_file($plan['static'] . '/index.html') && hash_equals((string)hash_file('sha256', $plan['static'] . '/index.html'), hash('sha256', $index))) {
+                            $this->verifyHttpAssets($plan, $index);
+                            $this->emit('health', '宿主 HTTP 已恢复，运行版本、静态页面与入口资源发布核对通过'); return;
+                        }
+                    }
+                    if (microtime(true) >= $nextMessage) { $this->emit('health', '等待宿主完成重载并载入目标版本'); $nextMessage = microtime(true) + 5; }
+                    usleep(250000);
+                } while (microtime(true) < $deadline);
+                throw new RuntimeException('宿主未在限定时间内完成重载或版本核对，已保留任务与恢复备份');
+            });
+        } finally { if (!$plan['health'] && is_file($probe)) unlink($probe); }
+    }
+
+    /** Validate entry resources, including their deployment base, rather than index alone. */
+    private function verifyHttpAssets(array $plan, string $index): void
+    {
+        preg_match_all('/(?:src|href)=["\']([^"\']+)["\']/i', $index, $matches);
+        $base = substr($plan['deployment']['static_uri'], 0, -strlen('index.html'));
+        $urls = array_unique($matches[1]);
+        if (count($urls) > 128) throw new RuntimeException('静态入口引用资源过多，无法安全验证');
+        foreach ($urls as $url) {
+            $path = parse_url(html_entity_decode($url, ENT_QUOTES), PHP_URL_PATH);
+            if (!is_string($path) || !preg_match('/\.(?:js|css)$/i', $path)) continue;
+            if (preg_match('#^(?:https?:)?//#i', $url)) continue;
+            if (!str_starts_with($path, '/')) $path = $base . ltrim($path, './');
+            if (!str_starts_with($path, $base)) throw new RuntimeException('前端入口资源路径与静态部署不一致，升级未通过健康检查');
+            $relative = substr($path, strlen($base)); self::relative($relative);
+            $file = $plan['static'] . '/' . $relative; self::safePath($file);
+            if (!is_file($file)) throw new RuntimeException('前端入口资源缺失：' . $relative);
+            $handle = curl_init($plan['deployment']['url'] . $path);
+            curl_setopt_array($handle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 1, CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '']);
+            $body = curl_exec($handle); $code = curl_getinfo($handle, CURLINFO_RESPONSE_CODE); curl_close($handle);
+            if ($code !== 200 || !is_string($body) || !hash_equals((string)hash_file('sha256', $file), hash('sha256', $body))) throw new RuntimeException('前端入口资源未正确发布：' . $relative);
+        }
     }
 
     public function manualInspect(): array

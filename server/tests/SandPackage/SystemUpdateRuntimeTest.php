@@ -81,6 +81,13 @@ try {
     j($workspace . '/atomic.json', ['state' => 'first']); SandSystemUpdateRuntime::writeJson($workspace . '/atomic.json', ['state' => 'second']);
     expect(SandSystemUpdateRuntime::readJson($workspace . '/atomic.json')['state'] === 'second', 'task JSON atomically replaces an existing record after handles close');
     if (PHP_OS_FAMILY === 'Windows') {
+        $payloadBefore = glob(SandSystemUpdateRuntime::normalizePath(sys_get_temp_dir()) . '/sand-update-argv-*') ?: [];
+        $longArgument = str_repeat('native-argv-', 400);
+        $length = SandSystemUpdateRuntime::command([PHP_BINARY, '-r', 'echo strlen($argv[1]);', $longArgument], $workspace, static function (string $line): void {});
+        expect((int)$length === strlen($longArgument), 'Windows long argv travels through a private payload without overflowing the launcher command line');
+        $payloadAfter = glob(SandSystemUpdateRuntime::normalizePath(sys_get_temp_dir()) . '/sand-update-argv-*') ?: [];
+        sort($payloadBefore); sort($payloadAfter);
+        expect($payloadAfter === $payloadBefore, 'Windows argv payload is cleaned after the native command finishes');
         put($workspace . '/held-record-writer.php', '<?php require $argv[1];file_put_contents(__DIR__."/".$argv[2].".ready","ready");$started=microtime(true);SandSystemUpdateRuntime::writeJson($argv[3],["state"=>"new"]);echo microtime(true)-$started;');
         foreach (['released', 'held'] as $case) {
             $record = $workspace . '/held-' . $case . '.json'; j($record, ['state' => 'original']);

@@ -389,56 +389,58 @@
                 </div>
               </div>
               <p class="repository-card-about">{{ item.about }}</p>
-              <div class="repository-card-meta">
-                <span class="repository-card-author">{{ item.author }}</span>
-                <ElTooltip
-                  :disabled="!item.local.reason"
-                  :content="item.local.reason"
-                  placement="top"
-                >
-                  <ElTag :type="repositoryLocalTagType(item.local)" size="small">
-                    {{ repositoryLocalLabel(item.local) }}
-                  </ElTag>
-                </ElTooltip>
-              </div>
-              <div class="repository-card-footer">
-                <div class="repository-card-secondary-actions">
+              <div class="repository-card-bottom">
+                <div class="repository-card-meta">
+                  <span class="repository-card-author">{{ item.author }}</span>
+                  <ElTooltip
+                    :disabled="!item.local.reason"
+                    :content="item.local.reason"
+                    placement="top"
+                  >
+                    <ElTag :type="repositoryLocalTagType(item.local)" size="small">
+                      {{ repositoryLocalLabel(item.local) }}
+                    </ElTag>
+                  </ElTooltip>
+                </div>
+                <div class="repository-card-footer">
+                  <div class="repository-card-secondary-actions">
+                    <ElButton
+                      v-if="item.recommended"
+                      link
+                      type="primary"
+                      size="small"
+                      @click="openRepositoryDocument(item, item.recommended)"
+                    >
+                      查看文档
+                    </ElButton>
+                    <ElButton
+                      link
+                      type="primary"
+                      size="small"
+                      :disabled="item.versions.length === 0"
+                      @click="showRepositoryVersions(item)"
+                    >
+                      {{ item.versions.length > 1 ? '其他版本' : '版本详情' }}
+                    </ElButton>
+                  </div>
                   <ElButton
                     v-if="item.recommended"
-                    link
-                    type="primary"
+                    class="repository-card-primary-action"
                     size="small"
-                    @click="openRepositoryDocument(item, item.recommended)"
+                    :type="repositoryActionType(item.recommended.action)"
+                    :loading="downloadingKey === repositoryVersionKey(item, item.recommended)"
+                    :disabled="repositoryActionDisabled(item, item.recommended)"
+                    @click="handleRepositoryVersionAction(item, item.recommended)"
                   >
-                    查看文档
-                  </ElButton>
-                  <ElButton
-                    link
-                    type="primary"
-                    size="small"
-                    :disabled="item.versions.length === 0"
-                    @click="showRepositoryVersions(item)"
-                  >
-                    {{ item.versions.length > 1 ? '其他版本' : '版本详情' }}
+                    {{
+                      downloadingKey === repositoryVersionKey(item, item.recommended)
+                        ? item.recommended.action === 'upgrade'
+                          ? '正在升级'
+                          : '正在安装'
+                        : repositoryVersionActionLabel(item, item.recommended)
+                    }}
                   </ElButton>
                 </div>
-                <ElButton
-                  v-if="item.recommended"
-                  class="repository-card-primary-action"
-                  size="small"
-                  :type="repositoryActionType(item.recommended.action)"
-                  :loading="downloadingKey === repositoryVersionKey(item, item.recommended)"
-                  :disabled="repositoryActionDisabled(item, item.recommended)"
-                  @click="handleRepositoryVersionAction(item, item.recommended)"
-                >
-                  {{
-                    downloadingKey === repositoryVersionKey(item, item.recommended)
-                      ? item.recommended.action === 'upgrade'
-                        ? '正在升级'
-                        : '正在安装'
-                      : repositoryVersionActionLabel(item, item.recommended)
-                  }}
-                </ElButton>
               </div>
             </article>
           </div>
@@ -2997,7 +2999,8 @@
   .repository-app-card {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 16px;
+    min-width: 0;
     padding: 16px;
     background: var(--el-bg-color);
     border: 1px solid var(--el-border-color);
@@ -3007,6 +3010,14 @@
     &:hover {
       box-shadow: var(--el-box-shadow-light);
       transform: translateY(-2px);
+    }
+  }
+
+  @supports (grid-template-rows: subgrid) {
+    .repository-app-card {
+      display: grid;
+      grid-template-rows: subgrid;
+      grid-row: span 3;
     }
   }
 
@@ -3037,7 +3048,6 @@
 
   .repository-card-title {
     display: -webkit-box;
-    min-height: 48px;
     overflow: hidden;
     font-size: 16px;
     font-weight: 600;
@@ -3059,15 +3069,23 @@
 
   .repository-card-about {
     display: -webkit-box;
-    min-height: 40px;
+    min-height: 60px;
     margin: 0;
     overflow: hidden;
     font-size: 13px;
     line-height: 20px;
     color: var(--el-text-color-regular);
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
     -webkit-box-orient: vertical;
+  }
+
+  .repository-card-bottom {
+    margin-top: auto;
+    display: grid;
+    align-content: end;
+    gap: 12px;
+    min-width: 0;
   }
 
   .repository-card-meta,
@@ -3079,6 +3097,7 @@
   }
 
   .repository-card-meta {
+    min-height: 24px;
     font-size: 12px;
     color: var(--el-text-color-secondary);
   }
@@ -3100,6 +3119,10 @@
     gap: 4px;
     align-items: center;
     min-width: 0;
+  }
+
+  .repository-card-footer {
+    min-height: 24px;
   }
 
   .repository-card-primary-action {

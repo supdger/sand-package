@@ -5,7 +5,7 @@ return array_replace([
     'frontend' => dirname(base_path()) . '/sandadmin-artd',
     'composer' => ['composer'],
     'pnpm' => ['pnpm'],
-    // Dedicated admin static directory, reload and health commands must be configured once.
+    // Empty deployment options use the framework host adapter; overrides are optional.
     'static' => '',
     'reload' => [],
     'health' => [],
