@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.0](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.2
+composer require supdger/sand-package:^0.2.3
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -35,24 +35,18 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 
 问题与建议请提交到 [Issues](https://github.com/supdger/sand-package/issues)。
 
-## 系统更新（0.2.2）
+## 系统更新（0.2.3）
 
 安装本版本后，超级管理员可从「插件管理 → 系统更新」查看宿主核心与插件管理器的官方版本，检查所选升级并确认执行。任务保存进度和恢复入口，刷新或断线后可继续查询；通过健康检查才显示成功，本地修改、插件不兼容或环境未就绪时会阻止升级。
 
-启用前由宿主管理员按 [`tools/system-update.config.example.php`](tools/system-update.config.example.php) 配置 `server/config/sand_system_update.php`，指定实际 PHP、前端、专用静态目录，以及固定的 Composer/pnpm、重载和健康检查命令。确认静态目录已部署当前 `dist` 后，在宿主 `server/` 建立基线，替换下列路径为实际绝对路径：
+本版本将升级准备纳入框架：用户选择版本后点击「升级所选版本」，核对确认内容后执行。标准宿主的服务重载、运行版本健康检查及专用静态发布基线由框架识别和准备，不要求普通管理员编辑 `reload` / `health` 或执行基线工具。升级到 0.2.3 并完成 Composer 源码发布后生效，部署行为以实际安装版本为准。
 
-```bash
-php vendor/supdger/sand-package/tools/prepare-system-update.php --frontend=/srv/sandadmin/sandadmin-artd --static=/srv/sandadmin/server/public/admin
-```
+框架从宿主实际 HTTP 监听、公共目录及当前主进程识别运行环境；默认使用公共目录下的独立 `admin/`，构建时匹配该静态地址，并通过 HTTP 核对入口页面、JavaScript / CSS 与运行版本。预检只准备目录与清单，实际服务重载发生在确认执行后的任务阶段。已有静态文件只有与当前 `dist` 逐路径、逐摘要一致时才自动建立基线；本地修改、未知文件或进程归属不明会保留现场并给出具体原因，不会自动覆盖。
 
-成功会显示核对文件数量并写入基线清单；文件缺失、多余或变化时拒绝，保留当前部署。静态目录须与前端源码及宿主运行目录分离。Linux/macOS 的 PHP CLI 需支持 `proc_open`、`pcntl` 和 `posix`；仅允许带有效更新契约、明确无数据库或宿主骨架变更的稳定发行。
+Linux/macOS 的 PHP CLI 需支持 `proc_open`、`pcntl` 和 `posix`，重载只针对当前 HTTP 服务所属的 Workerman 主进程。Windows 需要 Windows PowerShell 5.1、PHP CLI ≥8.2 与 `proc_open`；框架识别标准 `windows.php` 监督器祖先进程，并解析已安装 Composer PHAR、pnpm / Corepack CLI 为原生 PHP / Node 参数，不执行 `.bat/.cmd`。使用本地盘符目录，不支持 UNC、设备路径或 reparse point。
 
-Windows 后台执行要求 Windows 8 / Server 2012 及以上、Windows PowerShell 5.1、PHP CLI ≥8.2 且启用 `proc_open`，不需要 `pcntl/posix`。执行器通过 `SystemRoot` 定位系统 PowerShell；使用本地盘符目录，不支持 UNC、设备路径或 reparse point。配置示例按平台提供参数数组：Windows 使用实际 `php.exe + composer.phar`、`node.exe + pnpm.cjs` 路径，命令首项必须是 `.exe`，不能直接填 `composer.bat` 或 `pnpm.cmd`。重载和健康检查仍须指向管理员维护的真实宿主脚本；使用 PowerShell 脚本时按示例配置固定 `powershell.exe -File` 参数。Windows 的静态基线命令见下例，在宿主 `server/` 的 PowerShell 中执行并替换实际路径：
+自定义部署仍可用 [`tools/system-update.config.example.php`](tools/system-update.config.example.php) 提供可信宿主配置，覆盖标准适配；这属于部署扩展，不是后台升级用户的操作步骤。`prepare-system-update.php` 保留为外部部署的只读核对与基线维护工具。标准适配无法确认的自定义进程监督器或外部静态托管不会被猜测为安全可用。
 
-```powershell
-& 'C:/tools/php/php.exe' vendor/supdger/sand-package/tools/prepare-system-update.php --frontend='D:/sandadmin/sandadmin-artd' --static='D:/sandadmin/server/public/admin'
-```
-
-Windows 支持从 0.2.2 起提供。Windows 服务账户须允许独立进程后台启动；宿主进程作业禁止脱离时明确报告启动失败。Windows 8 / Server 2012 是实现所需最低条件，本次实测环境为 Windows 10、PHP 8.2.12、Windows PowerShell 5.1，尚未覆盖所有服务部署方式。本次 Windows 10 隔离验收通过后台任务启动、进度查询、失败恢复及文件占用回归；既有部署的服务重载和登录业务仍须按实际宿主验收。
+本版本在 macOS 完成自动准备、真实隔离 HTTP、Workerman 主进程归属、原生重载、新运行版本和静态入口资源回归。Windows 10 / PHP 8.2.12 / PowerShell 5.1 的隔离实机验证覆盖独立执行器 61 项、标准监督器自动重载与健康恢复 9 项，以及实际 Composer PHAR / pnpm 原生命令解析与执行；长参数通过临时私有载荷传递，避免 Windows 启动命令长度限制。上述结果来自隔离环境，不代表既有宿主已完成升级。仅允许带有效更新契约、明确无数据库或宿主骨架变更的稳定发行。
 
 升级影响见 [版本更新与升级影响](https://github.com/supdger/sandadmin/wiki/plugin-updates)。既有真实宿主的服务重载、登录业务和故障恢复尚需部署验收；本地验证不能代替这些结果。

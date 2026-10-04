@@ -56,3 +56,7 @@ Route::post('/app/sandpackage/systemUpdate/inspect', [plugin\sandpackage\app\con
 Route::post('/app/sandpackage/systemUpdate/start', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'start']);
 Route::get('/app/sandpackage/systemUpdate/task', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'task']);
 Route::post('/app/sandpackage/systemUpdate/recover', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'recover']);
+
+// This health protocol is loopback-only and requires the independent worker's random challenge.
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateProbeController::class, 'probe']);
+Route::get('/app/sandpackage/systemUpdate/probe', [plugin\sandpackage\app\controller\SystemUpdateProbeController::class, 'probe']);

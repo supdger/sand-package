@@ -3,7 +3,7 @@
     <div class="update-toolbar">
       <div>
         <h3>系统更新</h3>
-        <p>更新 SandAdmin 核心和插件管理器。先检查兼容性与本地修改，再确认升级。</p>
+        <p>选择版本后点击升级，系统会自动准备环境并检查兼容性。</p>
       </div>
       <ElButton :loading="operation === 'status'" :disabled="busy" @click="loadStatus">检查更新</ElButton>
     </div>
@@ -31,17 +31,19 @@
         <strong>{{ release.name }} {{ release.version }} · 更新说明</strong>
         <p>{{ release.notes || '此版本未提供更新说明。' }}</p>
       </div>
-      <ul v-if="checks.length" class="check-list" aria-label="升级检查结果">
+      <details v-if="checks.length" class="check-details" :open="checks.some(check => check.state !== 'ok')">
+        <summary>升级检查详情</summary>
+        <ul class="check-list" aria-label="升级检查结果">
         <li v-for="check in checks" :key="check.code">
           <div class="check-heading"><strong>{{ check.label }}</strong><ElTag :type="check.state === 'ok' ? 'success' : 'danger'">{{ check.state === 'ok' ? '通过' : '未通过' }}</ElTag></div>
           <p>{{ check.message }}</p>
         </li>
-      </ul>
+        </ul>
+      </details>
       <ElAlert v-if="externalBusy" type="info" :closable="false" title="请先完成插件安装、恢复或依赖处理，再更新系统。" />
       <ElSpace wrap>
-        <ElButton type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">检查所选升级</ElButton>
-        <ElButton v-if="inspection?.can_start" type="warning" :disabled="busy || externalBusy" @click="confirmVisible = true">确认升级</ElButton>
-        <span v-if="inspection && !inspection.can_start">请处理未通过的检查项后重新检查。</span>
+        <ElButton type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <span v-if="inspection && !inspection.can_start">本次升级未开始，请查看未通过的检查项。</span>
       </ElSpace>
     </template>
     <section v-if="task" class="task-panel" aria-label="升级任务">
@@ -145,7 +147,7 @@ async function reconnect() { if (taskRunning.value) await pollTask(); else await
 async function inspect() {
   if (busy.value || updateBlocked.value || props.externalBusy) return
   operation.value = 'inspect'; error.value = ''; invalidateInspection()
-  try { const result = await systemUpdateApi.inspect(targets.value); if (!disposed) inspection.value = result }
+  try { const result = await systemUpdateApi.inspect(targets.value); if (!disposed) { inspection.value = result; confirmVisible.value = result.can_start } }
   catch (cause) { if (!disposed) error.value = message(cause) }
   finally { if (!disposed) operation.value = '' }
 }
@@ -179,6 +181,7 @@ onBeforeUnmount(() => { disposed = true; requestGeneration++; clearTimeout(timer
 .version-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 16px; }
 .version-row + .version-row, .check-list li + li { border-top: 1px solid var(--el-border-color); }
 .version-select { display: grid; gap: 8px; width: 220px; max-width: 100%; }
+.check-details summary { cursor: pointer; padding: 8px 0; color: var(--el-text-color-regular); }
 .check-list { list-style: none; padding: 0; margin: 0; }
 .check-list li { padding: 16px; }
 .check-heading { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }

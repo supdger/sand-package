@@ -7,6 +7,7 @@ use RuntimeException;
 use Throwable;
 
 require_once dirname(__DIR__, 2) . '/tools/system-update-worker.php';
+require_once __DIR__ . '/SystemUpdateEnvironment.php';
 
 /** Super-admin API coordinator. Commands and paths are trusted host configuration only. */
 final class SystemUpdate
@@ -54,7 +55,8 @@ final class SystemUpdate
             if ($match === null || !version_compare($target['version'], $installed[$target['package']] ?? '', '>')) throw new ApiException('版本未在官方受信更新发行中，或没有高于当前版本', 400);
             $targets[] = $match;
         }
-        $plan = $this->plan($targets);
+        try { $plan = $this->plan($targets); }
+        catch (Throwable $error) { return ['confirmation' => '', 'targets' => $this->publicTargets($targets), 'checks' => $checks, 'can_start' => false, 'expires_at' => time()]; }
         $candidateHost = $installed['supdger/sand-core'] ?? '';
         foreach ($targets as $target) if ($target['package'] === 'supdger/sand-core') $candidateHost = $target['version'];
         foreach ($targets as $target) {
@@ -70,6 +72,8 @@ final class SystemUpdate
             try {
                 $handles = \SandSystemUpdateRuntime::locks($plan);
                 $this->assertNoPending();
+                \SandSystemUpdateRuntime::assertManagedSources($plan);
+                SystemUpdateEnvironment::prepareStatic($plan);
                 \SandSystemUpdateRuntime::assertManaged($plan);
                 $checks[] = $this->check('managed', '本地文件与发布基线', true, '已管理文件无修改，静态目录无未知碰撞');
                 \SandSystemUpdateRuntime::command(\SandSystemUpdateRuntime::composerArguments($plan, true), $this->server, static function (string $line): void {}, 120);
@@ -235,21 +239,29 @@ final class SystemUpdate
 
     private function plan(array $targets): array
     {
+        $environment = SystemUpdateEnvironment::resolve($this->server, $this->settings, config('process', []), config('app.public_path', $this->server . '/public'), config('server.pid_file', $this->server . '/runtime/webman.pid'));
         $plan = [
             'server' => $this->server, 'root' => $this->root,
-            'frontend' => $this->settings['frontend'] ?? dirname($this->server) . '/sandadmin-artd',
-            'static' => $this->settings['static'] ?? '', 'storage' => (new PluginStorage())->root(),
+            'frontend' => $environment['frontend'],
+            'static' => $environment['static'], 'storage' => (new PluginStorage())->root(),
             'php' => $this->settings['php'] ?? PHP_BINARY,
             'composer' => $this->settings['composer'] ?? ['composer'], 'pnpm' => $this->settings['pnpm'] ?? ['pnpm'],
             'reload' => $this->settings['reload'] ?? [], 'health' => $this->settings['health'] ?? [], 'targets' => $targets, 'pinned' => $this->pins(),
         ];
+        if ($environment['deployment'] !== []) $plan['deployment'] = $environment['deployment'];
+        if ($environment['frontend_base'] !== null) $plan['frontend_base'] = $environment['frontend_base'];
+        if (PHP_OS_FAMILY === 'Windows') {
+            $directories = array_values(array_filter(explode(PATH_SEPARATOR, getenv('PATH') ?: '')));
+            foreach (['composer', 'pnpm'] as $tool) if ($plan[$tool] === [$tool]) $plan[$tool] = SystemUpdateEnvironment::nativeWindowsCommand($tool, $directories, $plan['php']);
+        }
         foreach (['server', 'root', 'frontend', 'static', 'storage', 'php'] as $key) $plan[$key] = \SandSystemUpdateRuntime::normalizePath($plan[$key]);
         return $plan;
     }
 
     private function environmentChecks(): array
     {
-        $plan = $this->plan([]);
+        try { $plan = $this->plan([]); }
+        catch (Throwable $error) { return [$this->check('deployment', '宿主自动准备', false, $error->getMessage())]; }
         $native = function_exists('proc_open');
         $reason = '';
         if (PHP_OS_FAMILY === 'Windows') {
@@ -258,10 +270,12 @@ final class SystemUpdate
         } else $native = $native && function_exists('pcntl_fork') && function_exists('pcntl_exec') && function_exists('posix_setsid') && function_exists('posix_kill');
         $checks = [$this->check('platform', '独立执行器', $native, $native ? '本机支持独立 PHP CLI 更新进程' : ($reason !== '' ? $reason : 'Windows 需要 proc_open 与 PowerShell；Linux/macOS 需要 proc_open、pcntl 和 posix'))];
         foreach (['reload' => '服务重载', 'health' => '健康检查', 'composer' => 'Composer', 'pnpm' => '前端构建'] as $key => $label) {
-            $ok = is_array($plan[$key]) && array_is_list($plan[$key]) && count($plan[$key]) > 0;
-            $checks[] = $this->check($key, $label, $ok, $ok ? '管理员固定命令已配置' : '请先在宿主 config/sand_system_update.php 配置 ' . $key);
+            $automatic = in_array($key, ['reload', 'health'], true) && $plan[$key] === [] && !empty($plan['deployment']);
+            $ok = $automatic || (is_array($plan[$key]) && array_is_list($plan[$key]) && count($plan[$key]) > 0);
+            $checks[] = $this->check($key, $label, $ok, $automatic ? '框架自动执行宿主' . $label : ($ok ? '宿主固定命令可用' : '框架未找到可执行的' . $label . '程序'));
         }
-        $checks[] = $this->check('static', '静态发布目录', is_string($plan['static']) && $plan['static'] !== '' && is_file($plan['static'] . '/' . \SandSystemUpdateRuntime::STATIC_MANIFEST), '需要管理员配置专用静态目录，并用 prepare-system-update.php 核对现有 dist 后建立基线');
+        try { SystemUpdateEnvironment::staticFiles($plan); $checks[] = $this->check('static', '静态发布目录', true, '框架自动核对并准备专用静态发布基线'); }
+        catch (Throwable $error) { $checks[] = $this->check('static', '静态发布目录', false, $error->getMessage()); }
         foreach (['frontend' => '前端源码', 'server' => '宿主目录'] as $key => $label) $checks[] = $this->check($key, $label, is_dir($plan[$key]) && is_writable($plan[$key]), is_dir($plan[$key]) && is_writable($plan[$key]) ? '目录存在且可写' : $label . '不可写或不存在');
         return $checks;
     }
