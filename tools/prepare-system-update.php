@@ -13,12 +13,12 @@ try {
     if (count($options) !== 2) throw new RuntimeException('必须同时提供 frontend 和 static 绝对目录');
     $dist = $options['frontend'] . '/dist';
     $static = $options['static'];
-    $frontendRoot = realpath($options['frontend']) ?: throw new RuntimeException('前端目录不存在');
-    $staticRoot = realpath($static) ?: throw new RuntimeException('静态目录不存在');
-    $overlaps = static fn (string $a, string $b): bool => $a === $b || str_starts_with($a . '/', $b . '/') || str_starts_with($b . '/', $a . '/');
+    $frontendRoot = SandSystemUpdateRuntime::normalizePath(realpath($options['frontend']) ?: throw new RuntimeException('前端目录不存在'));
+    $staticRoot = SandSystemUpdateRuntime::normalizePath(realpath($static) ?: throw new RuntimeException('静态目录不存在'));
+    $overlaps = static fn (string $a, string $b): bool => SandSystemUpdateRuntime::overlaps($a, $b);
     if ($overlaps($frontendRoot, $staticRoot)) throw new RuntimeException('静态目录不能与前端源码目录重叠');
     $serverRoot = dirname($frontendRoot) . '/server';
-    if ($staticRoot === $serverRoot || str_starts_with($serverRoot . '/', $staticRoot . '/')) throw new RuntimeException('静态目录不能覆盖宿主根目录');
+    if (str_starts_with(SandSystemUpdateRuntime::pathKey($serverRoot) . '/', SandSystemUpdateRuntime::pathKey($staticRoot) . '/')) throw new RuntimeException('静态目录不能覆盖宿主根目录');
     foreach (['app', 'config', 'vendor', 'plugin', 'runtime'] as $protected) {
         if ($overlaps($staticRoot, $serverRoot . '/' . $protected)) throw new RuntimeException('静态目录不能与宿主 ' . $protected . ' 目录重叠');
     }

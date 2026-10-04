@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+require_once dirname(__DIR__) . '/server/plugin/sandpackage/tools/system-update-worker.php';
+
 /** Shared strict filesystem rules for the two operator-facing update tools. */
 final class SandSystemUpdateReleaseTools
 {
@@ -22,20 +24,10 @@ final class SandSystemUpdateReleaseTools
 
     public static function absolute(string $path): string
     {
-        if ($path === '' || str_contains($path, "\0") || (!str_starts_with($path, '/') && !preg_match('#^[A-Za-z]:[\\\\/]#', $path))) {
-            throw new RuntimeException('必须提供绝对路径');
-        }
-        $normalized = str_replace('\\', '/', $path);
-        foreach (explode('/', $normalized) as $segment) {
-            if ($segment === '.' || $segment === '..') throw new RuntimeException('拒绝包含路径穿越的目录');
-        }
-        $cursor = $path;
-        while ($cursor !== '' && $cursor !== '.' && dirname($cursor) !== $cursor) {
-            if (is_link($cursor)) throw new RuntimeException('拒绝符号链接路径：' . $cursor);
-            $cursor = dirname($cursor);
-        }
-        if (rtrim($normalized, '/') === '' || preg_match('#^[A-Za-z]:/?$#', $normalized)) throw new RuntimeException('拒绝文件系统根目录');
-        return rtrim($path, '/\\');
+        $normalized = SandSystemUpdateRuntime::normalizePath($path);
+        if ($normalized === '' || preg_match('#^[A-Za-z]:$#', $normalized)) throw new RuntimeException('拒绝文件系统根目录');
+        SandSystemUpdateRuntime::safePath($normalized);
+        return $normalized;
     }
 
     /** @return array<string,string> */
@@ -51,6 +43,7 @@ final class SandSystemUpdateReleaseTools
                 if ($entry === '.' || $entry === '..') continue;
                 $relative = self::relative($prefix . $entry);
                 $path = $directory . '/' . $entry;
+                if (PHP_OS_FAMILY === 'Windows') self::absolute($path);
                 if (is_link($path)) throw new RuntimeException('拒绝符号链接文件：' . $relative);
                 if (is_dir($path)) { $walk($path, $relative . '/'); continue; }
                 if (!is_file($path)) throw new RuntimeException('拒绝非常规文件：' . $relative);
