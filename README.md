@@ -16,10 +16,10 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 
 下列后端命令在宿主 `server/` 目录执行，需要 PHP ≥8.2 和 Composer，并保留宿主 `composer.json` 中 `support\Plugin::install` 的 `post-package-install`、`post-package-update` 钩子。安装前备份现有配置和前端修改；冲突时先核对发布清单，不强行覆盖。
 
-本版本要求 [Sand Core 0.2.0](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
+本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.3
+composer require supdger/sand-package:^0.2.4
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -34,6 +34,10 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 详细配置和操作见 [Wiki](https://github.com/supdger/sandadmin/wiki/Home)。[Sand Package：应用载荷、schema 重接与兼容声明](https://github.com/supdger/sandadmin/wiki/package-reference)记录对应能力及限制；安装器与宿主使用分别按所选版本核对。
 
 问题与建议请提交到 [Issues](https://github.com/supdger/sand-package/issues)。
+
+## 插件安装后的页面恢复（0.2.4）
+
+配套 Sand Core 0.2.4、发布并构建匹配的管理端源码后，插件安装引发短暂服务重载时，仓库只读请求会有限自动恢复，页面完成导航后退出加载遮罩。权限拒绝、业务错误和安装写请求不会自动重放；持续故障可使用页面的“重新加载”。
 
 ## 系统更新（0.2.3）
 

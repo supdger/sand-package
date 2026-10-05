@@ -986,7 +986,10 @@
 </template>
 
 <script setup lang="ts">
-  import { ref, reactive, computed, onMounted, onActivated, onDeactivated, watch } from 'vue'
+  import { ref, reactive, computed, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
+  import { useUserStore } from '@/store/modules/user'
+  import { isRecoverableInitializationError } from '@/utils/http/error'
+  import { createRecoverableRead } from './read-recovery'
   import { ElMessage, ElMessageBox } from 'element-plus'
   import type { ColumnOption } from '@/types'
   import type { UploadFile } from 'element-plus'
@@ -2288,16 +2291,27 @@
     }
   ]
 
+  const localRead = createRecoverableRead(isRecoverableInitializationError)
+  const catalogRead = createRecoverableRead(isRecoverableInitializationError)
+  const userStore = useUserStore()
+  let readsActive = true
+
   async function getList(preserveRecoverySession = false): Promise<void> {
+    if (!readsActive || !userStore.isLogin) return
+    const read = localRead.begin()
     loading.value = true
     listError.value = ''
     if (!preserveRecoverySession) lockAllRecoveryWrites()
     try {
-      const resp = await sandpackageApi.getAppList()
+      const resp = await read.run((signal) =>
+        sandpackageApi.getAppList({ signal, showErrorMessage: false })
+      )
+      if (!read.isCurrent()) return
       installList.value = resp?.data || []
       version.value = resp?.version || {}
       syncFailedUpgradeSessions(installList.value)
     } catch (error: unknown) {
+      if (!read.isCurrent()) return
       installList.value = []
       for (const app of Object.keys(recoverySessions)) {
         delete recoverySessions[app]
@@ -2305,7 +2319,7 @@
       recoveryFiles.clear()
       listError.value = readRecoveryErrorMessage(error, FAILED_UPGRADE_LIST_ERROR_MESSAGE)
     } finally {
-      loading.value = false
+      if (read.isCurrent()) loading.value = false
     }
   }
 
@@ -2324,7 +2338,6 @@
   const repositoryDocumentError = ref('')
   const repositoryDocumentMarkdown = ref('')
   const repositoryDocumentTarget = ref<RepositoryDocumentTarget | null>(null)
-  let repositoryRequestId = 0
   let repositoryDocumentRequestId = 0
 
   const repositoryPlugins = computed(() =>
@@ -2394,24 +2407,27 @@
   })
 
   const fetchRepositoryCatalog = async (): Promise<void> => {
-    const requestId = ++repositoryRequestId
+    if (!readsActive || !userStore.isLogin) return
+    const read = catalogRead.begin()
     repositoryLoading.value = true
     repositoryError.value = ''
     repositoryCatalog.value = null
     currentRepositoryPlugin.value = null
     repositoryVersionVisible.value = false
     try {
-      const response = await sandpackageApi.getRepositoryCatalog()
-      if (requestId !== repositoryRequestId) return
+      const response = await read.run((signal) =>
+        sandpackageApi.getRepositoryCatalog({ signal, showErrorMessage: false })
+      )
+      if (!read.isCurrent()) return
       repositoryCatalog.value = response
       repositoryLoaded.value = true
     } catch (error: unknown) {
-      if (requestId !== repositoryRequestId) return
+      if (!read.isCurrent()) return
       repositoryCatalog.value = null
       repositoryLoaded.value = true
       repositoryError.value = readRecoveryErrorMessage(error, '插件仓库读取失败，请稍后重试')
     } finally {
-      if (requestId === repositoryRequestId) repositoryLoading.value = false
+      if (read.isCurrent()) repositoryLoading.value = false
     }
   }
 
@@ -2757,11 +2773,54 @@
     repositoryDocumentTarget.value = null
   }
 
-  // 监听 tab 切换
-  watch(activeTab, (val) => {
-    if (val === 'repository' && !repositoryLoading.value) {
-      fetchRepositoryCatalog()
-    }
+  const cancelRepositoryReads = (): void => {
+    localRead.cancel()
+    catalogRead.cancel()
+    loading.value = false
+    repositoryLoading.value = false
+  }
+
+  const refreshVisibleRepositoryReads = (): void => {
+    if (activeTab.value === 'local' || activeTab.value === 'repository') getList()
+    if (activeTab.value === 'repository') fetchRepositoryCatalog()
+  }
+
+  // Cancel hidden work; only the repository pane needs the remote catalog.
+  watch(activeTab, () => {
+    cancelRepositoryReads()
+    refreshVisibleRepositoryReads()
+  }, { flush: 'sync' })
+
+  watch(
+    () => [userStore.accessToken, userStore.isLogin],
+    () => {
+      cancelRepositoryReads()
+      installList.value = []
+      repositoryCatalog.value = null
+      repositoryLoaded.value = false
+      lockAllRecoveryWrites()
+      if (readsActive && userStore.isLogin && userStore.accessToken) {
+        refreshVisibleRepositoryReads()
+      }
+    },
+    { flush: 'sync' }
+  )
+
+  let readsDeactivated = false
+  onDeactivated(() => {
+    readsDeactivated = true
+    readsActive = false
+    cancelRepositoryReads()
+  })
+  onActivated(() => {
+    if (!readsDeactivated) return
+    readsDeactivated = false
+    readsActive = true
+    refreshVisibleRepositoryReads()
+  })
+  onUnmounted(() => {
+    readsActive = false
+    cancelRepositoryReads()
   })
 
   watch(cleanupRepositoryVersions, (versions) => {
@@ -2775,19 +2834,6 @@
     if (!row || (localDetailRecoveryExpected.value && !isLegacyFailedUpgradeRecovery(row))) {
       closeLocalDetail()
     }
-  })
-
-  let repositoryWasDeactivated = false
-  onDeactivated(() => {
-    repositoryWasDeactivated = true
-    repositoryRequestId += 1
-    repositoryLoading.value = false
-  })
-  onActivated(() => {
-    if (!repositoryWasDeactivated) return
-    repositoryWasDeactivated = false
-    getList()
-    if (activeTab.value === 'repository') fetchRepositoryCatalog()
   })
 
   onMounted(() => {
