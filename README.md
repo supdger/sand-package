@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.4
+composer require supdger/sand-package:^0.2.5
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -34,6 +34,10 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 详细配置和操作见 [Wiki](https://github.com/supdger/sandadmin/wiki/Home)。[Sand Package：应用载荷、schema 重接与兼容声明](https://github.com/supdger/sandadmin/wiki/package-reference)记录对应能力及限制；安装器与宿主使用分别按所选版本核对。
 
 问题与建议请提交到 [Issues](https://github.com/supdger/sand-package/issues)。
+
+## 依赖命令执行修复（0.2.5）
+
+插件安装中的 Composer / npm / pnpm / yarn 命令继承宿主进程的 HOME、缓存、代理及其他工具配置，并正确传递命令参数。仍由超级管理员执行固定安装任务，不从请求接收环境值。已有宿主需要升级本包才能获得修复；无需数据库迁移，配套 Sand Core 0.2.4 的要求不变。
 
 ## 插件安装后的页面恢复（0.2.4）
 
