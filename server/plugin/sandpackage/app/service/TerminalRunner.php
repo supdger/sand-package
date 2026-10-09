@@ -39,7 +39,7 @@ $pgid = posix_getpgrp(); $emit(['event' => 'ready', 'launcher_pid' => getmypid()
 if (trim((string) fgets($control)) !== 'GO') { exit(125); }
 $worker = pcntl_fork();
 if ($worker === -1) { $emit(['event' => 'failure', 'descendant_pids' => [], 'time' => time()]); exit(126); }
-if ($worker === 0) { $path = getenv('PATH') ?: ''; foreach (explode(PATH_SEPARATOR, $path) as $dir) { $candidate = rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $args[0]; if (is_file($candidate) && is_executable($candidate)) { pcntl_exec($candidate, $args, ['PATH' => $path]); exit(127); } } exit(127); }
+if ($worker === 0) { $path = getenv('PATH') ?: ''; foreach (explode(PATH_SEPARATOR, $path) as $dir) { $candidate = rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $args[0]; if (is_file($candidate) && is_executable($candidate)) { pcntl_exec($candidate, array_slice($args, 1), getenv()); exit(127); } } exit(127); }
 $known = []; do { $rows = shell_exec('/bin/ps -axo pid=,pgid= 2>/dev/null') ?: ''; foreach (preg_split('/\R/', $rows) as $row) { if (preg_match('/^\s*(\d+)\s+(\d+)\s*$/', $row, $m) === 1 && (int) $m[2] === $pgid && (int) $m[1] !== getmypid()) { $known[(int) $m[1]] = (int) $m[1]; } } $emit(['event' => 'tracked', 'descendant_pids' => array_values($known), 'time' => time()]); $wait = pcntl_waitpid($worker, $status, WNOHANG); if ($wait === $worker) { break; } usleep(50000); } while (true);
 $emit(['event' => 'exited', 'descendant_pids' => array_values($known), 'time' => time(), 'exit_code' => pcntl_wexitstatus($status)]); exit(pcntl_wexitstatus($status));
 PHP;
@@ -89,7 +89,9 @@ PHP;
             $this->nonce = $this->install->beginDependencyCommand($this->callback);
             $this->install->acquireDependencyExecutionLock($this->callback, $this->nonce);
             $pipes = [];
-            $this->process = @proc_open($this->groupLauncherCommand($command['argv']), [1 => ['pipe', 'w'], 2 => ['pipe', 'w'], 3 => ['pipe', 'r'], 4 => ['pipe', 'w']], $pipes, $command['cwd'], ['PATH' => (string) getenv('PATH')]);
+            // Only inherit the host process environment; request data never
+            // supplies environment values for these fixed dependency commands.
+            $this->process = @proc_open($this->groupLauncherCommand($command['argv']), [1 => ['pipe', 'w'], 2 => ['pipe', 'w'], 3 => ['pipe', 'r'], 4 => ['pipe', 'w']], $pipes, $command['cwd'], null);
             if (!is_resource($this->process)) {
                 throw new \RuntimeException('dependency process did not start');
             }
