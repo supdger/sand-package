@@ -1063,6 +1063,8 @@ class InstallLogic
             $recovery = $this->freshRecovery($hostPayload, $dependencyChange);
             return $recovery->recover($action, $confirmation, $plan, function () use ($restart, $hostPayload, $dependencyChange, $recovery): void {
                 $this->checkPackage();
+                $this->assertPluginDependencies();
+                $serviceCatalog = $this->preflightPluginServiceCatalog();
                 $paths = $this->checkedPaths();
                 // The original deployment was absent. The journal binds partial-copy
                 // contents; only paths owned by this exact candidate may be rewritten.
@@ -1079,9 +1081,15 @@ class InstallLogic
                         $recovery->checkpoint();
                     }
                     $this->deployFreshOrUpgrade(
-                        $paths, $restart, $hostPayload, null, null, $dependencyChange,
+                        $paths, $serviceCatalog === null && $restart, $hostPayload, null, null, $dependencyChange,
                     );
                     $hostPayload?->verifyInstalled();
+                    if ($serviceCatalog !== null) {
+                        [$port, $declaration] = $serviceCatalog;
+                        echo '登记插件服务目录' . PHP_EOL;
+                        $port->registerServiceActions($declaration['service'], $declaration['actions']);
+                        if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                    }
                     $recovery->checkpoint();
                     $info = $this->getInfo();
                     unset($info['operation_pending']);
@@ -1550,6 +1558,53 @@ class InstallLogic
                 || is_link(base_path() . '/plugin/' . $name . '/app/functions.php')) {
                 throw new ApiException("插件依赖 {$name}@{$version} 不兼容；未执行当前插件数据库脚本", 400);
             }
+        }
+        foreach ($requirements as $name => $version) {
+            $this->loadInstalledDependency($name, $version);
+        }
+    }
+
+    private function loadInstalledDependency(string $name, string $version): void
+    {
+        try {
+            $root = base_path() . DIRECTORY_SEPARATOR . 'plugin' . DIRECTORY_SEPARATOR . $name;
+            $directory = $root . DIRECTORY_SEPARATOR . 'config';
+            $this->assertSafePath($directory);
+            if (!is_dir($directory)) throw new \RuntimeException('插件配置目录缺失');
+            foreach (new \RecursiveIteratorIterator(new \RecursiveDirectoryIterator(
+                $directory, \FilesystemIterator::SKIP_DOTS,
+            ), \RecursiveIteratorIterator::SELF_FIRST) as $entry) {
+                $this->assertSafePath($entry->getPathname());
+            }
+            // Use the same scoped config and autoload-files protocol as Webman worker bootstrap.
+            \Webman\Config::load($directory, ['route'], "plugin.$name");
+            $config = \Webman\Config::get("plugin.$name", []);
+            if (!is_array($config)) throw new \RuntimeException('插件配置格式错误');
+            $groups = [];
+            foreach ($config as $project) {
+                if (is_array($project)) $groups[] = $project;
+            }
+            $groups[] = $config;
+            $files = [];
+            foreach ($groups as $group) {
+                $declared = $group['autoload']['files'] ?? [];
+                if (!is_array($declared)) throw new \RuntimeException('插件自动加载配置格式错误');
+                foreach ($declared as $file) {
+                    if (!is_string($file)) throw new \RuntimeException('插件自动加载路径格式错误');
+                    $this->assertSafePath($file);
+                    $resolved = realpath($file);
+                    if (!is_file($file) || $resolved === false
+                        || !str_starts_with($resolved, $root . DIRECTORY_SEPARATOR)) {
+                        throw new \RuntimeException('插件自动加载文件不属于已安装依赖');
+                    }
+                    $files[] = $file;
+                }
+            }
+            foreach ($files as $file) include_once $file;
+        } catch (Throwable $error) {
+            throw new ApiException(
+                "插件依赖 {$name}@{$version} 运行加载失败；未执行当前插件数据库脚本：" . $error->getMessage(), 400,
+            );
         }
     }
 

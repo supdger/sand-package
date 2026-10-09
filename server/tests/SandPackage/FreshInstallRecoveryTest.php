@@ -14,6 +14,11 @@ namespace plugin\sandadmin\app\cache {
         public static function clearMenuCache(): void { if (self::$fail) throw new \RuntimeException('injected post-copy failure'); }
     }
 }
+namespace support {
+    final class Log {
+        public static function error(string $message): void { error_log($message); }
+    }
+}
 namespace {
     use plugin\sandpackage\app\logic\InstallLogic;
     use plugin\sandpackage\app\service\FreshInstallRecovery;
@@ -71,7 +76,15 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path !== '' ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path !== '' ? '/' . $path : ''); }
     function env(string $name, mixed $default = null): mixed { return $default; }
-    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : null; }
+    function config(string $key, mixed $default = null): mixed {
+        return match ($key) {
+            'plugin.sandadmin.app.version' => '0.1.0',
+            'server.pid_file' => runtime_path('missing-fixture-master.pid'),
+            'process.webman.listen' => 'http://127.0.0.1:9',
+            default => $default,
+        };
+    }
+    require dirname(__DIR__, 2) . '/compat/Saithink/Saipackage/service/Server.php';
     require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
     foreach (['HostPayloadManifest', 'HostPayloadPlan', 'HostPayloadOwnership', 'HostPayloadFreshFiles', 'HostPayloadChangeFiles', 'HostPayloadRuntimeChangeFiles', 'HostPayloadDependencyChange', 'HostPayloadCandidateRollback', 'HostPayloadLifecycleJournal'] as $component) {
         require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/' . $component . '.php';
@@ -328,6 +341,32 @@ namespace {
     $status = $tester->execute(['action' => 'manual-cleanup-fresh', 'app' => 'probe-package', '--plan' => $planFile, '--confirmation' => $cli['confirmation']]);
     $cli = json_decode(trim($tester->getDisplay()), true);
     expect($status === 0 && $cli['phase'] === 'cleaned', 'official CLI performs confirmed cleanup without the legacy recovery path');
+
+    $logic = fixture('CREATE TABLE probe_one (id bigint);');
+    UserMenuCache::$fail = true;
+    rejects(fn () => $logic->install(true), 'prepare committed recovery requiring explicit reload');
+    UserMenuCache::$fail = false;
+    $inspection = $logic->inspectFreshInstallRecovery();
+    $databaseCheckpoint = $inspection['binding']['database'];
+    $sqlCalls = Db::$pdo->executed;
+    $status = $tester->execute(['action' => 'continue-fresh', 'app' => 'probe-package',
+        '--confirmation' => $inspection['confirmation'], '--restart' => true]);
+    expect($status === 1 && str_contains($tester->getDisplay(), '拒绝重载'),
+        'official Recover CLI reports a missing master as a clear nonzero failure');
+    $inspection = $logic->inspectFreshInstallRecovery();
+    expect($inspection['phase'] === 'sql_committed_deploy_pending'
+        && $inspection['binding']['database'] === $databaseCheckpoint && Db::$pdo->executed === $sqlCalls,
+        'failed CLI reload preserves committed SQL checkpoint and continue-fresh recovery');
+    $status = $tester->execute(['action' => 'continue-fresh', 'app' => 'probe-package',
+        '--confirmation' => $inspection['confirmation']]);
+    expect($status === 1 && str_contains($tester->getDisplay(), '--restart'),
+        'failed reload retains the original explicit restart requirement');
+    $inspection = $logic->inspectFreshInstallRecovery();
+    $status = $tester->execute(['action' => 'continue-fresh', 'app' => 'probe-package',
+        '--confirmation' => $inspection['confirmation'], '--restart' => true]);
+    expect($status === 1 && Db::$pdo->executed === $sqlCalls
+        && $logic->inspectFreshInstallRecovery()['binding']['database'] === $databaseCheckpoint,
+        'another authorized CLI continuation never replays the committed SQL');
 
     echo "Fresh install fault-injection fixtures retained at $root\n";
 }
