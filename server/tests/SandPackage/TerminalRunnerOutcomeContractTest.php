@@ -32,7 +32,7 @@ namespace plugin\sandpackage\app\logic {
 }
 
 namespace plugin\sandpackage\app\service {
-    function proc_open(array $command, array $descriptor, array &$pipes, string $cwd, array $environment): mixed
+    function proc_open(array $command, array $descriptor, array &$pipes, string $cwd, ?array $environment): mixed
     {
         $pipes = [
             1 => fopen('php://temp', 'w+'),
