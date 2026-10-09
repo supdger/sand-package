@@ -21,11 +21,42 @@ class Server
      */
     public static function restart(): bool
     {
+        // Console commands have no Workerman worker; their parent owns the
+        // command invocation, not the host service.
+        if (Worker::getAllWorkers() === []) {
+            try {
+                if (!function_exists('posix_kill')) throw new \RuntimeException('当前平台无法从恢复 CLI 安全重载服务；请使用宿主正式服务控制入口重载');
+                $pidFile = config('server.pid_file');
+                if (!is_string($pidFile) || $pidFile === '') throw new \RuntimeException('宿主未配置 Workerman 主进程记录，恢复 CLI 已拒绝重载');
+                require_once dirname(__DIR__, 4) . '/plugin/sandpackage/tools/system-update-worker.php';
+                $server = base_path();
+                $master = \SandSystemUpdateRuntime::unixHostMaster($server, $pidFile);
+                $listen = config('process.webman.listen', config('server.listen', ''));
+                if (!is_string($listen)) throw new \RuntimeException('宿主 HTTP 监听配置无效，恢复 CLI 已拒绝重载');
+                $workers = \SandSystemUpdateRuntime::unixHttpWorkers($server, $master, $listen);
+                if ($workers === []) throw new \RuntimeException('当前宿主没有可核对的 HTTP worker，恢复 CLI 已拒绝重载');
+                fwrite(STDERR, "已核对当前宿主主进程；正在重载 HTTP worker。\n");
+                \SandSystemUpdateRuntime::reloadUnixHost($server, $pidFile, $master);
+                $deadline = microtime(true) + 15;
+                do {
+                    if (\SandSystemUpdateRuntime::unixHostMaster($server, $pidFile, $master['pid']) !== $master) throw new \RuntimeException('服务重载期间宿主主进程身份已变化');
+                    $current = \SandSystemUpdateRuntime::unixHttpWorkers($server, $master, $listen);
+                    if (count($current) === count($workers) && array_intersect_assoc($workers, $current) === []) {
+                        fwrite(STDERR, "当前宿主 HTTP worker 已完成轮换。\n");
+                        return true;
+                    }
+                    usleep(100000);
+                } while (microtime(true) < $deadline);
+                throw new \RuntimeException('已发送重载信号，但 HTTP worker 未在 15 秒内完成轮换；请 inspect 恢复现场后再继续，禁止重跑已提交 SQL');
+            } catch (\Throwable $e) {
+                Log::error('服务重载失败：' . $e->getMessage());
+                throw $e;
+            }
+        }
         if (function_exists('posix_kill')) {
             // 所有子进程重启
             try {
-                posix_kill(posix_getppid(), SIGUSR1);
-                return true;
+                return posix_kill(posix_getppid(), SIGUSR1);
             } catch (\Throwable $e) {
                 Log::error("平滑启动失败：" . $e->getMessage());
                 return false;

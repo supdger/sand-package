@@ -477,15 +477,46 @@ POWERSHELL;
         return $captured;
     }
 
-    public static function unixHostMaster(string $server, string $pidFile, int $requestParent): array
+    public static function unixHostMaster(string $server, string $pidFile, ?int $requestParent = null): array
     {
         self::safePath($pidFile);
         $text = is_file($pidFile) ? trim((string)file_get_contents($pidFile)) : '';
-        if (!ctype_digit($text) || (int)$text !== $requestParent || $requestParent <= 1 || !posix_kill($requestParent, 0)) throw new RuntimeException('宿主主进程记录与当前 HTTP 进程归属不一致，框架已拒绝重载');
-        $identity = trim(self::command(['/bin/ps', '-p', (string)$requestParent, '-o', 'lstart=', '-o', 'args='], $server, static function (string $line): void {}, 10));
+        $pid = (int)$text;
+        if (!ctype_digit($text) || $pid <= 1 || $requestParent !== null && $pid !== $requestParent || !posix_kill($pid, 0)) throw new RuntimeException('宿主主进程记录不可用或与当前进程归属不一致，框架已拒绝重载');
+        $identity = trim(self::command(['/bin/ps', '-p', (string)$pid, '-o', 'lstart=', '-o', 'args='], $server, static function (string $line): void {}, 10));
         $start = self::normalizePath(realpath($server . '/start.php') ?: $server . '/start.php');
-        if (!str_contains($identity, 'master process') || !str_contains($identity, 'start_file=' . $start)) throw new RuntimeException('主进程不是当前宿主的 Workerman 实例，框架已拒绝重载');
-        return ['pid' => $requestParent, 'identity' => $identity];
+        if (!preg_match('/WorkerMan: master process\s+start_file=(.+)$/D', $identity, $match) || $match[1] !== $start) throw new RuntimeException('主进程不是当前宿主的 Workerman 实例，框架已拒绝重载');
+        return ['pid' => $pid, 'identity' => $identity];
+    }
+
+    public static function reloadUnixHost(string $server, string $pidFile, array $master): void
+    {
+        if (!is_int($master['pid'] ?? null) || !is_string($master['identity'] ?? null)
+            || self::unixHostMaster($server, $pidFile, $master['pid']) !== $master) throw new RuntimeException('宿主主进程身份已变化，框架已拒绝重载');
+        if (!posix_kill($master['pid'], SIGUSR1)) throw new RuntimeException('框架无法向当前宿主发送重载信号');
+    }
+
+    /** Inspect only HTTP workers belonging to the already verified master. */
+    public static function unixHttpWorkers(string $server, array $master, string $listen): array
+    {
+        if ($listen === '' || !is_int($master['pid'] ?? null)) throw new RuntimeException('宿主 HTTP 进程配置不可核对，恢复 CLI 已拒绝重载');
+        $children = trim(self::command(['/usr/bin/pgrep', '-P', (string)$master['pid'], '.'], $server, static function (string $line): void {}, 10));
+        $workers = [];
+        foreach (preg_split('/\s+/', $children) as $child) {
+            if (!ctype_digit($child) || (int)$child <= 1) throw new RuntimeException('宿主子进程记录无效');
+            // A child can disappear during reload; it is absent from this snapshot.
+            try {
+                $identity = trim(self::command(['/bin/ps', '-p', $child, '-o', 'ppid=', '-o', 'lstart=', '-o', 'args='], $server, static function (string $line): void {}, 10));
+            } catch (RuntimeException $error) {
+                if (posix_kill((int)$child, 0)) throw $error;
+                continue;
+            }
+            if (preg_match('/^([0-9]+)\s+/', $identity, $parent) && (int)$parent[1] === $master['pid']
+                && str_contains($identity, 'WorkerMan: worker process ') && str_ends_with($identity, ' ' . $listen)) {
+                $workers[$child] = $identity;
+            }
+        }
+        return $workers;
     }
 
     /** Bind Windows reload to the running request's actual standard supervisor ancestry. */
@@ -804,8 +835,7 @@ NATIVE;
                     $this->emit('reload', '已通知 Windows 宿主监督器重载');
                 } else {
                     $master = $deployment['master'];
-                    if (self::unixHostMaster($plan['server'], $deployment['pid_file'], $master['pid']) !== $master) throw new RuntimeException('宿主主进程身份已变化，框架已拒绝重载');
-                    if (!posix_kill($master['pid'], SIGUSR1)) throw new RuntimeException('框架无法向当前宿主发送重载信号');
+                    self::reloadUnixHost($plan['server'], $deployment['pid_file'], $master);
                     $this->emit('reload', '已向当前 Workerman 宿主发送重载信号');
                 }
             });

@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.5
+composer require supdger/sand-package:^0.2.6
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -34,6 +34,12 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 详细配置和操作见 [Wiki](https://github.com/supdger/sandadmin/wiki/Home)。[Sand Package：应用载荷、schema 重接与兼容声明](https://github.com/supdger/sandadmin/wiki/package-reference)记录对应能力及限制；安装器与宿主使用分别按所选版本核对。
 
 问题与建议请提交到 [Issues](https://github.com/supdger/sand-package/issues)。
+
+## 自动依赖与恢复 CLI（0.2.6）
+
+自动安装依赖后，安装器按 Webman 的配置与 autoload 文件声明在当前 worker 激活依赖，再查询服务目录。加载或目录预检失败时保留原候选，不执行当前插件 SQL；修复依赖后可继续原安装。
+
+Unix 恢复 CLI 重载需要 POSIX 扩展、`/usr/bin/pgrep` 与 `/bin/ps`。恢复 CLI 的 `--restart` 仍须明确授权。它核对当前宿主的 Workerman master 与 HTTP worker，并等待 worker 轮换，不向调用者父进程发送信号。无法定位或重载失败时命令非零退出，先通过 `inspect` 核对恢复现场，不重跑已提交 SQL。缺少 POSIX 的平台会拒绝 CLI 重载，应使用宿主正式服务控制入口。已有宿主需要升级本包才能获得这些修复；无需数据库迁移。
 
 ## 依赖命令执行修复（0.2.5）
 
