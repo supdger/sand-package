@@ -131,7 +131,8 @@ final class HostPayloadLifecycleJournal
     public function completeRollback(): void
     {
         $record = $this->read();
-        if (!($record['operation'] === 'upgrade' && $record['phase'] === 'sql_not_committed'
+        if (!($record['operation'] === 'upgrade'
+                    && in_array($record['phase'], ['sql_not_started', 'sql_not_committed'], true)
                 || $record['operation'] === 'uninstall'
                     && in_array($record['phase'], ['sql_not_started', 'sql_not_committed'], true))
             || $this->connection !== null

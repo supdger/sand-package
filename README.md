@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.7
+composer require supdger/sand-package:^0.2.8
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -40,6 +40,16 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 上传与仓库下载使用同一压缩 ZIP 上限：16MiB（16,777,216 bytes）。宿主 `plugin.sandpackage.upload.size` 可设置为更小的正整数 bytes；配置无效或超过 16MiB 时明确拒绝，不回退默认值。构包工具同样限制为 16MiB，无需增加参数。
 
 HTTP 请求大小与 ZIP 容量分别受限。宿主 HTTP 请求包络需容纳 ZIP 与 multipart 开销（例如 20MiB）；本包不会修改宿主配置。超过限制时显示实际接收的 `actual` 与生效的 `max` bytes，下载中断不把已接收长度视为完整文件。解压后仍限制 64MiB、2048 条目，并校验路径、CRC、摘要与声明载荷。
+
+## SQL 开始前的宿主升级恢复（0.2.8）
+
+宿主应用载荷升级因文件冲突在 SQL 开始前失败时，先在宿主 `server/` 目录运行 `php webman sandpackage:recover inspect-host-upgrade <插件标识>`。检查输出的 `sql_phase` 与 `actions`；只有提供 `restore-old-candidate` 时，使用本次输出的 `fingerprint` 执行：
+
+```text
+php webman sandpackage:recover restore-host-upgrade <插件标识> --confirmation="RESTORE <插件标识> <本次 inspect 的 fingerprint>"
+```
+
+将占位内容替换为同一插件标识和本次检查结果；确认过期或现场变化时重新 inspect，不修改或删除恢复记录。 恢复成功时，输出为 `action=restore-old-candidate`、`sql_replayed=false`、`state=1`，并提供保留的 `failed_candidate` 路径；已安装版本恢复为升级前版本。`sql_not_started` 只允许回滚旧候选，不允许 `continue-host-upgrade`，恢复过程不执行升级 SQL。回滚保留冲突文件；消费方仍须按其权限处理原文件冲突后再重试升级。已有宿主需升级本包获得修复，发行不会自动操作现有部署。
 
 ## 自动依赖与恢复 CLI（0.2.6）
 

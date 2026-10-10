@@ -19,6 +19,7 @@ namespace think\facade {
                     return new class($sql) {
                         public function __construct(private string $sql) {}
                         public function fetchAll(int $mode): array {
+                            if (str_contains($this->sql, 'SELECT EXISTS(')) return [['present' => false]];
                             return str_contains($this->sql, 'current_database()') ? [['database' => 'recording-fixture', 'oid' => '1', 'username' => 'fixture', 'address' => null, 'port' => null, 'started' => 'fixed']] : [];
                         }
                     };
@@ -47,6 +48,7 @@ namespace {
     function base_path($path = ''): string { global $root; return $root . '/server' . ($path ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path ? '/' . $path : ''); }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key, mixed $default = null): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : $default; }
     require getenv('SANDPACKAGE_TEST_VENDOR') ?: dirname(__DIR__, 2) . '/vendor/autoload.php';
     foreach (['HostPayloadManifest', 'HostPayloadPlan', 'HostPayloadOwnership', 'HostPayloadFreshFiles', 'HostPayloadChangeFiles', 'HostPayloadRuntimeChangeFiles', 'HostPayloadUninstallFinalization', 'HostPayloadDependencyChange', 'HostPayloadCandidateRollback', 'HostPayloadLifecycleJournal'] as $component) {
         require_once dirname(__DIR__, 2) . '/plugin/sandpackage/app/service/' . $component . '.php';
@@ -68,7 +70,7 @@ namespace {
         $path = $root . '/' . bin2hex(random_bytes(6)) . '.zip';
         $zip = new ZipArchive();
         $zip->open($path, ZipArchive::CREATE);
-        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nsupport = \">=0.1.0\"\nstate = 0\n");
         $zip->addFromString('config.json', json_encode($config, JSON_THROW_ON_ERROR));
         $zip->addFromString('install.sql', "CREATE TABLE neutral_sample (id bigint);\n");
         $zip->addFromString('update.sql', "ALTER TABLE neutral_sample ADD COLUMN label text;\n");

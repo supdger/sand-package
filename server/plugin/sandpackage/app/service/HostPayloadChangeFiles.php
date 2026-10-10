@@ -178,6 +178,36 @@ final class HostPayloadChangeFiles
         ];
     }
 
+    /**
+     * Verify a failed preflight without creating or retiring a file transaction.
+     * @param list<array{path:string,sha256:string}> $installed
+     * @return array{phase:string,fingerprint:string,old:array,next:array}
+     */
+    public function inspectNotStarted(array $installed, string $installedCandidate): array
+    {
+        HostPayloadPlan::assertSafePath($this->journal);
+        $this->verifyCandidates($this->next);
+        $previous = null;
+        if (file_exists($this->journal)) {
+            $previous = (new self(
+                $this->hostRoot, $this->stateRoot, $installedCandidate, $this->app, $installed,
+            ))->inspectSnapshot();
+            if ($previous['phase'] !== 'complete') {
+                throw new RuntimeException('已有宿主文件事务未完成，不能按未开始恢复');
+            }
+        }
+        if (HostPayloadOwnership::read($this->stateRoot, $this->app) !== ($installed === [] ? null : $installed)) {
+            throw new RuntimeException('宿主文件归属与旧安装包不符');
+        }
+        HostPayloadPlan::inspect($this->hostRoot, $this->app, $installed, $installed);
+        return [
+            'phase' => 'not_started',
+            'fingerprint' => hash('sha256', json_encode([$installed, $previous], JSON_THROW_ON_ERROR)),
+            'old' => $installed,
+            'next' => $this->next,
+        ];
+    }
+
     public function apply(): void
     {
         $record = $this->readJournal();

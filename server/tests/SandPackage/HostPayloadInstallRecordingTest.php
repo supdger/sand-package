@@ -68,7 +68,7 @@ namespace {
     function base_path(string $path = ''): string { global $root; return $root . '/server' . ($path === '' ? '' : '/' . $path); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path === '' ? '' : '/' . $path); }
     function env(string $key, mixed $default = null): mixed { return $default; }
-    function config(string $key): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : null; }
+    function config(string $key, mixed $default = null): mixed { return $key === 'plugin.sandadmin.app.version' ? '0.1.0' : $default; }
     function hostInstallWrite(string $path, string $contents): void {
         if (!is_dir(dirname($path))) mkdir(dirname($path), 0700, true);
         file_put_contents($path, $contents);
