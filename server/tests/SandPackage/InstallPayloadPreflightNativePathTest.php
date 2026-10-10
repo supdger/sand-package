@@ -19,7 +19,7 @@ namespace {
     function runtime_path(): string { global $host; return $host . DIRECTORY_SEPARATOR . 'runtime'; }
     function env(string $key, mixed $default = null): mixed { return $default; }
     $hostVersion = '0.1.0';
-    function config(string $key): mixed { global $hostVersion; return $key === 'plugin.sandadmin.app.version' ? $hostVersion : null; }
+    function config(string $key, mixed $default = null): mixed { global $hostVersion; return $key === 'plugin.sandadmin.app.version' ? $hostVersion : $default; }
     $server = dirname(__DIR__, 2);
     spl_autoload_register(static function (string $class) use ($server): void {
         $prefix = 'plugin\\sandpackage\\';

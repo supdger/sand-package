@@ -31,6 +31,7 @@ namespace {
         return $root . '/runtime' . ($path === '' ? '' : '/' . $path);
     }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key, mixed $default = null): mixed { return $default; }
     final class InstalledVersionFixture extends InstallLogic {
         public static string $installedVersion = '0.7.6-preview.1';
         public function getInfo(): array {
