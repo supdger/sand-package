@@ -392,6 +392,17 @@ try {
     symlink($vendorSymlink . '/README.md', $vendorLink);
     packageBuildExpectRejected($root, $vendorSymlink, 'rejects a runtime vendor symlink', '符号链接');
 
+    $capacity = packageBuildFixture($root, 'capacity-build', '1.0.0');
+    packageBuildWrite($capacity . '/plugin/capacity-build/capacity.dat', random_bytes(6291456));
+    $capacityOutput = $root . '/capacity-output';
+    mkdir($capacityOutput, 0700);
+    $capacityResult = packageBuildRun([$capacity, $capacityOutput, 'v1.0.0', '0.1.0']);
+    $capacityZip = $capacityOutput . '/capacity-build-1.0.0.zip';
+    packageBuildExpect($capacityResult['code'] === 0 && is_file($capacityZip), 'builder accepts a package above the former 5 MiB limit');
+    packageBuildExpect(filesize($capacityZip) > 5242880 && filesize($capacityZip) < 16777216, 'builder measures a ZIP between 5 and 16 MiB');
+    packageBuildWrite($capacity . '/plugin/capacity-build/capacity.dat', random_bytes(17825792));
+    packageBuildExpectRejected($root, $capacity, 'builder rejects a ZIP above the 16 MiB hard cap with actual/max bytes', 'max=16777216 bytes');
+
     echo "SandPackage repository package build test passed\n";
 } finally {
     packageBuildDelete($root);
