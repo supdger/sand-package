@@ -18,6 +18,7 @@ use support\Log;
 use think\facade\Db;
 use plugin\sandpackage\app\service\PluginStorage;
 use plugin\sandpackage\app\service\HostVersionCompatibility;
+use plugin\sandpackage\app\service\PackageArchivePolicy;
 
 /** Compatibility only: pre-upstream recovery records. Not used for new installs. */
 class LegacyInstallLogic
@@ -1377,13 +1378,12 @@ class LegacyInstallLogic
             $failed = $this->requireFailedUpgradeRecoveryBootstrapInfo();
             $this->failedUpgradeRecoveryCoordinator()->prepare($failed, fn (): array => $this->runtimeRestoreDiagnostic($failed));
             $source = $this->uploadedFilePath($file);
-            if (filesize($source) === false || filesize($source) > 5 * 1024 * 1024) {
-                throw new ApiException('FAILED_UPGRADE_RECOVERY_BLOCKED：替换安装包不能超过 5MB', 400);
-            }
+            PackageArchivePolicy::assertFile($source);
             $archive = $this->copyUploadArchiveToPrivate($source);
             try {
                 $metadata = $this->readUploadArchiveMetadata($archive);
-                if (($metadata['app'] ?? null) !== $this->appName || (int) $metadata['size'] > 5 * 1024 * 1024 || !@chmod($archive, 0400)) {
+                PackageArchivePolicy::assertSize($metadata['size'], PackageArchivePolicy::effectiveLimit());
+                if (($metadata['app'] ?? null) !== $this->appName || !@chmod($archive, 0400)) {
                     throw new ApiException('FAILED_UPGRADE_RECOVERY_BLOCKED：替换安装包预检不通过', 400);
                 }
                 $root = $this->replacementRoot();
@@ -3155,6 +3155,7 @@ class LegacyInstallLogic
         if (!is_file($archive) || is_link($archive)) {
             throw new ApiException('插件安装包不可用');
         }
+        PackageArchivePolicy::assertFile($archive);
         $zip = new ZipArchive();
         if ($zip->open($archive, ZipArchive::RDONLY) !== true) {
             throw new ApiException('插件安装包无法读取');
@@ -3195,6 +3196,7 @@ class LegacyInstallLogic
                     throw new ApiException('插件安装包解压后大小超出限制');
                 }
                 $totalBytes += $size;
+                PackageArchivePolicy::verifyEntry($zip, $stat);
                 $contents = $isDirectory ? '' : $zip->getFromIndex($index);
                 if (!is_string($contents)) {
                     throw new ApiException('插件安装包文件内容无法读取');
@@ -3237,6 +3239,8 @@ class LegacyInstallLogic
 
     private function copyUploadArchiveToPrivate(string $source): string
     {
+        $maxBytes = PackageArchivePolicy::effectiveLimit();
+        PackageArchivePolicy::assertFile($source, $maxBytes);
         $privateDir = $this->installDir . 'uploads' . DIRECTORY_SEPARATOR;
         if (!is_dir($privateDir) && !mkdir($privateDir, 0700, true) && !is_dir($privateDir)) {
             throw new ApiException('无法准备受控安装包目录');
@@ -3264,8 +3268,9 @@ class LegacyInstallLogic
                     throw new ApiException('读取插件安装包失败');
                 }
                 $bytes += strlen($chunk);
-                if ($bytes > self::UPLOAD_MAX_UNCOMPRESSED_BYTES || fwrite($output, $chunk) !== strlen($chunk)) {
-                    throw new ApiException('插件安装包副本超出限制或写入失败');
+                PackageArchivePolicy::assertSize($bytes, $maxBytes);
+                if (fwrite($output, $chunk) !== strlen($chunk)) {
+                    throw new ApiException('插件安装包副本写入失败');
                 }
             }
             if ($bytes === 0) {

@@ -48,6 +48,9 @@ namespace {
     function base_path($path = ''): string { global $root; return $root . '/server' . ($path ? '/' . $path : ''); }
     function runtime_path(string $path = ''): string { global $root; return $root . '/runtime' . ($path ? '/' . $path : ''); }
     function env(string $key, mixed $default = null): mixed { return $default; }
+    function config(string $key, mixed $default = null): mixed {
+        return $key === 'plugin.sandadmin.app.version' ? '0.2.3' : $default;
+    }
     require dirname(__DIR__, 2) . '/vendor/autoload.php';
     require dirname(__DIR__, 2) . '/plugin/sandpackage/app/logic/InstallLogic.php';
     $pathGuard = new ReflectionMethod(InstallLogic::class, 'assertSafePath');
@@ -77,7 +80,7 @@ namespace {
         $path = $root . '/' . bin2hex(random_bytes(6)) . '.zip';
         $zip = new ZipArchive();
         $zip->open($path, ZipArchive::CREATE);
-        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nstate = 0\n");
+        $zip->addFromString('info.ini', "app = $app\ntitle = Neutral\nabout = Fixture\nauthor = Test\nversion = $version\nsupport = \">=0.1.0\"\nstate = 0\n");
         $zip->addFromString('config.json', json_encode($config, JSON_THROW_ON_ERROR));
         $zip->addFromString('install.sql', "CREATE TABLE neutral_sample (id bigint);\n");
         $zip->addFromString('update.sql', "ALTER TABLE neutral_sample ADD COLUMN label text;\n");
@@ -268,8 +271,11 @@ namespace {
         $byApp = array_column($statusCatalog['plugins'], null, 'app');
         check($byApp['fresh-status']['local']['state'] === 0 && $byApp['fresh-status']['versions'][0]['action'] === 'install', 'missing local record remains installable');
         $healthyActions = array_column($byApp['healthy-status']['versions'], 'action', 'version');
+        $expectedHealthyActions = ['1.0.0' => 'installed', '0.9.0' => 'downgrade', '1.1.0' => 'upgrade'];
+        ksort($healthyActions);
+        ksort($expectedHealthyActions);
         check($byApp['healthy-status']['local']['installed_version'] === '1.0.0'
-            && $healthyActions === ['1.0.0' => 'installed', '0.9.0' => 'downgrade', '1.1.0' => 'upgrade'], 'healthy installed plugin distinguishes same, downgrade and upgrade versions');
+            && $healthyActions === $expectedHealthyActions, 'healthy installed plugin distinguishes same, downgrade and upgrade versions');
         check($byApp['stale-status']['local']['state'] === 7
             && $byApp['stale-status']['local']['blocked']
             && str_contains($byApp['stale-status']['local']['reason'], '运行目录缺失')

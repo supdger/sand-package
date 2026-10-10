@@ -7,10 +7,10 @@ use plugin\sandpackage\app\logic\RepositoryLogic;
 use plugin\sandpackage\app\service\HostPayloadManifest;
 use plugin\sandpackage\app\service\PluginDependencyPolicy;
 use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
+use plugin\sandpackage\app\service\PackageArchivePolicy;
 
 const PACKAGE_MAX_FILES = 2048;
 const PACKAGE_MAX_UNCOMPRESSED_BYTES = 67108864;
-const PACKAGE_MAX_ZIP_BYTES = 5242880;
 const PACKAGE_MAX_RELEASE_BUILD_CONTRACT_BYTES = 1048576;
 const PACKAGE_REQUIRED_ROOT_FILES = [
     'info.ini',
@@ -360,6 +360,7 @@ function verifyClosedZip(
             if ($bytes > PACKAGE_MAX_UNCOMPRESSED_BYTES) {
                 fail('安装包解压大小超过 64 MiB');
             }
+            PackageArchivePolicy::verifyEntry($zip, $stat);
             $name = $stat['name'];
             if (!str_starts_with($name, $prefix)) {
                 continue;
@@ -601,10 +602,7 @@ function main(array $argv): void
                 $closed->close();
             }
         }
-        $zipBytes = filesize($zipTemp);
-        if ($zipBytes === false || $zipBytes > PACKAGE_MAX_ZIP_BYTES) {
-            fail('ZIP 安装包超过 5 MiB');
-        }
+        PackageArchivePolicy::assertFile($zipTemp, PackageArchivePolicy::MAX_BYTES);
         $sha256 = hash_file('sha256', $zipTemp);
         if (!is_string($sha256)) {
             fail('无法计算 ZIP SHA-256');

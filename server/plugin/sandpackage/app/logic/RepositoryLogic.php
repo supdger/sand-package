@@ -7,6 +7,7 @@ namespace plugin\sandpackage\app\logic;
 use plugin\sandadmin\exception\ApiException;
 use plugin\sandpackage\app\service\RepositoryClient;
 use plugin\sandpackage\app\service\PluginVersion;
+use plugin\sandpackage\app\service\PackageArchivePolicy;
 use Throwable;
 use ZipArchive;
 
@@ -69,8 +70,9 @@ final class RepositoryLogic
                     throw new ApiException('此版本已下载，请从插件仓库继续安装');
                 }
                 $url = $this->releaseUrl($release);
+                $maxBytes = PackageArchivePolicy::effectiveLimit();
             } catch (Throwable $error) { $complete(null, $error); return; }
-            $this->client->get($url, 5242880, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
+            $this->client->get($url, $maxBytes, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
                 if ($error !== null) { $complete(null, $error); return; }
                 try { $result = $this->stage($body ?? '', $app, $version, $sha256); }
                 catch (Throwable $error) { $complete(null, $error); return; }
@@ -88,8 +90,9 @@ final class RepositoryLogic
                 $release = $this->selectRelease($catalog, $app, $version);
                 if (!hash_equals($release['sha256'], $sha256)) throw new ApiException('插件清单已变化，请刷新后重新选择版本');
                 $url = $this->releaseUrl($release);
+                $maxBytes = PackageArchivePolicy::effectiveLimit();
             } catch (Throwable $error) { $complete(null, $error); return; }
-            $this->client->get($url, 5242880, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
+            $this->client->get($url, $maxBytes, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
                 if ($error !== null) { $complete(null, $error); return; }
                 try {
                     $markdown = $this->readDocument($body ?? '', $app, $version, $sha256);
@@ -109,8 +112,9 @@ final class RepositoryLogic
                 if (!hash_equals($release['sha256'], $sha256)) throw new ApiException('插件清单已变化，请刷新后重新选择清理包');
                 if (!$this->compatible($release)) throw new ApiException('清理包不兼容当前宿主版本');
                 $url = $this->releaseUrl($release);
+                $maxBytes = PackageArchivePolicy::effectiveLimit();
             } catch (Throwable $error) { $complete(null, $error); return; }
-            $this->client->get($url, 5242880, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
+            $this->client->get($url, $maxBytes, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
                 if ($error !== null) { $complete(null, $error); return; }
                 try {
                     $package = $this->cleanupDeclarations($body ?? '', $app, $version, $sha256);
@@ -142,6 +146,7 @@ final class RepositoryLogic
                     if ((($attributes >> 16) & 0170000) === 0120000) throw new ApiException('清理包不能包含符号链接');
                     $bytes += $entry['size'];
                     if ($bytes > 67108864) throw new ApiException('清理包解压大小超过限制');
+                    PackageArchivePolicy::verifyEntry($zip, $entry);
                 }
                 $package = ['app' => $app, 'version' => $version, 'sha256' => $sha256];
                 foreach (['install', 'uninstall'] as $kind) {
@@ -182,6 +187,7 @@ final class RepositoryLogic
                 if (count($matches) !== 1) throw new ApiException('插件包缺少唯一的根目录 README.md');
                 $stat = $zip->statName($matches[0]);
                 if (!is_array($stat) || ($stat['size'] ?? 0) > 262144) throw new ApiException('插件文档超过 256 KiB 限制');
+                PackageArchivePolicy::verifyEntry($zip, $stat);
                 $markdown = $zip->getFromName($matches[0]);
                 if (!is_string($markdown) || strlen($markdown) > 262144) throw new ApiException('插件文档超过 256 KiB 限制');
                 if (preg_match('//u', $markdown) !== 1) throw new ApiException('插件文档必须是有效的 UTF-8 文本');
@@ -192,7 +198,8 @@ final class RepositoryLogic
 
     private function archiveFile(string $body, string $sha256): string
     {
-        if (strlen($body) > 5242880 || !hash_equals($sha256, hash('sha256', $body))) {
+        PackageArchivePolicy::assertSize(strlen($body), PackageArchivePolicy::effectiveLimit());
+        if (!hash_equals($sha256, hash('sha256', $body))) {
             throw new ApiException('插件包校验失败');
         }
         $file = tempnam(sys_get_temp_dir(), 'sandpackage-download-');
@@ -211,6 +218,7 @@ final class RepositoryLogic
         try {
             $stat = $zip->statName('info.ini');
             if (!is_array($stat) || ($stat['size'] ?? 0) > 16384) throw new ApiException('插件包缺少有效的 info.ini');
+            PackageArchivePolicy::verifyEntry($zip, $stat);
             $raw = $zip->getFromName('info.ini');
             $info = is_string($raw) ? @parse_ini_string($raw, true, INI_SCANNER_TYPED) : false;
             if (!is_array($info) || ($info['app'] ?? null) !== $app || ($info['version'] ?? null) !== $version) {

@@ -10,6 +10,7 @@ use plugin\sandadmin\exception\ApiException;
 use plugin\sandpackage\app\logic\InstallLogic;
 use plugin\sandpackage\app\logic\LegacyInstallLogic;
 use plugin\sandpackage\app\service\PluginStorage;
+use plugin\sandpackage\app\service\PackageArchivePolicy;
 use Saithink\Saipackage\service\Server;
 use Saithink\Saipackage\service\Version;
 use support\annotation\Middleware;
@@ -139,15 +140,13 @@ class InstallController extends BaseController
             throw new ApiException('上传文件未通过校验，请重新选择完整的 ZIP 插件包', 400);
         }
         $config = config('plugin.sandpackage.upload', [
-            'size' => 1024 * 1024 * 5,
+            'size' => PackageArchivePolicy::MAX_BYTES,
             'type' => ['zip']
         ]);
         if (!in_array($spl_file->getUploadExtension(), $config['type'])) {
             return $this->fail('文件格式上传失败,请选择zip格式文件上传');
         }
-        if ($spl_file->getSize() > $config['size']) {
-            return $this->fail('文件大小不能超过5M');
-        }
+        PackageArchivePolicy::assertSize($spl_file->getSize(), PackageArchivePolicy::effectiveLimit());
         $install = new InstallLogic();
         $info = $install->upload($spl_file);
         return $this->success($info);

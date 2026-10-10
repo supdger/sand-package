@@ -29,6 +29,7 @@ use plugin\sandpackage\app\service\PluginDependencyPolicy;
 use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
 use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PluginVersion;
+use plugin\sandpackage\app\service\PackageArchivePolicy;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -146,6 +147,7 @@ class InstallLogic
      */
     public function uploadFromPath(string $zipPath): array
     {
+        PackageArchivePolicy::assertFile($zipPath);
         $zip = new \ZipArchive();
         if ($zip->open($zipPath) !== true) throw new ApiException('无法读取 ZIP 安装包');
         $temporary = null;
@@ -166,6 +168,7 @@ class InstallLogic
                 if ((($attributes >> 16) & 0170000) === 0120000) throw new ApiException('安装包不能包含符号链接');
                 $bytes += $entry['size'];
                 if ($bytes > 67108864) throw new ApiException('安装包解压大小超过限制');
+                PackageArchivePolicy::verifyEntry($zip, $entry);
             }
             $raw = $zip->getFromName('info.ini');
             $info = is_string($raw) ? parse_ini_string($raw, true, INI_SCANNER_TYPED) : false;

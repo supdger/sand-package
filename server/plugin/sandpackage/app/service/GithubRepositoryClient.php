@@ -263,7 +263,11 @@ final class GithubRepositoryClient implements RepositoryClient
             curl_close($handle);
 
             if ($request->overflow) {
-                $this->finish($request, null, new ApiException('GitHub 下载内容超过大小限制'));
+                $this->finish($request, null, new ApiException(
+                    'GitHub 下载内容超过大小限制：actual=' . $request->receivedBytes
+                    . ' bytes（已接收，下载已中断），max=' . $request->maxBytes . ' bytes',
+                    400,
+                ));
                 continue;
             }
             $result = (int) ($info['result'] ?? CURLE_FAILED_INIT);
