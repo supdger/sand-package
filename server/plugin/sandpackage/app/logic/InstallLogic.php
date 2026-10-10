@@ -589,6 +589,14 @@ class InstallLogic
             if ($record === null || $record['operation'] !== 'upgrade') {
                 throw new ApiException('没有可检查的受控宿主文件升级记录');
             }
+            if ($record['phase'] === 'sql_not_started') {
+                if ($record['database_before'] === null) {
+                    throw new ApiException('SQL 未开始的升级缺少数据库原状证明，不能恢复旧候选', 400);
+                }
+                if ($record['database_after'] !== null) {
+                    throw new ApiException('SQL 未开始的升级存在提交后数据库证明，生命周期记录不一致', 400);
+                }
+            }
             $expectedDatabase = in_array($record['phase'], ['sql_not_started', 'sql_not_committed', 'rolled_back'], true)
                 ? $record['database_before'] : $record['database_after'];
             if ($expectedDatabase !== null
@@ -628,9 +636,21 @@ class InstallLogic
             $old = HostPayloadManifest::inspectDirectory($backup, $this->appName);
             $next = HostPayloadManifest::inspectDirectory($source, $this->appName);
             try {
-                $change = (new HostPayloadChangeFiles(
+                $files = new HostPayloadChangeFiles(
                     base_path(), $stateRoot, $source, $this->appName, $next,
-                ))->inspectSnapshot();
+                );
+                if ($record['phase'] === 'sql_not_started') {
+                    $installedInfo = $this->readPackageInfo($backup);
+                    if (($installedInfo['app'] ?? null) !== $this->appName
+                        || ($installedInfo['version'] ?? null) !== ($info['upgrade_from_version'] ?? null)
+                        || (int) ($installedInfo['state'] ?? -1) !== self::INSTALLED
+                        || !empty($installedInfo['operation_pending'])) {
+                        throw new ApiException('旧安装包身份或状态与失败升级不符', 400);
+                    }
+                    $change = $files->inspectNotStarted($old, $backup);
+                } else {
+                    $change = $files->inspectSnapshot();
+                }
             } catch (Throwable $error) {
                 throw new ApiException('升级文件事务现场不可信：' . $error->getMessage());
             }
@@ -662,6 +682,9 @@ class InstallLogic
             $runtimeJournal = $stateRoot . '/' . $this->appName . '.runtime.json';
             $this->assertSafePath($runtimeJournal);
             $runtimeSnapshot = null;
+            if ($change['phase'] === 'not_started' && file_exists($runtimeJournal)) {
+                throw new ApiException('未开始的升级存在运行文件事务，不能恢复旧候选', 400);
+            }
             if (is_file($runtimeJournal)) {
                 try {
                     $runtimeSnapshot = $this->hostPayloadRuntimeChangeFiles($info)->inspectSnapshot();
@@ -674,6 +697,9 @@ class InstallLogic
             $dependencyJournal = $stateRoot . '/' . $this->appName . '.dependencies.json';
             $this->assertSafePath($dependencyJournal);
             $dependencySnapshot = null;
+            if ($change['phase'] === 'not_started' && file_exists($dependencyJournal)) {
+                throw new ApiException('未开始的升级存在依赖清单事务，不能恢复旧候选', 400);
+            }
             if (is_file($dependencyJournal)) {
                 try {
                     $dependencySnapshot = $this->hostPayloadDependencyChange($source)->inspectSnapshot();
@@ -684,8 +710,8 @@ class InstallLogic
                 throw new ApiException('已提交升级缺少依赖清单事务记录');
             }
             $fingerprint = hash('sha256', json_encode(
-                [$record, $backupHash, $candidateHash, $change['fingerprint'],
-                    $runtimeSnapshot, $dependencySnapshot, $owned, $actual, $runtime],
+                [$record, $info, $backupHash, $candidateHash, $change['fingerprint'],
+                    $runtimeSnapshot, $dependencySnapshot, $owned, $actual, $runtime, $rollback],
                 JSON_THROW_ON_ERROR,
             ));
             return [
@@ -701,7 +727,7 @@ class InstallLogic
                 'rollback_phase' => $rollback['phase'] ?? null,
                 'restart_requested' => $record['restart_requested'],
                 'actions' => match ($record['phase']) {
-                    'sql_not_committed' => ['restore-old-candidate'],
+                    'sql_not_started', 'sql_not_committed' => ['restore-old-candidate'],
                     'sql_committed_deploy_pending' => ['continue-upgrade'],
                     default => [],
                 },
@@ -713,9 +739,9 @@ class InstallLogic
         $this->lock();
         try {
             $inspection = $this->inspectHostUpgradeRecoveryLocked();
-            if ($inspection['sql_phase'] !== 'sql_not_committed'
+            if (!in_array($inspection['sql_phase'], ['sql_not_started', 'sql_not_committed'], true)
                 || !in_array('restore-old-candidate', $inspection['actions'], true)) {
-                throw new ApiException('仅已确认 SQL 回滚的升级可以恢复旧候选');
+                throw new ApiException('仅 SQL 未开始或已确认回滚的升级可以恢复旧候选');
             }
             if ($confirmation !== 'RESTORE ' . $this->appName . ' ' . $inspection['fingerprint']) {
                 throw new ApiException('旧候选恢复确认内容与当前现场不符');
@@ -728,7 +754,7 @@ class InstallLogic
             $change = new HostPayloadChangeFiles(
                 base_path(), $stateRoot, $source, $this->appName, $next,
             );
-            $change->restore();
+            if ($inspection['file_phase'] !== 'not_started') $change->restore();
             $runtimeJournal = $stateRoot . '/' . $this->appName . '.runtime.json';
             $this->assertSafePath($runtimeJournal);
             if (is_file($runtimeJournal)) {
