@@ -55,7 +55,9 @@ namespace {
         'symlink-file', 'symlink-config', 'disabled-catalog', 'incompatible-dependency', 'continue-fresh',
         'existing-higher', 'existing-higher-preview', 'existing-build', 'existing-lower', 'existing-prerelease', 'existing-invalid', 'upgrade-higher',
         'existing-preview-zero', 'existing-invalid-preview', 'existing-invalid-preview-member', 'existing-alpha-zero', 'existing-build-zero',
-        'continue-fresh-higher', 'bundle-sha', 'bundle-version', 'bundle-app', 'candidate-version', 'candidate-sha'];
+        'continue-fresh-higher', 'bundle-sha', 'bundle-version', 'bundle-app', 'candidate-version', 'candidate-sha',
+        'core-major-lower', 'core-minor-lower', 'core-patch-lower', 'core-long-lower', 'core-long-higher',
+        'core-large-equal', 'same-core-preview-zero'];
     if ($argc === 1) {
         foreach ($scenarios as $scenario) {
             echo "[SCENARIO] $scenario\n";
@@ -168,27 +170,42 @@ final class ServiceCatalog {
 }
 PHP;
     $autoload = '<?php return ["files"=>[base_path("plugin/sand-iam/app/functions.php")]];';
+    $minimumVersion = match ($scenario) {
+        'core-major-lower', 'core-large-equal' => '9223372036854775809.0.0',
+        'core-minor-lower' => '1.9223372036854775809.0',
+        'core-patch-lower' => '1.0.9223372036854775809',
+        'core-long-lower' => str_repeat('9', 128) . '.0.0',
+        'core-long-higher' => str_repeat('8', 128) . '.0.0',
+        default => '1.0.0',
+    };
     $dependencyZip = $root . '/dependency.zip';
     zipActivation($dependencyZip, 'sand-iam', [
         'plugin/sand-iam/config/autoload.php' => $autoload,
         'plugin/sand-iam/config/route.php' => '<?php throw new RuntimeException("Routes must not execute during activation");',
         'plugin/sand-iam/app/functions.php' => $loader,
         'plugin/sand-iam/app/runtime/ServiceCatalog.php' => $catalog,
-    ]);
+    ], [], $minimumVersion);
     if (in_array($scenario, ['bundle-version', 'bundle-app'], true)) {
         zipActivation($dependencyZip, $scenario === 'bundle-app' ? 'other-dependency' : 'sand-iam', [], [],
             $scenario === 'bundle-version' ? '2.0.0' : '1.0.0');
     }
     $targetZip = $root . '/target.zip';
     zipActivation($targetZip, 'neutral-target', [
-        'dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip),
+        'dependencies/sand-iam-' . $minimumVersion . '.zip' => file_get_contents($dependencyZip),
     ], [
-        'plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0', 'sha256' => $scenario === 'bundle-sha' ? str_repeat('0', 64) : hash_file('sha256', $dependencyZip)]],
+        'plugin_dependencies' => ['sand-iam' => ['version' => $minimumVersion, 'sha256' => $scenario === 'bundle-sha' ? str_repeat('0', 64) : hash_file('sha256', $dependencyZip)]],
         'service_catalog' => ['service' => ['code' => 'neutral_target', 'name' => 'Neutral target'],
             'actions' => ['neutral_target.read' => 'Read']],
     ]);
     expectActivation(!class_exists(\plugin\SandIam\app\runtime\ServiceCatalog::class), 'dependency port is initially unavailable');
     $installedVersion = match ($scenario) {
+        'core-major-lower' => '9223372036854775808.0.0',
+        'core-minor-lower' => '1.9223372036854775808.0',
+        'core-patch-lower' => '1.0.9223372036854775808',
+        'core-long-lower' => str_repeat('8', 128) . '.0.0',
+        'core-long-higher' => str_repeat('9', 128) . '.0.0',
+        'core-large-equal' => $minimumVersion,
+        'same-core-preview-zero' => '1.0.0-0',
         'existing-higher', 'continue-fresh-higher', 'upgrade-higher' => '1.1.0',
         'existing-higher-preview' => '1.1.0-foo',
         'existing-preview-zero' => '1.1.0-0',
@@ -203,7 +220,7 @@ PHP;
     };
     $GLOBALS['expected_dependency_version'] = $installedVersion;
     $installedZip = $dependencyZip;
-    if ($installedVersion !== '1.0.0') {
+    if ($installedVersion !== $minimumVersion) {
         $installedZip = $root . '/installed-dependency.zip';
         zipActivation($installedZip, 'sand-iam', [
             'plugin/sand-iam/config/autoload.php' => $autoload,
@@ -261,7 +278,9 @@ PHP;
         'external-file' => '运行加载失败', 'symlink-file' => '不兼容',
         'symlink-config' => '运行加载失败', 'disabled-catalog' => '目录预检失败',
         'incompatible-dependency' => '不兼容', 'existing-lower' => '不兼容', 'existing-prerelease' => '不兼容', 'existing-invalid' => '不兼容',
-        'existing-invalid-preview' => '不兼容', 'existing-invalid-preview-member' => '不兼容'];
+        'existing-invalid-preview' => '不兼容', 'existing-invalid-preview-member' => '不兼容',
+        'core-major-lower' => '不兼容', 'core-minor-lower' => '不兼容', 'core-patch-lower' => '不兼容',
+        'core-long-lower' => '不兼容', 'same-core-preview-zero' => '不兼容'];
     if (in_array($scenario, ['continue-fresh', 'continue-fresh-higher'], true)) {
         $GLOBALS['fail_target_deployment'] = true;
         try {
@@ -314,8 +333,8 @@ PHP;
     if ($scenario === 'upgrade-higher') {
         $upgradeZip = $root . '/target-upgrade.zip';
         zipActivation($upgradeZip, 'neutral-target', [
-            'dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip),
-        ], ['plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0',
+            'dependencies/sand-iam-' . $minimumVersion . '.zip' => file_get_contents($dependencyZip),
+        ], ['plugin_dependencies' => ['sand-iam' => ['version' => $minimumVersion,
             'sha256' => hash_file('sha256', $dependencyZip)]]], '2.0.0');
         $target->uploadFromPath($upgradeZip);
         $target->install(false, 'UPGRADE neutral-target@1.0.0->2.0.0');
@@ -327,8 +346,8 @@ PHP;
     }
     if ($scenario === 'existing') {
         $anotherZip = $root . '/another.zip';
-        zipActivation($anotherZip, 'another-target', ['dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip)],
-            ['plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0', 'sha256' => hash_file('sha256', $dependencyZip)]]]);
+        zipActivation($anotherZip, 'another-target', ['dependencies/sand-iam-' . $minimumVersion . '.zip' => file_get_contents($dependencyZip)],
+            ['plugin_dependencies' => ['sand-iam' => ['version' => $minimumVersion, 'sha256' => hash_file('sha256', $dependencyZip)]]]);
         (new InstallLogic())->uploadFromPath($anotherZip);
         (new InstallLogic('another-target'))->install(false);
         expectActivation($GLOBALS['dependency_loader_calls'] === 1, 'reusing the active dependency does not rerun loader side effects');

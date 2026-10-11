@@ -1732,7 +1732,7 @@ class InstallLogic
             if (($info['lifecycle_driver'] ?? null) !== self::DRIVER
                 || !is_string($installedVersion)
                 || preg_match('/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?!0[0-9]+(?:\.|\+|$))[0-9A-Za-z-]+(?:\.(?!0[0-9]+(?:\.|\+|$))[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/D', $installedVersion) !== 1
-                || PluginVersion::compare(explode('+', $installedVersion, 2)[0], $version) < 0
+                || !$this->installedDependencyMeetsMinimum($installedVersion, $version)
                 || !is_file(base_path() . '/plugin/' . $name . '/app/functions.php')
                 || is_link(base_path() . '/plugin/' . $name . '/app/functions.php')) {
                 throw new ApiException("插件依赖 {$name} 不兼容（最低版本 {$version}，当前版本 "
@@ -1742,6 +1742,19 @@ class InstallLogic
         foreach ($requirements as $name => $version) {
             $this->loadInstalledDependency($name, $version);
         }
+    }
+
+    private function installedDependencyMeetsMinimum(string $installedVersion, string $minimumVersion): bool
+    {
+        $installedCore = explode('.', preg_split('/[-+]/', $installedVersion, 2)[0]);
+        $minimumCore = explode('.', $minimumVersion);
+        foreach ($installedCore as $index => $part) {
+            $required = $minimumCore[$index];
+            $comparison = strlen($part) <=> strlen($required);
+            if ($comparison === 0) $comparison = strcmp($part, $required);
+            if ($comparison !== 0) return $comparison > 0;
+        }
+        return !str_contains(explode('+', $installedVersion, 2)[0], '-');
     }
 
     private function loadInstalledDependency(string $name, string $version): void
