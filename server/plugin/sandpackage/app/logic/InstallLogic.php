@@ -575,6 +575,144 @@ class InstallLogic
         finally { $this->unlock(); }
     }
 
+    /** The failed source remains discoverable while its registration directory is quarantined. */
+    public function usesCandidateWithdrawal(): bool
+    {
+        if (($this->getInfo()['lifecycle_driver'] ?? null) === self::DRIVER) return true;
+        try {
+            $pending = HostPayloadCandidateRollback::pendingState(HostPayloadPlan::directoryPath($this->installDir), $this->appName);
+            return $pending !== null && ($this->readPackageInfo($pending['source'])['lifecycle_driver'] ?? null) === self::DRIVER;
+        } catch (Throwable $error) {
+            throw new ApiException('候选恢复记录无法确认：' . $error->getMessage(), 400);
+        }
+    }
+
+    public function inspectCandidateWithdrawal(): array
+    {
+        $this->lock();
+        try { return $this->inspectCandidateWithdrawalLocked(); }
+        finally { $this->unlock(); }
+    }
+
+    private function inspectCandidateWithdrawalLocked(): array
+    {
+        try {
+            $stateRoot = HostPayloadPlan::directoryPrefix($this->installDir) . 'host-payload';
+            foreach (['lifecycle', 'runtime', 'dependencies', 'removal', 'uninstall-finalization'] as $kind) {
+                $path = $stateRoot . '/' . $this->appName . '.' . $kind . '.json';
+                $this->assertSafePath($path);
+                if (file_exists($path)) throw new ApiException('存在插件生命周期或文件事务，请使用对应恢复入口；不能撤回上传候选', 400);
+            }
+            if ($this->cleanupPending()) throw new ApiException('插件清理未结束，不能撤回候选', 400);
+            foreach (glob($this->installDir . 'locks/' . $this->appName . '-*.json') ?: [] as $path) {
+                $this->assertSafePath($path);
+                throw new ApiException('存在未完成的插件操作记录，不能撤回候选', 400);
+            }
+            $pending = HostPayloadCandidateRollback::pendingState(HostPayloadPlan::directoryPath($this->installDir), $this->appName);
+            $source = $pending['source'] ?? HostPayloadPlan::directoryPath($this->appDir);
+            $info = $this->readPackageInfo($source);
+            if (($info['lifecycle_driver'] ?? null) !== self::DRIVER
+                || ($info['state'] ?? null) !== self::WAIT_INSTALL || ($info['update'] ?? null) !== 1
+                || !is_string($info['upgrade_from_version'] ?? null)
+                || PluginVersion::compare($info['version'], $info['upgrade_from_version']) <= 0) {
+                throw new ApiException('此入口仅撤回尚无生命周期记录的新驱动升级候选；首次安装候选不适用', 400);
+            }
+            foreach (['operation_pending', 'registration_candidate', 'failed_upgrade', 'process_recovery_required',
+                'dependency_command_nonce', 'composer_dependent_wait_install', 'npm_dependent_wait_install',
+                'package_backup_id', 'existing_schema_attach_pending'] as $flag) {
+                if (!empty($info[$flag])) throw new ApiException('候选存在未完成操作或依赖任务，不能撤回', 400);
+            }
+            $backupId = $info['upgrade_backup_id'] ?? null;
+            if (!is_string($backupId) || preg_match('/^' . preg_quote($this->appName, '/') . '-[a-f0-9]{16}$/D', $backupId) !== 1) {
+                throw new ApiException('升级候选缺少精确旧包身份', 400);
+            }
+            foreach (['upgrade_backup_tree_sha256', 'candidate_tree_sha256', 'upgrade_runtime_tree_sha256', 'package_sha256'] as $key) {
+                if (!is_string($info[$key] ?? null) || preg_match('/^[a-f0-9]{64}$/D', $info[$key]) !== 1) {
+                    throw new ApiException('升级候选的完整性记录无效', 400);
+                }
+            }
+            $backup = $this->backupsDir . $backupId;
+            $oldTree = FreshInstallRecovery::tree($backup);
+            $nextTree = FreshInstallRecovery::tree($source, ['info.ini']);
+            if (!is_array($oldTree) || !is_array($nextTree)
+                || hash('sha256', json_encode($oldTree, JSON_THROW_ON_ERROR)) !== $info['upgrade_backup_tree_sha256']
+                || hash('sha256', json_encode($nextTree, JSON_THROW_ON_ERROR)) !== $info['candidate_tree_sha256']) {
+                throw new ApiException('升级候选或精确旧备份已变化', 400);
+            }
+            $installed = $this->readPackageInfo($backup);
+            if (($installed['version'] ?? null) !== $info['upgrade_from_version']
+                || ($installed['state'] ?? null) !== self::INSTALLED) {
+                throw new ApiException('旧备份不是此次升级的已安装版本', 400);
+            }
+            foreach (['operation_pending', 'registration_candidate', 'failed_upgrade', 'process_recovery_required',
+                'dependency_command_nonce', 'composer_dependent_wait_install', 'npm_dependent_wait_install'] as $flag) {
+                if (!empty($installed[$flag])) throw new ApiException('旧安装包仍有未完成操作，不能恢复登记', 400);
+            }
+            $this->assertRuntimeVersion($installed['version']);
+            $old = HostPayloadManifest::inspectDirectory($backup, $this->appName);
+            $next = HostPayloadManifest::inspectDirectory($source, $this->appName);
+            $change = (new HostPayloadChangeFiles(base_path(), $stateRoot, $source, $this->appName, $next))->inspectNotStarted($old, $backup);
+            $actual = [];
+            foreach (array_unique(array_merge(array_column($old, 'path'), array_column($next, 'path'))) as $path) {
+                $target = base_path() . '/' . $path;
+                HostPayloadPlan::assertSafePath($target);
+                if (file_exists($target) && !is_file($target)) throw new ApiException('宿主目标类型已变化', 400);
+                $actual[$path] = is_file($target) ? hash_file('sha256', $target) : null;
+            }
+            ksort($actual, SORT_STRING);
+            $runtime = [];
+            foreach ($this->getAllowedPath() as $target) $runtime[$target] = FreshInstallRecovery::tree($target);
+            if (hash('sha256', json_encode($runtime, JSON_THROW_ON_ERROR)) !== $info['upgrade_runtime_tree_sha256']) {
+                throw new ApiException('上传时的旧运行目录已变化，不能撤回候选', 400);
+            }
+            $rollback = new HostPayloadCandidateRollback(HostPayloadPlan::directoryPath($this->installDir), $this->appName,
+                $backupId, $info['upgrade_backup_tree_sha256'], $info['candidate_tree_sha256']);
+            $checkpoint = null;
+            if ($pending !== null) {
+                if ($pending['backup_id'] !== $backupId || $pending['old_tree_sha256'] !== $info['upgrade_backup_tree_sha256']
+                    || $pending['new_tree_sha256'] !== $info['candidate_tree_sha256']) throw new ApiException('撤回记录与候选身份不符', 400);
+                $checkpoint = $rollback->inspectSnapshot();
+            }
+            $database = PostgresHostCatalogFingerprint::capture($this->recoveryConnection(), $this->appName);
+            $dependencies = [];
+            foreach ([base_path() . '/composer.json', dirname(base_path()) . '/' . env('FRONTEND_DIR', 'sandadmin-artd') . '/package.json'] as $path) {
+                HostPayloadPlan::assertSafePath($path);
+                if (file_exists($path) && !is_file($path)) throw new ApiException('宿主依赖清单类型不可信', 400);
+                $dependencies[$path] = is_file($path) ? hash_file('sha256', $path) : null;
+            }
+            $fingerprint = hash('sha256', json_encode([$info, FreshInstallRecovery::tree($source), $oldTree, $nextTree, $change['fingerprint'],
+                HostPayloadOwnership::read($stateRoot, $this->appName), $actual, $runtime, $dependencies, $database, $checkpoint], JSON_THROW_ON_ERROR));
+            return ['app' => $this->appName, 'operation' => 'uploaded-upgrade-withdrawal',
+                'installed_version' => $installed['version'], 'candidate_version' => $info['version'],
+                'fingerprint' => $fingerprint, 'withdrawal_phase' => $checkpoint['phase'] ?? 'not_started',
+                'actions' => !empty($checkpoint['restored'])
+                    ? ($checkpoint['phase'] === 'restored' ? [] : ['finish-journal']) : ['discard-candidate']];
+        } catch (Throwable $error) {
+            throw new ApiException('上传候选撤回现场不可信：' . $error->getMessage(), 400);
+        }
+    }
+
+    public function discardCandidate(string $confirmation): array
+    {
+        $this->lock();
+        try {
+            $inspection = $this->inspectCandidateWithdrawalLocked();
+            if (!in_array($inspection['actions'], [['discard-candidate'], ['finish-journal']], true)
+                || !hash_equals('DISCARD ' . $this->appName . ' ' . $inspection['fingerprint'], $confirmation)) {
+                throw new ApiException('请重新检查上传候选并使用本次完整撤回确认；已恢复的候选不会重复写入', 400);
+            }
+            $pending = HostPayloadCandidateRollback::pendingState(HostPayloadPlan::directoryPath($this->installDir), $this->appName);
+            $info = $this->readPackageInfo($pending['source'] ?? HostPayloadPlan::directoryPath($this->appDir));
+            try {
+                (new HostPayloadCandidateRollback(HostPayloadPlan::directoryPath($this->installDir), $this->appName,
+                    $info['upgrade_backup_id'], $info['upgrade_backup_tree_sha256'], $info['candidate_tree_sha256']))->restore();
+            } catch (Throwable $error) {
+                throw new ApiException('撤回尚未结束，请重新检查候选并按新确认继续：' . $error->getMessage(), 400);
+            }
+            return $this->getInfo();
+        } finally { $this->unlock(); }
+    }
+
     public function inspectHostUpgradeRecovery(): array
     {
         $this->lock();

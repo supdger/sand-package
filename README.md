@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.8
+composer require supdger/sand-package:^0.2.9
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -40,6 +40,26 @@ SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝�
 上传与仓库下载使用同一压缩 ZIP 上限：16MiB（16,777,216 bytes）。宿主 `plugin.sandpackage.upload.size` 可设置为更小的正整数 bytes；配置无效或超过 16MiB 时明确拒绝，不回退默认值。构包工具同样限制为 16MiB，无需增加参数。
 
 HTTP 请求大小与 ZIP 容量分别受限。宿主 HTTP 请求包络需容纳 ZIP 与 multipart 开销（例如 20MiB）；本包不会修改宿主配置。超过限制时显示实际接收的 `actual` 与生效的 `max` bytes，下载中断不把已接收长度视为完整文件。解压后仍限制 64MiB、2048 条目，并校验路径、CRC、摘要与声明载荷。
+
+## 撤回尚未安装的升级候选
+
+新驱动上传升级包后，若仍为待安装状态且没有当前插件生命周期记录，可先在宿主 `server/` 目录检查候选：
+
+```text
+php webman sandpackage:recover inspect-candidate <插件标识>
+```
+
+仅当输出 `operation=uploaded-upgrade-withdrawal`、`actions=["discard-candidate"]` 或 `["finish-journal"]` 时，使用本次 `fingerprint` 确认撤回：
+
+```text
+php webman sandpackage:recover discard-candidate <插件标识> --confirmation="DISCARD <插件标识> <本次 inspect 的 fingerprint>"
+```
+
+成功后，`version` 为升级前版本、`state=1`，旧安装包与登记精确恢复。此时可以正常上传更正后的升级包，同一候选版本的不同 ZIP 也可上传。原候选和旧备份会保留；宿主载荷、运行目录、依赖、共享存储和外部文件不会被撤回操作修改，也不会执行生命周期 SQL 或重载服务。首次安装候选不适用此入口。
+
+超级管理员 API 对应 `POST /app/sandpackage/install/inspectCandidate`（`appName`）和现有 `POST /app/sandpackage/install/discardCandidate`（`appName`、上述完整 `confirmation`）。检查到已有生命周期或未完成文件、依赖任务时，使用对应恢复入口；现场变化或断线中断后重新检查并获取新确认。`finish-journal` 只完成已有撤回日志，不重写已经恢复的旧候选。检查结果无 `actions` 且阶段为 `restored` 表示旧包已经恢复，不能重复执行撤回。
+
+数据库身份与结构只绑定本次检查和确认执行，不证明上传前数据库未变化。安装入口可能在创建当前插件日志之前处理其他插件依赖；撤回只恢复当前插件候选，不回滚其他依赖插件。已有生命周期日志的 SQL 开始前失败继续使用下面的宿主升级恢复入口。
 
 ## SQL 开始前的宿主升级恢复（0.2.8）
 

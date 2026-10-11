@@ -241,6 +241,14 @@ class InstallController extends BaseController
         return $this->success(array_merge($info, LegacyInstallLogic::presentInfo($info)), '插件登记完成');
     }
 
+    public function inspectCandidate(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('候选检查仅支持 POST 请求', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        return $this->success((new InstallLogic($appName))->inspectCandidateWithdrawal());
+    }
+
     /**
      * Revert only a ready, unexecuted upgrade candidate. SystemLog records the
      * operation; the logic never invokes SQL, file deployment or service reload.
@@ -256,6 +264,11 @@ class InstallController extends BaseController
         $confirmation = (string) $request->post('confirmation', '');
         if ($appName === '' || $confirmation === '') {
             return $this->fail('请填写插件标识和完整撤回确认内容');
+        }
+        $normal = new InstallLogic($appName);
+        if ($normal->usesCandidateWithdrawal()) {
+            $info = $normal->discardCandidate($confirmation);
+            return $this->success(array_merge($info, InstallLogic::presentInfo($info)), '升级候选已撤回，旧安装登记已恢复');
         }
         $install = new LegacyInstallLogic($appName);
         $info = $install->discardCandidate($confirmation);
