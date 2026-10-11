@@ -2290,7 +2290,10 @@ class InstallLogic
     public function inspectDependencyRecovery(): array
     {
         $this->lockDependencyRecovery();
-        try { return $this->dependencyRecovery()->inspect(); }
+        try {
+            $binding=$this->hostPayloadDependencyChange()->inspectProviderBinding($this->dependencyRecoverySnapshot());
+            return $binding ?? $this->dependencyRecovery()->inspect();
+        }
         catch (Throwable $error) { throw new ApiException('依赖任务现场不可信：' . $error->getMessage(), 400); }
         finally { $this->unlock(); }
     }
@@ -2299,6 +2302,14 @@ class InstallLogic
     {
         $this->lockDependencyRecovery();
         try {
+            $snapshot=$this->dependencyRecoverySnapshot();
+            $binding=$this->hostPayloadDependencyChange()->inspectProviderBinding($snapshot);
+            if ($binding!==null) {
+                if ($restart) throw new ApiException('提供方绑定确认不会执行重载或依赖任务',400);
+                if (!hash_equals('RECOVER DEPENDENCY '.$this->appName.' '.$binding['fingerprint'],$confirmation)) throw new ApiException('请重新检查提供方绑定并使用本次完整确认',400);
+                $fresh=$this->dependencyRecoverySnapshot();
+                return $this->hostPayloadDependencyChange()->confirmProviderBinding($fresh,$confirmation);
+            }
             $recovery = $this->dependencyRecovery();
             $inspection = $recovery->inspect();
             if ($inspection['actions'] === ['restart-only']) {

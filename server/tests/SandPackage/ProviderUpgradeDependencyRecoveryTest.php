@@ -231,7 +231,9 @@ namespace {
         return [new InstallLogic('neutral-host'),new \Symfony\Component\Console\Tester\CommandTester(new \plugin\sandpackage\app\command\Recover()),$storage,$old];
     }
     function providerInspect($tester): array {
-        jobCheck($tester->execute(['action'=>'inspect-dependency','app'=>'neutral-host'])===0,'Official inspection verifies provider-only update');
+        $exit=$tester->execute(['action'=>'inspect-dependency','app'=>'neutral-host']);
+        if($exit!==0)echo $tester->getDisplay();
+        jobCheck($exit===0,'Official inspection verifies provider-only update');
         return json_decode(trim($tester->getDisplay()),true,64,JSON_THROW_ON_ERROR);
     }
     function providerFiles(): array {
@@ -243,22 +245,112 @@ namespace {
         jobCheck(providerFiles()===$before,$name.' rejection writes nothing');
     }
 
-    function providerExplicitRetry(): void {
+    function providerExplicitRetry(int $exit = 0): void {
         global $root;
-        $oldPath=getenv('PATH');hostInstallWrite($root.'/bin/composer','#!'.PHP_BINARY."\n<?php echo \"Explicit neutral dependency retry\\n\"; exit(0);\n");chmod($root.'/bin/composer',0700);putenv('PATH='.$root.'/bin:'.$oldPath);
+        $oldPath=getenv('PATH');hostInstallWrite($root.'/bin/composer','#!'.PHP_BINARY."\n<?php echo \"Explicit neutral dependency retry\\n\"; exit($exit);\n");chmod($root.'/bin/composer',0700);putenv('PATH='.$root.'/bin:'.$oldPath);
         $GLOBALS['fixtureCommand']='composer.update';$frames=[];
         try {foreach((new \plugin\sandpackage\app\service\TerminalRunner())->exec() as $frame)$frames[]=json_decode($frame,true,32,JSON_THROW_ON_ERROR)['data'];}
         finally {putenv('PATH='.$oldPath);file_put_contents(base_path('retry-frames.json'),json_encode($frames,JSON_THROW_ON_ERROR));}
-        jobCheck(in_array('exec-success',$frames,true)&&in_array('exec-completed',$frames,true),'Explicit native runner retry completes');
+        jobCheck(in_array($exit===0?'exec-success':'exec-error',$frames,true)&&in_array('exec-completed',$frames,true),'Explicit native runner retry completes with exit '.$exit);
     }
     function providerConfirmedReset($tester): void {
         $inspection=providerInspect($tester);
         jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']])===0,'Official confirmed provider recovery closes');
     }
+    function providerToolUpdate(string $version): void {
+        $path=base_path('composer.json');$raw=file_get_contents($path);
+        $raw=preg_replace('/("supdger\/sand-package": )"[^"]+"/', '$1'.json_encode($version),$raw,1,$count);
+        if($count!==1)throw new \RuntimeException('Provider fixture token missing');hostInstallWrite($path,$raw);
+        foreach(['composer.lock','vendor/composer/installed.json'] as $file) {
+            $data=json_decode(file_get_contents(base_path($file)),true,128,JSON_THROW_ON_ERROR);
+            foreach($data['packages'] as &$package)if($package['name']==='supdger/sand-package')$package['version']=$version;
+            unset($package);hostInstallWrite(base_path($file),json_encode($data,JSON_PRETTY_PRINT|JSON_UNESCAPED_SLASHES)."\n");
+        }
+        $data=require base_path('vendor/composer/installed.php');
+        $data['versions']['supdger/sand-package']['pretty_version']=$version;$data['versions']['supdger/sand-package']['version']=$version.'.0';
+        hostInstallWrite(base_path('vendor/composer/installed.php'),'<?php return '.var_export($data,true).';');\Composer\InstalledVersions::reload($data);
+    }
     $fixtureSucceeded=false;
     try {
 
-        if(($argv[1]??null)==='--ordinary-checkpoint') {
+        if(($argv[1]??null)==='--provider-binding') {
+            // Candidate Composer metadata simulation; source/ref provenance stays the fixture's public base.
+            [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');
+            $before=providerFiles();$inspection=providerInspect($tester);
+            jobCheck($inspection['actions']===['refresh-provider-binding']&&providerFiles()===$before,'Tool update offers read-only explicit binding refresh');
+            $origin=$storage.'/host-payload/neutral-host.provider-dependency-transition.json';$originRaw=file_get_contents($origin);
+            $journal=$storage.'/host-payload/neutral-host.dependencies.json';$journalRaw=file_get_contents($journal);
+            jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'wrong'])===1&&providerFiles()===$before,'Wrong refresh confirmation writes nothing');
+            $controller=new \plugin\sandpackage\app\controller\InstallController();
+            $api=json_decode($controller->inspectDependencyRecovery(jobRequest(['appName'=>'neutral-host']))->rawBody(),true,128,JSON_THROW_ON_ERROR)['data'];
+            jobCheck($api['fingerprint']===$inspection['fingerprint'],'CLI/API tool refresh fingerprint is stable');
+            jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$api['fingerprint']])===0,'Confirmed tool refresh succeeds');
+            $binding=$storage.'/host-payload/neutral-host.provider-dependency-binding.json';
+            jobCheck(is_file($binding)&&file_get_contents($origin)===$originRaw&&file_get_contents($journal)===$journalRaw,'Refresh preserves original transition and dependency journal bytes');
+            $info=(new InstallLogic('neutral-host'))->getInfo();
+            jobCheck($info['state']===4&&empty($info['dependency_command_nonce'])&&!file_exists($storage.'/locks/host-upstream.process.json')&&Db::$sql===[],'Refresh creates no job, SQL or success proof');
+            $after=providerFiles();jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$api['fingerprint']])===1&&providerFiles()===$after,'Committed refresh response loss cannot replay writes');
+            providerExplicitRetry();$info=(new InstallLogic('neutral-host'))->getInfo();
+            jobCheck($info['state']===1&&empty($info['composer_dependent_wait_install'])&&empty($info['dependency_command_nonce'])&&Db::$sql===[],'Real Runner completes confirmed target without lifecycle SQL');
+            (new InstallLogic('neutral-host'))->uploadFromPath(jobPackage('3.0.0',true));
+            jobCheck(!file_exists($binding)&&!file_exists($origin)&&!file_exists($journal),'Normal upload archives confirmed target and original dependency proof');
+            jobCheck(count(glob($binding.'.*.history')?:[])===1&&file_get_contents($journal.'.'.hash('sha256',$journalRaw).'.history')===$journalRaw,'Archived binding and original journal remain exact');
+            foreach(['composer.lock','composer.json','candidate','nonce','origin','sidecar'] as $drift) {
+                [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');$inspection=providerInspect($tester);
+                $binding=$storage.'/host-payload/neutral-host.provider-dependency-binding.json';
+                if($drift==='composer.lock'||$drift==='composer.json')hostInstallWrite(base_path($drift),file_get_contents(base_path($drift))."\n");
+                elseif($drift==='candidate')hostInstallWrite($storage.'/neutral-host/config.json',file_get_contents($storage.'/neutral-host/config.json')."\n");
+                elseif($drift==='nonce'){$info=$logic->getInfo();$info['dependency_command_nonce']=str_repeat('a',32);$logic->setInfo($info);}
+                elseif($drift==='origin'){$path=$storage.'/host-payload/neutral-host.provider-dependency-transition.json';hostInstallWrite($path,file_get_contents($path)."\n");}
+                else hostInstallWrite($binding,'{}');
+                $before=providerFiles();
+                jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']])===1&&providerFiles()===$before,'Refresh rejects inspected scene drift without writes: '.$drift);
+            }
+            foreach(['inputs','confirmation','missing-origin'] as $drift) {
+                [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');$inspection=providerInspect($tester);
+                jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']])===0,'Fresh binding saved for begin drift: '.$drift);
+                $binding=$storage.'/host-payload/neutral-host.provider-dependency-binding.json';
+                if($drift==='inputs')hostInstallWrite(base_path('composer.lock'),file_get_contents(base_path('composer.lock'))."\n");
+                elseif($drift==='confirmation'){$data=json_decode(file_get_contents($binding),true,128,JSON_THROW_ON_ERROR);$data['confirmation_fingerprint']=str_repeat('a',64);hostInstallWrite($binding,json_encode($data,JSON_THROW_ON_ERROR));}
+                else unlink($storage.'/host-payload/neutral-host.provider-dependency-transition.json');
+                $before=providerFiles();
+                try{(new InstallLogic('neutral-host'))->beginDependencyCommand('composer');throw new \RuntimeException('Unexpected changed binding begin');}
+                catch(\Throwable $e){jobCheck($e->getMessage()!=='Unexpected changed binding begin','Begin rejects changed confirmed binding: '.$drift);}
+                jobCheck(providerFiles()===$before,'Begin refusal writes no nonce or marker: '.$drift);
+            }
+            [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');$inspection=providerInspect($tester);
+            $tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']]);
+            $owner=new InstallLogic('neutral-host');$nonce=$owner->beginDependencyCommand('composer');
+            $pid=pcntl_fork();if($pid===0)exit(0);pcntl_waitpid($pid,$status);
+            $owner->recordDependencyProcessStarted('composer',$nonce,$pid,$pid,[],time());$owner->confirmDependencyProcessReaped('composer',$nonce);
+            chmod($storage.'/host-payload',0555);
+            try{$owner->dependentInstallComplete('composer',$nonce);throw new \RuntimeException('Missing target completion interruption');}
+            catch(\Throwable $e){jobCheck($e->getMessage()!=='Missing target completion interruption','Confirmed target completion keeps reaped proof on persistence failure');}
+            finally{chmod($storage.'/host-payload',0700);$owner->releaseDependencyCommand();}
+            $cleanup=providerInspect($tester);jobCheck($cleanup['actions']===['finish-dependency-cleanup'],'Confirmed target durable completion remains officially discoverable');
+            jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$cleanup['fingerprint']])===0&&Db::$sql===[],'Official cleanup resumes target proof without replay');
+            [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');$inspection=providerInspect($tester);
+            $tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']]);
+            providerExplicitRetry(7);$info=(new InstallLogic('neutral-host'))->getInfo();
+            jobCheck($info['state']===4&&!empty($info['dependency_failed_nonce'])&&empty($info['dependency_command_nonce'])&&!file_exists($storage.'/locks/host-upstream.process.json')&&Db::$sql===[],'Failed confirmed target preserves waiting and clears only its reaped job');
+            providerExplicitRetry();jobCheck((new InstallLogic('neutral-host'))->getInfo()['state']===1&&Db::$sql===[],'Explicit retry after failure completes same confirmed target');
+            foreach(['dependency-journal-archived','provider-binding-archived'] as $window) {
+                [$logic,$tester,$storage]=providerScene();providerConfirmedReset($tester);providerToolUpdate('0.2.11');$inspection=providerInspect($tester);
+                $tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint']]);providerExplicitRetry();
+                $current=new InstallLogic('neutral-host');$snapshot=(new \ReflectionMethod(InstallLogic::class,'dependencyRecoverySnapshot'))->invoke($current);$change=(new \ReflectionMethod(InstallLogic::class,'hostPayloadDependencyChange'))->invoke($current);
+                try{$change->archiveRecoveredProviderChange($snapshot,static function(string $stage)use($window){if($stage===$window)throw new \RuntimeException('Owned binding archive interruption');});throw new \RuntimeException('Missing archive interruption');}
+                catch(\Throwable $e){jobCheck($e->getMessage()==='Owned binding archive interruption','Binding archive interruption after '.$window);}
+                (new InstallLogic('neutral-host'))->uploadFromPath(jobPackage('3.0.0',true));
+                jobCheck(!file_exists($storage.'/host-payload/neutral-host.provider-dependency-transition.json'),'Normal upload resumes confirmed target archive: '.$window);
+            }
+            [$logic,$tester,$storage]=providerScene();$inspection=providerInspect($tester);
+            $engine=(new \ReflectionMethod(InstallLogic::class,'dependencyRecovery'))->invoke($logic);
+            try{$engine->recover('RECOVER DEPENDENCY neutral-host '.$inspection['fingerprint'],static function(string $stage){if($stage==='provider-transition-written')throw new \RuntimeException('Owned original checkpoint interruption');});}
+            catch(\RuntimeException $e){jobCheck($e->getMessage()==='Owned original checkpoint interruption','Original recovery transition write window interrupted');}
+            $binding=$storage.'/host-payload/neutral-host.provider-dependency-binding.json';hostInstallWrite($binding,'{}');providerReject($tester,'Malformed binding cannot bypass original active checkpoint');unlink($binding);
+            $fresh=providerInspect($tester);jobCheck($fresh['actions']!==['refresh-provider-binding'],'Active original checkpoint stays with original recovery protocol');
+            jobCheck($tester->execute(['action'=>'recover-dependency','app'=>'neutral-host','--confirmation'=>'RECOVER DEPENDENCY neutral-host '.$fresh['fingerprint']])===0&&Db::$sql===[],'Original transition-before-history checkpoint formally resumes');
+        } elseif(($argv[1]??null)==='--ordinary-checkpoint') {
             foreach(['prepared','marker-renamed','nonce-cleared'] as $window) {
                 [$logic,$tester,$storage]=providerScene('0.2.9');
                 $snapshot=(new \ReflectionMethod(InstallLogic::class,'dependencyRecoverySnapshot'))->invoke($logic);

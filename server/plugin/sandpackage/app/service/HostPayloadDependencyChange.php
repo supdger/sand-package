@@ -538,7 +538,12 @@ final class HostPayloadDependencyChange
         $this->validateProviderTransition($record);
         $binding=$this->providerBinding($snapshot);
         foreach (['identity','candidate','runtime','owned'] as $field) if ($binding[$field]!==$record['original'][$field]) throw new RuntimeException('Provider new job candidate changed');
-        $old=$record['original']['transactions']['dependencies']['provider_requirement_update'];$now=$binding['transactions']['dependencies']['provider_requirement_update'];
+        $old=$this->confirmedProviderRequirement($record);$now=$binding['transactions']['dependencies']['provider_requirement_update'];
+        $confirmedPath=$this->providerBindingPath();
+        if ($record['active_command']===null && is_file($confirmedPath)) {
+            $confirmed=json_decode(file_get_contents($confirmedPath),true,128,JSON_THROW_ON_ERROR);
+            if ($binding!==$this->providerBinding($confirmed['before'])) throw new RuntimeException('Confirmed provider job inputs changed');
+        }
         foreach(['lock_sha256','installed_sha256'] as $field){unset($old[$field],$now[$field]);}
         if($old!==$now)throw new RuntimeException('Provider new job identity changed');
         $record['active_command']=['type'=>$type,'nonce'=>$nonce,'before'=>$binding];$record['completed']=null;
@@ -558,6 +563,7 @@ final class HostPayloadDependencyChange
         if ($record===null) throw new RuntimeException('Provider transition missing');
         $this->validateProviderTransition($record);
         if (($record['active_command']['nonce']??null)!==$nonce || ($record['active_command']['type']??null)!==$type) throw new RuntimeException('Provider completion is not the bound new job');
+        $this->assertProviderTarget($record,$this->providerBinding($snapshot));
         return ['nonce'=>$nonce,'binding'=>$this->providerBinding($snapshot)];
     }
 
@@ -575,7 +581,7 @@ final class HostPayloadDependencyChange
         foreach (['identity','candidate','runtime','owned'] as $field) {
             if ($binding[$field]!==$origin[$field]) throw new RuntimeException('Provider completion candidate changed');
         }
-        $old=$origin['transactions']['dependencies']['provider_requirement_update'];
+        $old=$this->confirmedProviderRequirement($record);
         $now=$binding['transactions']['dependencies']['provider_requirement_update'];
         foreach (['lock_sha256','installed_sha256'] as $field) {unset($old[$field],$now[$field]);}
         if ($old!==$now) throw new RuntimeException('Provider completion identity changed');
@@ -585,11 +591,22 @@ final class HostPayloadDependencyChange
         $this->save($record,$this->transitionPath());
     }
 
+    private function assertProviderTarget(array $record, array $binding): void
+    {
+        foreach (['identity','candidate','runtime','owned'] as $field) {
+            if ($binding[$field]!==$record['original'][$field]) throw new RuntimeException('Provider completion candidate changed');
+        }
+        $old=$this->confirmedProviderRequirement($record);$now=$binding['transactions']['dependencies']['provider_requirement_update'];
+        foreach (['lock_sha256','installed_sha256'] as $field) {unset($old[$field],$now[$field]);}
+        if ($old!==$now) throw new RuntimeException('Provider completion identity changed');
+    }
+
     public function archiveRecoveredProviderChange(array $snapshot, ?callable $fault = null): void
     {
         $record=$this->readProviderTransition();
         if ($record===null || $record['completed']===null) throw new RuntimeException('Provider transition is not completed');
         $this->validateProviderTransition($record);
+        $this->confirmedProviderRequirement($record);
         if ($snapshot['transactions']['dependencies']===null) $snapshot['transactions']['dependencies']=$this->inspectArchivedDependency($record);
         if (($snapshot['info']['state']??null)!==1 || ($snapshot['info']['dependency_completed_nonce']??null)!==$record['completed']['nonce']
             || !empty($snapshot['info']['dependency_command_nonce']) || !empty($snapshot['info']['composer_dependent_wait_install'])
@@ -601,11 +618,139 @@ final class HostPayloadDependencyChange
             if (hash_file('sha256',$this->journal)!==$sha || file_exists($history) || !rename($this->journal,$history)) throw new RuntimeException('Provider dependency archive changed');
         } elseif (!is_file($history) || hash_file('sha256',$history)!==$sha) throw new RuntimeException('Provider dependency archive is missing');
         $fault?->__invoke('dependency-journal-archived');
+        $bindingPath=$this->providerBindingPath();
+        if (file_exists($bindingPath)) {
+            $this->confirmedProviderRequirement($record);
+            $bindingHistory=$bindingPath.'.'.hash_file('sha256',$bindingPath).'.history';
+            HostPayloadPlan::assertSafePath($bindingHistory);
+            if (file_exists($bindingHistory) || !rename($bindingPath,$bindingHistory)) throw new RuntimeException('Provider binding archive incomplete');
+        }
+        $fault?->__invoke('provider-binding-archived');
         $path=$this->transitionPath();$closed=$path.'.'.hash_file('sha256',$path).'.history';HostPayloadPlan::assertSafePath($closed);
         if (file_exists($closed) || !rename($path,$closed)) throw new RuntimeException('Provider transition archive incomplete');
     }
 
-    public function hasProviderTransition(): bool { return file_exists($this->transitionPath()); }
+    public function hasProviderTransition(): bool {
+        if (!file_exists($this->transitionPath()) && file_exists($this->providerBindingPath())) throw new RuntimeException('Provider binding transition missing');
+        return file_exists($this->transitionPath());
+    }
+
+    /** A provider update after reset needs a new confirmation before any job begins. */
+    public function inspectProviderBinding(array $snapshot): ?array
+    {
+        $record=$this->readProviderTransition();
+        if ($record===null) return null;
+        $active=HostPayloadPlan::directoryPrefix($this->stateRoot).$this->app.'.dependency-recovery.json';
+        HostPayloadPlan::assertSafePath($active);
+        if (file_exists($active)) {
+            if (file_exists($this->providerBindingPath())) $this->confirmedProviderRequirement($record);
+            return null;
+        }
+        $this->validateProviderTransition($record);
+        if ($record['active_command']!==null || $record['completed']!==null) return null;
+        $info=$snapshot['info'];
+        if (($info['state']??null)!==4 || !empty($info['dependency_command_nonce'])
+            || !empty($info['dependency_completed_nonce']) || !empty($info['dependency_failed_nonce'])
+            || empty($info['composer_dependent_wait_install']) && empty($info['npm_dependent_wait_install'])) return null;
+        $marker=HostPayloadPlan::directoryPrefix(dirname($this->stateRoot)).'locks/host-upstream.process.json';
+        HostPayloadPlan::assertSafePath($marker);
+        if (file_exists($marker) || file_exists(HostPayloadPlan::directoryPrefix($this->stateRoot).$this->app.'.dependency-recovery.json')) return null;
+        $binding=$this->providerBinding($snapshot);
+        foreach (['identity','candidate','runtime','owned'] as $field) {
+            if ($binding[$field]!==$record['original'][$field]) throw new RuntimeException('Provider binding candidate changed');
+        }
+        $old=$this->confirmedProviderRequirement($record);
+        $now=$binding['transactions']['dependencies']['provider_requirement_update']??null;
+        if (!is_array($now)) throw new RuntimeException('Provider binding current proof missing');
+        foreach (['from_requirement','journal_sha256','original_after_sha256','other_lock_history_verified'] as $field) {
+            if (($now[$field]??null)!==($old[$field]??null)) throw new RuntimeException('Provider binding dependency origin changed');
+        }
+        foreach (['lock_sha256','installed_sha256'] as $field) {unset($old[$field],$now[$field]);}
+        if ($old===$now) return null;
+        $path=$this->providerBindingPath();
+        return ['app'=>$this->app,'operation'=>'provider-binding-refresh','phase'=>'confirmation_required','state'=>4,
+            'actions'=>['refresh-provider-binding'],'command_success_proven'=>false,'sql_replayed'=>false,
+            'fingerprint'=>hash('sha256',json_encode([$snapshot,$record,is_file($path)?hash_file('sha256',$path):null,hash_file('sha256',$this->transitionPath())],JSON_THROW_ON_ERROR)),
+            'next_action'=>'使用本次完整确认更新提供方绑定；不会启动依赖任务或修改原恢复证明'];
+    }
+
+    public function confirmProviderBinding(array $snapshot, string $confirmation): array
+    {
+        $inspection=$this->inspectProviderBinding($snapshot);
+        if ($inspection===null || !hash_equals('RECOVER DEPENDENCY '.$this->app.' '.$inspection['fingerprint'],$confirmation)) {
+            throw new RuntimeException('请重新检查提供方绑定并使用本次完整确认');
+        }
+        $record=$this->readProviderTransition();
+        $provider=$snapshot['transactions']['dependencies']['provider_requirement_update'];
+        $binding=['schema'=>1,'app'=>$this->app,'recovery_sha256'=>$record['recovery_sha256'],
+            'original_sha256'=>hash('sha256',json_encode($record['original'],JSON_THROW_ON_ERROR)),
+            'provider'=>$provider,'before'=>$snapshot,
+            'previous_sha256'=>is_file($this->providerBindingPath())?hash_file('sha256',$this->providerBindingPath()):null,
+            'confirmation_fingerprint'=>$inspection['fingerprint'],'transition_sha256'=>hash_file('sha256',$this->transitionPath())];
+        $path=$this->providerBindingPath();
+        if (file_exists($path)) {
+            $this->confirmedProviderRequirement($record);
+            $history=$path.'.'.hash_file('sha256',$path).'.history';HostPayloadPlan::assertSafePath($history);
+            if (file_exists($history) || !rename($path,$history)) throw new RuntimeException('Previous provider binding archive incomplete');
+        }
+        $this->save($binding,$path);
+        return ['app'=>$this->app,'action'=>'refresh-provider-binding','state'=>4,'sql_replayed'=>false,
+            'command_started'=>false,'next_action'=>'提供方绑定已更新；从正式依赖入口明确执行仍等待的任务'];
+    }
+
+    private function providerBindingPath(): string
+    {
+        $path=HostPayloadPlan::directoryPrefix($this->stateRoot).$this->app.'.provider-dependency-binding.json';
+        HostPayloadPlan::assertSafePath($path);return $path;
+    }
+
+    private function confirmedProviderRequirement(array $record, ?string $path = null): array
+    {
+        $path ??= $this->providerBindingPath();
+        if (!file_exists($path)) {
+            $old=$record['original']['transactions']['dependencies']['provider_requirement_update'];
+            if ($record['completed']===null) return $old;
+            $target=$record['completed']['binding']['transactions']['dependencies']['provider_requirement_update'];
+            foreach (['lock_sha256','installed_sha256'] as $field) {unset($old[$field],$target[$field]);}
+            if ($old===$target) return $record['original']['transactions']['dependencies']['provider_requirement_update'];
+            $matched=[];
+            foreach (glob($path.'.*.history') ?: [] as $history) {
+                HostPayloadPlan::assertSafePath($history);
+                if (!is_file($history) || substr($history,-72,-8)!==hash_file('sha256',$history)) throw new RuntimeException('Provider binding archive changed');
+                $provider=$this->confirmedProviderRequirement($record,$history);
+                foreach (['lock_sha256','installed_sha256'] as $field) unset($provider[$field]);
+                if ($provider===$target) $matched[]=$history;
+            }
+            if (count($matched)!==1) throw new RuntimeException('Confirmed provider binding archive missing');
+            return $this->confirmedProviderRequirement($record,$matched[0]);
+        }
+        if (!is_file($path) || filesize($path)>16777216) throw new RuntimeException('Provider binding record unsafe');
+        $binding=json_decode(file_get_contents($path),true,128,JSON_THROW_ON_ERROR);
+        if (!is_array($binding) || count($binding)!==9 || ($binding['schema']??null)!==1 || ($binding['app']??null)!==$this->app
+            || ($binding['recovery_sha256']??null)!==$record['recovery_sha256']
+            || ($binding['original_sha256']??null)!==hash('sha256',json_encode($record['original'],JSON_THROW_ON_ERROR))
+            || !is_array($binding['provider']??null) || !is_array($binding['before']??null)
+            || !array_key_exists('previous_sha256',$binding) || !is_string($binding['transition_sha256']??null) || preg_match('/^[a-f0-9]{64}$/D',$binding['transition_sha256'])!==1 || !is_string($binding['confirmation_fingerprint']??null)) throw new RuntimeException('Provider binding is not the confirmed recovery origin');
+        $before=$binding['before'];$info=$before['info']??[];
+        if (($info['state']??null)!==4 || !empty($info['dependency_command_nonce']) || !empty($info['dependency_completed_nonce'])
+            || !empty($info['dependency_failed_nonce']) || empty($info['composer_dependent_wait_install']) && empty($info['npm_dependent_wait_install'])
+            || ($before['transactions']['dependencies']['provider_requirement_update']??null)!==$binding['provider']) throw new RuntimeException('Provider binding confirmation scene invalid');
+        $origin=$this->providerBinding($before);
+        foreach (['identity','candidate','runtime','owned'] as $field) if ($origin[$field]!==$record['original'][$field]) throw new RuntimeException('Provider binding confirmation candidate changed');
+        foreach (['from_requirement','journal_sha256','original_after_sha256','other_lock_history_verified'] as $field) {
+            if (($binding['provider'][$field]??null)!==($record['original']['transactions']['dependencies']['provider_requirement_update'][$field]??null)) throw new RuntimeException('Provider binding confirmation origin changed');
+        }
+        $previous=$binding['previous_sha256'];
+        if ($previous!==null) {
+            if (!is_string($previous) || preg_match('/^[a-f0-9]{64}$/D',$previous)!==1) throw new RuntimeException('Previous provider binding invalid');
+            $history=$this->providerBindingPath().'.'.$previous.'.history';HostPayloadPlan::assertSafePath($history);
+            if (!is_file($history) || hash_file('sha256',$history)!==$previous) throw new RuntimeException('Previous provider binding archive changed');
+        }
+        $confirmed=$record;$confirmed['active_command']=null;$confirmed['completed']=null;
+        $expected=hash('sha256',json_encode([$before,$confirmed,$previous,$binding['transition_sha256']],JSON_THROW_ON_ERROR));
+        if (!hash_equals($expected,$binding['confirmation_fingerprint'])) throw new RuntimeException('Provider binding confirmation changed');
+        return $binding['provider'];
+    }
 
     public function inspectProviderTransition(?array $checkpoint, array $current): ?string
     {
@@ -617,7 +762,12 @@ final class HostPayloadDependencyChange
             && hash_file('sha256',$active)===$record['recovery_sha256'] && $record['original']===$this->providerBinding($checkpoint['before']) && $record['completed']===null) {
             return hash_file('sha256',$this->transitionPath());
         }
-        $this->validateProviderTransition($record);return hash_file('sha256',$this->transitionPath());
+        $this->validateProviderTransition($record);
+        $this->confirmedProviderRequirement($record);
+        $path=$this->providerBindingPath();
+        if (!file_exists($path)) return hash_file('sha256',$this->transitionPath());
+        $this->confirmedProviderRequirement($record);
+        return hash('sha256',json_encode([hash_file('sha256',$this->transitionPath()),hash_file('sha256',$path)],JSON_THROW_ON_ERROR));
     }
 
     private function inspectArchivedDependency(array $record): array
@@ -643,7 +793,10 @@ final class HostPayloadDependencyChange
 
     private function readProviderTransition(): ?array
     {
-        $path=$this->transitionPath();if (!file_exists($path)) return null;
+        $path=$this->transitionPath();if (!file_exists($path)) {
+            if (file_exists($this->providerBindingPath())) throw new RuntimeException('Provider binding transition missing');
+            return null;
+        }
         if (!is_file($path) || filesize($path)>16777216) throw new RuntimeException('Provider transition record unsafe');
         $record=json_decode(file_get_contents($path),true,128,JSON_THROW_ON_ERROR);
         if (!is_array($record) || count($record)!==6 || ($record['schema']??null)!==1 || ($record['app']??null)!==$this->app
