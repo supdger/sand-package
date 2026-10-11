@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.12
+composer require 'supdger/sand-package:>=0.2.13'
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -109,7 +109,11 @@ php webman sandpackage:recover recover-dependency <插件标识> --confirmation=
 
 启动前可在已登录的超级管理员 HTTP 会话调用 `POST /app/sandpackage/install/inspectDependencyStart`，表单 `command` 只接受 `composer.update`、`web-install.npm`、`web-install.yarn`、`web-install.pnpm`。它仅返回处理该请求的 HTTP worker 的函数能力、固定命令配置有效性和工作目录可读/可写提示，不创建目录、锁、任务或进程，也不读取或写入恢复记录。`readonly_only=true` 不能证明实际锁取得、持久登记写入、子进程能力或启动成功；这些结果明确为 `unknown`。CLI 检查结果不能代替 HTTP worker 的能力。
 
+`provider_identity` 只读比较当前 worker 的 Composer 运行元数据、磁盘锁定/安装记录与宿主要求，返回安全的 `runtime`、`lock`、`installed` 版本与提交引用，以及固定 `conditions`。`status=unavailable` 或字段为 `null` 表示无法获得可信提示；`identity_matches` 只反映这些身份比较，不证明完整恢复资格、源码字节、候选或锁/写入/启动成功。检查不会刷新进程元数据、写恢复记录或重载服务；当前不一致提示不能证明过去异常原因。
+
 ## 自动依赖与恢复 CLI（0.2.6）
+
+插件依赖声明中的 `version` 是已安装插件的最低版本；有效的相同或较高版本直接复用，不降级或重装。随包 ZIP 的声明版本、SHA 和元数据身份仍须精确匹配；未安装的待安装候选也须与随包版本和 SHA 一致。版本低于下限、格式无效或候选身份不符时，在当前插件 SQL 之前拒绝。
 
 自动安装依赖后，安装器按 Webman 的配置与 autoload 文件声明在当前 worker 激活依赖，再查询服务目录。加载或目录预检失败时保留原候选，不执行当前插件 SQL；修复依赖后可继续原安装。
 

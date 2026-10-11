@@ -175,20 +175,12 @@ final class HostPayloadDependencyChange
         $current = $this->providerPackage($installed['packages'] ?? $installed);
         if ($this->providerPackage($lock['packages-dev'] ?? [], false) !== null) throw new RuntimeException('提供方不能同时登记为开发依赖');
         if (!class_exists(\Composer\InstalledVersions::class) || !\Composer\InstalledVersions::isInstalled($name, false)) throw new RuntimeException('当前执行环境没有已安装的提供方身份');
-        $version = \Composer\InstalledVersions::getPrettyVersion($name);
-        $reference = \Composer\InstalledVersions::getReference($name);
-        $installPath = \Composer\InstalledVersions::getInstallPath($name);
-        $packageRoot = is_string($installPath) ? realpath($installPath) : false;
-        $recordPath = $current['install-path'] ?? null;
-        $recordPath = is_string($recordPath) ? dirname($installedPath) . '/' . $recordPath : null;
-        if (!is_string($version) || ($locked['version'] ?? null) !== $version || ($current['version'] ?? null) !== $version
-            || !is_string($reference) || preg_match('/^[a-f0-9]{40}$/D', $reference) !== 1
-            || ($locked['source']['reference'] ?? null) !== $reference || ($current['source']['reference'] ?? null) !== $reference
-            || ($locked['source'] ?? null) !== ($current['source'] ?? null)
-            || ($locked['dist'] ?? null) !== ($current['dist'] ?? null)
-            || !is_string($installPath) || !is_string($packageRoot)
-            || !is_string($recordPath) || realpath($recordPath) !== realpath($packageRoot)
-            || !$this->providerVersionMatches($requirement, $version)) throw new RuntimeException('提供方锁定记录、安装记录、版本要求与实际执行源码不一致');
+        $identity = self::providerIdentityConditions($requirement, $locked, $current, $installedPath);
+        if (in_array(false, $identity['conditions'], true)) throw new RuntimeException('提供方锁定记录、安装记录、版本要求与实际执行源码不一致');
+        $version = $identity['version'];
+        $reference = $identity['reference'];
+        $installPath = $identity['install_path'];
+        $packageRoot = $identity['package_root'];
         $code = [];
         foreach ([self::class, DependencyCommandRecovery::class, HostPayloadRuntimeChangeFiles::class, \plugin\sandpackage\app\logic\InstallLogic::class,
             \plugin\sandpackage\app\command\Recover::class, \plugin\sandpackage\app\controller\InstallController::class] as $class) {
@@ -244,7 +236,67 @@ final class HostPayloadDependencyChange
         return $value;
     }
 
-    private function providerDocument(string $path): array
+    /** Current worker metadata only; never refreshes Composer's process-local records. */
+    public static function inspectCurrentProvider(string $composerPath): array
+    {
+        $unknown = ['status'=>'unavailable','runtime'=>['version'=>null,'reference'=>null],
+            'lock'=>['version'=>null,'reference'=>null],'installed'=>['version'=>null,'reference'=>null],
+            'conditions'=>null,'identity_matches'=>null];
+        try {
+            $name = 'supdger/sand-package';
+            if (!class_exists(\Composer\InstalledVersions::class) || !\Composer\InstalledVersions::isInstalled($name, false)) return $unknown;
+            $runtime = ['version'=>\Composer\InstalledVersions::getPrettyVersion($name),'reference'=>\Composer\InstalledVersions::getReference($name)];
+            $unknown['runtime'] = self::publicProviderIdentity($runtime);
+            $manifest = self::providerDocument($composerPath);
+            $requirement = $manifest['require'][$name] ?? null;
+            if (!is_string($requirement)) return $unknown;
+            $lock = self::providerDocument(dirname($composerPath).'/composer.lock');
+            $installedPath = dirname($composerPath).'/vendor/composer/installed.json';
+            $installed = self::providerDocument($installedPath);
+            $locked = self::providerPackage($lock['packages'] ?? null);
+            $current = self::providerPackage($installed['packages'] ?? $installed);
+            $identity = self::providerIdentityConditions($requirement,$locked,$current,$installedPath);
+            return ['status'=>'inspected','runtime'=>self::publicProviderIdentity($runtime),
+                'lock'=>self::publicProviderIdentity(['version'=>$locked['version']??null,'reference'=>$locked['source']['reference']??null]),
+                'installed'=>self::publicProviderIdentity(['version'=>$current['version']??null,'reference'=>$current['source']['reference']??null]),
+                'conditions'=>$identity['conditions'],'identity_matches'=>!in_array(false,$identity['conditions'],true)];
+        } catch (Throwable) { return $unknown; }
+    }
+
+    private static function publicProviderIdentity(array $identity): array
+    {
+        return ['version'=>is_string($identity['version']) && strlen($identity['version'])<=128 && preg_match('/^[vV]?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/D',$identity['version'])===1 ? $identity['version'] : null,
+            'reference'=>is_string($identity['reference']) && preg_match('/^[a-f0-9]{40}$/D',$identity['reference'])===1 ? $identity['reference'] : null];
+    }
+
+    private static function providerIdentityConditions(string $requirement, array $locked, array $current, string $installedPath): array
+    {
+        $name = 'supdger/sand-package';
+        $version = \Composer\InstalledVersions::getPrettyVersion($name);
+        $reference = \Composer\InstalledVersions::getReference($name);
+        $installPath = \Composer\InstalledVersions::getInstallPath($name);
+        $packageRoot = is_string($installPath) ? realpath($installPath) : false;
+        $recordPath = $current['install-path'] ?? null;
+        $recordPath = is_string($recordPath) ? dirname($installedPath).'/'.$recordPath : null;
+        return ['version'=>$version,'reference'=>$reference,'install_path'=>$installPath,'package_root'=>$packageRoot,
+            'conditions'=>[
+                'runtime_version_is_string'=>is_string($version),
+                'lock_version_equals_runtime'=>($locked['version']??null)===$version,
+                'installed_version_equals_runtime'=>($current['version']??null)===$version,
+                'runtime_reference_valid'=>is_string($reference) && preg_match('/^[a-f0-9]{40}$/D',$reference)===1,
+                'lock_reference_equals_runtime'=>($locked['source']['reference']??null)===$reference,
+                'installed_reference_equals_runtime'=>($current['source']['reference']??null)===$reference,
+                'source_record_equal'=>($locked['source']??null)===($current['source']??null),
+                'dist_record_equal'=>($locked['dist']??null)===($current['dist']??null),
+                'runtime_install_path_is_string'=>is_string($installPath),
+                'runtime_install_path_resolves'=>is_string($packageRoot),
+                'installed_install_path_is_string'=>is_string($recordPath),
+                'install_path_equals_runtime'=>is_string($recordPath) && realpath($recordPath)===realpath($packageRoot ?: ''),
+                'requirement_matches_runtime'=>is_string($version) && self::providerVersionMatches($requirement,$version),
+            ]];
+    }
+
+    private static function providerDocument(string $path): array
     {
         HostPayloadPlan::assertSafePath($path);
         if (!is_file($path) || filesize($path) > 8388608) throw new RuntimeException('提供方锁定或安装记录缺失、过大或类型不可信');
@@ -253,7 +305,7 @@ final class HostPayloadDependencyChange
         return $document;
     }
 
-    private function providerPackage(mixed $packages, bool $required = true): ?array
+    private static function providerPackage(mixed $packages, bool $required = true): ?array
     {
         if (!is_array($packages) || !array_is_list($packages)) throw new RuntimeException('提供方包列表类型不可信');
         $found = null;
@@ -268,7 +320,7 @@ final class HostPayloadDependencyChange
     }
 
     /** Recognized stable constraints; unknown forms never bypass the original raw manifest gate. */
-    private function providerVersionMatches(string $requirement, string $version): bool
+    private static function providerVersionMatches(string $requirement, string $version): bool
     {
         $version = ltrim($version, 'vV');
         if (preg_match('/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/D', $version) !== 1) return false;
