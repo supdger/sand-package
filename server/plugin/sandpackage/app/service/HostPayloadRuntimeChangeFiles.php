@@ -80,6 +80,18 @@ final class HostPayloadRuntimeChangeFiles
         return is_file($this->journal);
     }
 
+    /** Recheck the exact already-archived runtime transaction before retiring its provider transition. */
+    public function inspectArchivedSnapshot(string $sha256): array
+    {
+        if (preg_match('/^[a-f0-9]{64}$/D',$sha256)!==1) throw new RuntimeException('Runtime archive digest invalid');
+        $journal=$this->journal;
+        try {
+            $this->journal=$journal.'.'.$sha256.'.history';HostPayloadPlan::assertSafePath($this->journal);
+            if (!is_file($this->journal)||hash_file('sha256',$this->journal)!==$sha256) throw new RuntimeException('Runtime archive changed');
+            return $this->inspectSnapshot();
+        } finally {$this->journal=$journal;}
+    }
+
     /** @return array{phase:string,fingerprint:string,expected:array<string,array<string,string>|null>} */
     public function inspectSnapshot(): array
     {
