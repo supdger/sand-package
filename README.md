@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.9
+composer require supdger/sand-package:^0.2.10
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -70,6 +70,34 @@ php webman sandpackage:recover restore-host-upgrade <插件标识> --confirmatio
 ```
 
 将占位内容替换为同一插件标识和本次检查结果；确认过期或现场变化时重新 inspect，不修改或删除恢复记录。 恢复成功时，输出为 `action=restore-old-candidate`、`sql_replayed=false`、`state=1`，并提供保留的 `failed_candidate` 路径；已安装版本恢复为升级前版本。`sql_not_started` 只允许回滚旧候选，不允许 `continue-host-upgrade`，恢复过程不执行升级 SQL。回滚保留冲突文件；消费方仍须按其权限处理原文件冲突后再重试升级。已有宿主需升级本包获得修复，发行不会自动操作现有部署。
+
+## 依赖任务中断后的检查与恢复
+
+安装返回“等待依赖安装”时，服务重载延后到最后一个依赖任务成功登记之后。安装时选择不重载会保留该选择，Composer 或 npm 的完成顺序不会改变它。依赖失败保持等待状态。
+
+依赖终端因请求进程中断而失去回执时，在宿主 `server/` 目录检查原任务：
+
+```bash
+php webman sandpackage:recover inspect-dependency <插件标识>
+```
+
+仅按本次输出的 `actions` 操作。`reset-dependency-waiting` 要求原进程组、启动进程和全部记录子进程已确认不存在；它归档原任务记录、解除占用并保留依赖等待状态，不证明原命令成功，不撤销 Composer 的部分效果，也不重跑依赖、插件安装或 SQL。使用本次完整确认：
+
+```bash
+php webman sandpackage:recover recover-dependency <插件标识> --confirmation="RECOVER DEPENDENCY <插件标识> <本次 fingerprint>"
+```
+
+成功后从插件管理页明确重新执行仍等待的依赖任务。`finish-dependency-cleanup` 使用同一命令，只收尾已成功或失败登记的原进程记录，保留现有状态和等待标志。检查、执行或收尾中断后重新检查；旧确认不能跨现场或检查点重用。未知进程、活进程、身份可能复用、权限不明、记录损坏及载荷或依赖漂移均拒绝恢复，不能手动删标记或更改登记。
+
+依赖已全部完成但重载结果未确认时，检查可能提供 `restart-only`。该动作须另用新确认并明确指定 `--restart`：
+
+```bash
+php webman sandpackage:recover recover-dependency <插件标识> --confirmation="RECOVER DEPENDENCY <插件标识> <本次 fingerprint>" --restart
+```
+
+它只请求重载，不执行依赖或 SQL。输出 `signal_requested` 表示已发出重载请求，不能代替 worker 轮换和实际运行验收。请求途中再次中断会显示结果未知，须重新检查后明确重试；不能自动重发旧确认。历史记录未保存原重载选择时显示 `restart_intent=unknown`，不会自动重载；已明确不重载的新安装不会提供此动作。
+
+超级管理员 API 为 `POST /app/sandpackage/install/inspectDependencyRecovery`（`appName`）与 `POST /app/sandpackage/install/recoverDependency`（`appName`、完整 `confirmation`，仅重载动作另传 `restart=1`）。Unix 进程检查需要 POSIX；无法证明原进程退出的平台会拒绝。旧记录没有进程标记且仍有占用 nonce 时不具备恢复证明，仍须保留现场。
 
 ## 自动依赖与恢复 CLI（0.2.6）
 

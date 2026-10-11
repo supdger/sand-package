@@ -30,6 +30,7 @@ use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
 use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PluginVersion;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
+use plugin\sandpackage\app\service\DependencyCommandRecovery;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -52,6 +53,9 @@ class InstallLogic
     private ?string $commandNonce = null;
     private ?string $commandType = null;
     private ?array $processRecord = null;
+    private ?int $processStartedAt = null;
+    private string $processPhase = 'started';
+    private ?int $processFailureTime = null;
     private ?object $freshPdo = null;
     private PluginStorage $storage;
 
@@ -329,7 +333,8 @@ class InstallLogic
             echo '开始安装[' . $this->appName . ']' . PHP_EOL;
             $recovery = ($isUpdate || $attachExistingSchema) ? null : $this->freshRecovery($hostPayload, $dependencyChange);
             if ($recovery !== null) $recovery->begin($restart);
-            $pending = ['operation_pending' => 1];
+            $info['dependency_restart_pending'] = $restart ? 1 : 0;
+            $pending = ['operation_pending' => 1, 'dependency_restart_pending' => $info['dependency_restart_pending']];
             if ($attachExistingSchema) {
                 $pending['existing_schema_attach_pending'] = 1;
                 $pending['existing_schema_attached'] = 1;
@@ -372,7 +377,7 @@ class InstallLogic
                     [$port, $declaration] = $serviceCatalog;
                     echo '登记插件服务目录' . PHP_EOL;
                     $port->registerServiceActions($declaration['service'], $declaration['actions']);
-                    if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                    if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
                 }
                 if ($recovery !== null) $recovery->checkpoint();
                 if ($attachProof !== null && $this->existingSchemaAttachProof($info, $database)['token'] !== $attachProof['token']) {
@@ -381,6 +386,7 @@ class InstallLogic
 
                 $info = $this->getInfo();
                 unset($info['operation_pending'], $info['existing_schema_attach_pending']);
+                if (($info['state'] ?? null) === self::INSTALLED) $info['dependency_restart_pending'] = 0;
                 $this->setInfo([], $info);
                 if ($recovery !== null) $recovery->complete();
                 $hostJournal?->complete();
@@ -958,7 +964,7 @@ class InstallLogic
             $flags = $dependency->apply();
             $state = $flags['composer'] || $flags['npm']
                 ? self::DEPENDENT_WAIT_INSTALL : self::INSTALLED;
-            $changes = ['state' => $state, 'operation_pending' => 1];
+            $changes = ['state' => $state, 'operation_pending' => 1, 'dependency_restart_pending' => $restart ? 1 : 0];
             if ($flags['composer']) $changes['composer_dependent_wait_install'] = 1;
             if ($flags['npm']) $changes['npm_dependent_wait_install'] = 1;
             $this->setInfo($changes);
@@ -974,9 +980,10 @@ class InstallLogic
                 throw new ApiException('升级宿主文件尚未完整部署');
             }
             UserMenuCache::clearMenuCache();
-            if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+            if ($restart && $state !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
             $result = $this->getInfo();
             unset($result['operation_pending']);
+            if ($state === self::INSTALLED) $result['dependency_restart_pending'] = 0;
             $this->setInfo([], $result);
             $this->hostPayloadLifecycleJournal('upgrade', $info)->complete();
             return [
@@ -1241,7 +1248,7 @@ class InstallLogic
                         if (!array_key_exists($name, $sourceFiles) || ($sourceFiles[$name] === 'directory') !== ($hash === 'directory')) throw new ApiException('部署目录含有不属于原候选的路径');
                     }
                 }
-                $this->setInfo(['state' => self::WAIT_INSTALL]);
+                $this->setInfo(['state' => self::WAIT_INSTALL, 'dependency_restart_pending' => $restart ? 1 : 0]);
                 try {
                     if ($dependencyChange !== null && !$dependencyChange->hasJournal()) {
                         $dependencyChange->begin();
@@ -1255,11 +1262,12 @@ class InstallLogic
                         [$port, $declaration] = $serviceCatalog;
                         echo '登记插件服务目录' . PHP_EOL;
                         $port->registerServiceActions($declaration['service'], $declaration['actions']);
-                        if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
                     }
                     $recovery->checkpoint();
                     $info = $this->getInfo();
                     unset($info['operation_pending']);
+                    if (($info['state'] ?? null) === self::INSTALLED) $info['dependency_restart_pending'] = 0;
                     $this->setInfo([], $info);
                 } catch (Throwable $error) {
                     $this->setInfo(['state' => self::FAILED, 'operation_pending' => 1]);
@@ -1304,7 +1312,7 @@ class InstallLogic
         $hostChange?->apply();
         if ($dependencyChange === null) $this->dependUpdateHandle();
         UserMenuCache::clearMenuCache();
-        if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
     }
 
     private function hostPayloadFiles(): ?HostPayloadFreshFiles
@@ -2013,6 +2021,34 @@ class InstallLogic
         throw new ApiException('参数错误');
     }
 
+    /** Persist dependency success and reload intent before a reload can interrupt this request. */
+    private function saveDependencyInfo(array $info): void
+    {
+        $path = $this->appDir . 'info.ini';
+        $this->assertSafePath($path);
+        $lines = [];
+        foreach (self::quoteInfo($info) as $key => $value) {
+            if (is_array($value)) {
+                $lines[] = "[$key]";
+                foreach ($value as $name => $entry) $lines[] = "$name = $entry";
+            } else $lines[] = "$key = $value";
+        }
+        $body = implode("\n", $lines) . "\n";
+        $this->writeDependencyRecord($path, $body);
+    }
+
+    private function writeDependencyRecord(string $path, string $body): void
+    {
+        $this->assertSafePath($path);
+        $temporary = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
+        $handle = fopen($temporary, 'xb');
+        if ($handle === false) throw new ApiException('无法暂存依赖记录', 400);
+        try {
+            if (fwrite($handle, $body) !== strlen($body) || !fflush($handle) || !fsync($handle)) throw new ApiException('依赖记录未持久化', 400);
+            if (!rename($temporary, $path)) throw new ApiException('无法保存依赖记录', 400);
+        } finally { fclose($handle); if (is_file($temporary)) unlink($temporary); }
+    }
+
     private static function quoteInfo(array $info): array
     {
         $result = [];
@@ -2209,6 +2245,10 @@ class InstallLogic
         $this->assertSafePath($this->appDir);
         $this->hostLock = $this->openLock($this->installDir . 'locks/upstream-host.lock');
         try {
+            foreach (glob($this->installDir . 'host-payload/*.dependency-recovery.json') ?: [] as $pending) {
+                $this->assertSafePath($pending);
+                throw new ApiException('依赖恢复尚未结束，请重新检查并完成原恢复', 400);
+            }
             foreach (glob($this->installDir . 'locks/host-*.json') ?: [] as $journal) {
                 if (is_file($journal) || is_link($journal)) throw new ApiException('宿主仍有依赖操作记录，请先检查原任务');
             }
@@ -2236,6 +2276,145 @@ class InstallLogic
             if (is_resource($lock)) { flock($lock, LOCK_UN); fclose($lock); }
         }
         $this->operationLock = $this->hostLock = null;
+    }
+
+    private function dependencyRecovery(): DependencyCommandRecovery
+    {
+        return new DependencyCommandRecovery(HostPayloadPlan::directoryPath($this->installDir), $this->appName,
+            $this->dependencyRecoverySnapshot(...));
+    }
+
+    public function inspectDependencyRecovery(): array
+    {
+        $this->lockDependencyRecovery();
+        try { return $this->dependencyRecovery()->inspect(); }
+        catch (Throwable $error) { throw new ApiException('依赖任务现场不可信：' . $error->getMessage(), 400); }
+        finally { $this->unlock(); }
+    }
+
+    public function recoverDependencyCommand(string $confirmation, bool $restart = false): array
+    {
+        $this->lockDependencyRecovery();
+        try {
+            $recovery = $this->dependencyRecovery();
+            $inspection = $recovery->inspect();
+            if ($inspection['actions'] === ['restart-only']) {
+                if (!$restart || !hash_equals('RECOVER DEPENDENCY ' . $this->appName . ' ' . $inspection['fingerprint'], $confirmation)) {
+                    throw new ApiException('此操作只完成待处理重载，请使用本次确认并明确指定 --restart；不会重跑依赖或 SQL', 400);
+                }
+                if ($recovery->inspect()['fingerprint'] !== $inspection['fingerprint']) throw new ApiException('重载写入前依赖现场已变化', 400);
+                $this->requestDependencyRestart();
+                return ['app' => $this->appName, 'state' => self::INSTALLED, 'action' => 'restart-only',
+                    'reload_result' => 'signal_requested', 'sql_replayed' => false, 'dependency_replayed' => false];
+            }
+            if ($restart) throw new ApiException('中断任务恢复只解除原占用，不执行重载；完成依赖后再检查重载意图', 400);
+            return $recovery->recover($confirmation);
+        } catch (Throwable $error) { throw new ApiException('依赖恢复未完成：' . $error->getMessage(), 400); }
+        finally { $this->unlock(); }
+    }
+
+    /** Uses the same flocks and permits only the one process marker being inspected. */
+    private function lockDependencyRecovery(): void
+    {
+        if (rtrim($this->installDir, DIRECTORY_SEPARATOR) !== $this->storage->root()) throw new ApiException('插件存储根已变化', 400);
+        $this->safeDirectory($this->installDir . 'locks');
+        $this->hostLock = $this->openLock($this->installDir . 'locks/upstream-host.lock');
+        try {
+            foreach (glob($this->installDir . 'host-payload/*.dependency-recovery.json') ?: [] as $pending) {
+                $this->assertSafePath($pending);
+                if ($pending !== $this->installDir . 'host-payload/' . $this->appName . '.dependency-recovery.json') throw new ApiException('另有依赖恢复尚未结束', 400);
+            }
+            foreach (glob($this->installDir . 'locks/host-*.json') ?: [] as $path) {
+                $this->assertSafePath($path);
+                if ($path !== $this->installDir . 'locks/host-upstream.process.json') throw new ApiException('另有宿主依赖任务，请先检查原任务', 400);
+            }
+            $this->operationLock = $this->openLock($this->installDir . 'locks/' . $this->appName . '-operation.lock');
+            foreach (glob($this->installDir . 'locks/' . $this->appName . '-*.json') ?: [] as $path) {
+                $this->assertSafePath($path); throw new ApiException('另有插件操作，不能恢复依赖任务', 400);
+            }
+        } catch (Throwable $error) { $this->unlock(); throw $error; }
+    }
+
+    /** Installed payload proof and dependency inputs; no database reads or writes. */
+    private function dependencyRecoverySnapshot(): array
+    {
+        $info = $this->getInfo();
+        if (($info['lifecycle_driver'] ?? null) !== self::DRIVER
+            || !in_array($info['state'] ?? null, [self::DEPENDENT_WAIT_INSTALL, self::INSTALLED], true)) {
+            throw new ApiException('此入口只检查新驱动的已部署依赖任务', 400);
+        }
+        foreach (['operation_pending', 'failed_upgrade', 'process_recovery_required', 'registration_candidate', 'existing_schema_attach_pending'] as $flag) {
+            if (!empty($info[$flag])) throw new ApiException('插件仍有未完成的安装或恢复操作', 400);
+        }
+        $this->checkPackage();
+        $this->assertRuntimeVersion($info['version']);
+        $state = HostPayloadPlan::directoryPrefix($this->installDir) . 'host-payload';
+        $transactions = [];
+        foreach (['lifecycle', 'removal', 'uninstall-finalization', 'rollback'] as $kind) {
+            $path = $state . '/' . $this->appName . '.' . $kind . '.json'; $this->assertSafePath($path);
+            if (file_exists($path)) throw new ApiException('存在当前生命周期或文件恢复事务', 400);
+        }
+        $manifest = HostPayloadManifest::inspectDirectory($this->appDir, $this->appName);
+        $files = new HostPayloadChangeFiles(base_path(), $state, HostPayloadPlan::directoryPath($this->appDir), $this->appName, $manifest);
+        $changePath = $state . '/' . $this->appName . '.change.json'; $this->assertSafePath($changePath);
+        $transactions['change'] = file_exists($changePath) ? $files->inspectSnapshot() : $files->inspectNotStarted($manifest, HostPayloadPlan::directoryPath($this->appDir));
+        if (!in_array($transactions['change']['phase'], ['complete', 'not_started'], true)) throw new ApiException('宿主文件变更尚未完成', 400);
+        $runtime = [];
+        foreach ($this->getAllowedPath() as $source => $target) {
+            $runtime[$target] = FreshInstallRecovery::tree($target);
+            if ($runtime[$target] !== FreshInstallRecovery::tree($source)) throw new ApiException('安装包与当前运行目录不一致', 400);
+        }
+        foreach (['runtime', 'dependencies'] as $kind) {
+            $path = $state . '/' . $this->appName . '.' . $kind . '.json'; $this->assertSafePath($path);
+            if (!file_exists($path)) { $transactions[$kind] = null; continue; }
+            $transaction = $kind === 'runtime' ? $this->hostPayloadRuntimeChangeFiles($info) : $this->hostPayloadDependencyChange();
+            $transactions[$kind] = $transaction->inspectSnapshot();
+            if ($transactions[$kind]['phase'] !== 'complete') throw new ApiException('运行文件或依赖声明变更尚未完成', 400);
+        }
+        $freshPath = $state . '/' . $this->appName . '.fresh.json'; $this->assertSafePath($freshPath);
+        if (file_exists($freshPath)) {
+            if (!is_file($freshPath) || filesize($freshPath) > 1048576) throw new ApiException('新装记录类型不安全', 400);
+            $raw = file_get_contents($freshPath); $record = json_decode($raw, true, 32, JSON_THROW_ON_ERROR);
+            if (!is_array($record) || count($record) !== 5 || ($record['schema'] ?? null) !== 1 || ($record['app'] ?? null) !== $this->appName
+                || ($record['phase'] ?? null) !== 'complete' || !is_string($record['id'] ?? null) || preg_match('/^[a-f0-9]{32}$/D', $record['id']) !== 1
+                || !is_array($record['files'] ?? null)) throw new ApiException('新装文件事务现场不可信', 400);
+            HostPayloadPlan::normalizeFiles($record['files'], $this->appName);
+            $transactions['fresh'] = hash('sha256', $raw);
+        }
+        if ($this->cleanupPending()) throw new ApiException('清理仍未结束', 400);
+        $dependencies = [];
+        foreach ([base_path() . '/composer.json', base_path() . '/composer.lock',
+            dirname(base_path()) . '/' . env('FRONTEND_DIR', 'sandadmin-artd') . '/package.json',
+            dirname(base_path()) . '/' . env('FRONTEND_DIR', 'sandadmin-artd') . '/package-lock.json',
+            dirname(base_path()) . '/' . env('FRONTEND_DIR', 'sandadmin-artd') . '/pnpm-lock.yaml',
+            dirname(base_path()) . '/' . env('FRONTEND_DIR', 'sandadmin-artd') . '/yarn.lock',
+            base_path() . '/vendor/composer/installed.json', base_path() . '/vendor/composer/installed.php'] as $path) {
+            $this->assertSafePath($path);
+            if (file_exists($path) && !is_file($path)) throw new ApiException('依赖输入或安装记录类型不可信', 400);
+            $dependencies[$path] = is_file($path) ? hash_file('sha256', $path) : null;
+        }
+        return ['info' => $info, 'registry_sha256' => hash_file('sha256', $this->appDir . 'info.ini'),
+            'candidate' => FreshInstallRecovery::tree(HostPayloadPlan::directoryPath($this->appDir)), 'runtime' => $runtime,
+            'owned' => HostPayloadOwnership::read($state, $this->appName), 'transactions' => $transactions, 'dependencies' => $dependencies];
+    }
+
+    private function requestDependencyRestart(): void
+    {
+        $info = $this->getInfo();
+        if (($info['state'] ?? null) !== self::INSTALLED || !in_array($info['dependency_restart_pending'] ?? null, [1, 2], true)
+            || !empty($info['dependency_command_nonce']) || !empty($info['composer_dependent_wait_install'])
+            || !empty($info['npm_dependent_wait_install'])) throw new ApiException('依赖未全部完成，不能重载', 400);
+        $info['dependency_restart_attempt'] = bin2hex(random_bytes(16));
+        $info['dependency_restart_status'] = 'requesting';
+        $this->saveDependencyInfo($info);
+        try {
+            if (Server::restart() !== true) throw new ApiException('依赖已完成，但重载请求未成功；请重新检查依赖任务', 400);
+            $info['dependency_restart_pending'] = 0;
+            $info['dependency_restart_status'] = 'signal_requested';
+            $this->saveDependencyInfo($info);
+        } catch (Throwable $error) {
+            throw new ApiException('依赖成功登记已保存，重载结果未确认；请重新检查并明确完成重载：' . $error->getMessage(), 400);
+        }
     }
 
     public function beginDependencyCommand(string $type): string
@@ -2288,6 +2467,8 @@ class InstallLogic
         $this->assertCommandOwner($type, $nonce);
         if ($launcherPid < 1 || $launcherPid !== $processGroupId) throw new ApiException('依赖进程未隔离');
         $this->processRecord = ['pid' => $launcherPid, 'pgid' => $processGroupId, 'descendants' => $descendantPids];
+        $this->processStartedAt = $startTime;
+        $this->processPhase = 'started';
         $this->writeProcessRecord();
     }
 
@@ -2299,16 +2480,20 @@ class InstallLogic
             if (!is_int($pid) || $pid < 1) throw new ApiException('依赖子进程记录无效');
         }
         $this->processRecord['descendants'] = $descendantPids;
+        $this->processPhase = $phase;
+        $this->processFailureTime = $failureTime;
         $this->writeProcessRecord();
     }
 
     private function writeProcessRecord(): void
     {
-        // A crash leaves this marker for manual inspection. No lease recovery state machine.
+        // A crash retains this record for the inspected dependency recovery entry.
         $path = $this->installDir . 'locks/host-upstream.process.json';
         $this->assertSafePath($path);
-        $json = json_encode(['app' => $this->appName, 'nonce' => $this->commandNonce, 'process' => $this->processRecord], JSON_THROW_ON_ERROR);
-        if (file_put_contents($path, $json, LOCK_EX) !== strlen($json)) throw new ApiException('无法保存依赖进程记录');
+        $json = json_encode(['app' => $this->appName, 'nonce' => $this->commandNonce, 'type' => $this->commandType,
+            'started_at' => $this->processStartedAt, 'phase' => $this->processPhase,
+            'failure_time' => $this->processFailureTime, 'process' => $this->processRecord], JSON_THROW_ON_ERROR);
+        $this->writeDependencyRecord($path, $json);
     }
 
     public function confirmDependencyProcessReaped(string $type, string $nonce): void
@@ -2319,7 +2504,8 @@ class InstallLogic
         foreach ($ids as $pid) {
             if (@posix_kill($pid, 0) || posix_get_last_error() !== 3) throw new ApiException('依赖进程尚未确认退出');
         }
-        if (!unlink($this->installDir . 'locks/host-upstream.process.json')) throw new ApiException('无法清理依赖进程记录');
+        $this->processPhase = 'reaped';
+        $this->writeProcessRecord();
         $this->processRecord = null;
     }
 
@@ -2336,11 +2522,26 @@ class InstallLogic
         $completed = !isset($info['npm_dependent_wait_install']) && !isset($info['composer_dependent_wait_install']);
         if ($completed) {
             UserMenuCache::clearMenuCache();
-            if ($restart && Server::restart() !== true) throw new ApiException('依赖完成但服务重载未完成');
             $info['state'] = self::INSTALLED;
         }
-        $this->setInfo([], $info);
+        $info['dependency_completed_nonce'] = $nonce;
+        unset($info['dependency_failed_nonce']);
+        $this->saveDependencyInfo($info);
+        $this->closeReapedDependencyMarker($nonce);
+        if ($completed && ($info['dependency_restart_pending'] ?? 0) === 1) $this->requestDependencyRestart();
         return ['advanced' => true, 'completed' => $completed];
+    }
+
+    private function closeReapedDependencyMarker(string $nonce): void
+    {
+        $path = $this->installDir . 'locks/host-upstream.process.json';
+        $this->assertSafePath($path);
+        if (!file_exists($path)) return; // A command that never launched has no marker.
+        if (!is_file($path) || filesize($path) > 4194304) throw new ApiException('依赖进程收尾记录类型不可信', 400);
+        $record = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        if (($record['app'] ?? null) !== $this->appName || ($record['nonce'] ?? null) !== $nonce
+            || ($record['phase'] ?? null) !== 'reaped') throw new ApiException('依赖进程收尾与本次任务不符', 400);
+        if (!unlink($path)) throw new ApiException('依赖登记已保存，但原进程记录仍需官方检查收尾', 400);
     }
 
     public function dependencyCommandFailed(string $type, ?string $nonce = null): bool
@@ -2349,7 +2550,10 @@ class InstallLogic
         if ($this->processRecord !== null) throw new ApiException('依赖进程仍需检查，不能清理任务状态');
         $info = $this->getInfo();
         unset($info['dependency_command_nonce']);
-        $this->setInfo([], $info);
+        $info['dependency_failed_nonce'] = $nonce;
+        unset($info['dependency_completed_nonce']);
+        $this->saveDependencyInfo($info);
+        $this->closeReapedDependencyMarker($nonce);
         return true;
     }
 
