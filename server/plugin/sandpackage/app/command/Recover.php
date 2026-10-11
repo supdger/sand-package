@@ -22,7 +22,7 @@ class Recover extends Command
 
     protected function configure(): void
     {
-        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-host-upgrade|restore-host-upgrade|continue-host-upgrade|inspect-host-uninstall|restore-host-uninstall|continue-host-uninstall|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
+        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-candidate|discard-candidate|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-host-upgrade|restore-host-upgrade|continue-host-upgrade|inspect-host-uninstall|restore-host-uninstall|continue-host-uninstall|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
             ->addArgument('app', InputArgument::REQUIRED, '插件标识')
             ->addOption('replacement-id', null, InputOption::VALUE_REQUIRED, '已预检替换候选标识')
             ->addOption('archive', null, InputOption::VALUE_REQUIRED, 'prepare 的本地 ZIP 文件')
@@ -47,7 +47,11 @@ class Recover extends Command
         try {
             $normal = new \plugin\sandpackage\app\logic\InstallLogic($app);
             $info = $normal->getInfo();
-            if ($action === 'inspect-host-upgrade') {
+            if ($action === 'inspect-candidate') {
+                $result = $normal->inspectCandidateWithdrawal();
+            } elseif ($action === 'discard-candidate') {
+                $result = $normal->discardCandidate((string) $input->getOption('confirmation'));
+            } elseif ($action === 'inspect-host-upgrade') {
                 $result = $normal->inspectHostUpgradeRecovery();
             } elseif ($action === 'restore-host-upgrade') {
                 $result = $normal->recoverHostUpgradeRollback((string) $input->getOption('confirmation'));

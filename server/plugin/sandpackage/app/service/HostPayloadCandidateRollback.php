@@ -80,6 +80,40 @@ final class HostPayloadCandidateRollback
         ];
     }
 
+    /** Read the directory checkpoint without advancing or repairing it. */
+    public function inspectSnapshot(): array
+    {
+        $record = $this->read();
+        $old = FreshInstallRecovery::tree($this->backup);
+        $candidate = FreshInstallRecovery::tree($this->candidate);
+        $failed = FreshInstallRecovery::tree($this->path($record, 'failed'));
+        $stage = FreshInstallRecovery::tree($this->path($record, 'stage'));
+        if (!is_array($old) || self::digest($old) !== $this->oldTreeSha256) {
+            throw new RuntimeException('升级前候选备份已变化');
+        }
+        $oldPresent = is_array($candidate) && self::digest($candidate) === $this->oldTreeSha256;
+        $newPresent = is_array($candidate) && self::digest($candidate) === $record['failed_tree_sha256'];
+        if ($candidate !== null && !$oldPresent && !$newPresent
+            || $failed !== null && self::digest($failed) !== $record['failed_tree_sha256']
+            || $oldPresent && ($failed === null || $stage !== null)
+            || $newPresent && $failed !== null
+            || $candidate === null && $failed === null
+            || $record['phase'] === 'restored' && !$oldPresent
+            || $record['phase'] === 'prepared' && !$newPresent
+            || $record['phase'] === 'quarantined' && $newPresent
+            || in_array($record['phase'], ['staged', 'quarantined'], true) && !$oldPresent
+                && (!is_array($stage) || self::digest($stage) !== $this->oldTreeSha256)) {
+            throw new RuntimeException('旧候选恢复目录状态与日志不符');
+        }
+        foreach ($stage ?? [] as $path => $hash) {
+            if (!array_key_exists($path, $old) || $old[$path] !== $hash) {
+                throw new RuntimeException('旧候选暂存包含非备份文件或内容变化');
+            }
+        }
+        return ['phase' => $record['phase'], 'restored' => $oldPresent,
+            'fingerprint' => hash('sha256', json_encode([$record, $old, $candidate, $failed, $stage], JSON_THROW_ON_ERROR))];
+    }
+
     /**
      * @param callable(string):void|null $fault
      * @return array{phase:string,failed_candidate:string,resumed:bool}
