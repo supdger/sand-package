@@ -1429,8 +1429,9 @@ class InstallLogic
     {
         $journal = HostPayloadPlan::directoryPrefix($this->installDir) . 'host-payload/' . $this->appName . '.dependencies.json';
         $this->assertSafePath($journal);
-        if (!is_file($journal)) return;
         $change = $this->hostPayloadDependencyChange();
+        if ($change->hasProviderTransition()) { $change->archiveRecoveredProviderChange($this->dependencyRecoverySnapshot()); return; }
+        if (!is_file($journal)) return;
         $snapshot = $change->inspectSnapshot();
         if (!in_array($snapshot['phase'], ['complete', 'rolled_back'], true)) {
             throw new ApiException('依赖清单变更尚未结束');
@@ -2281,7 +2282,9 @@ class InstallLogic
     private function dependencyRecovery(): DependencyCommandRecovery
     {
         return new DependencyCommandRecovery(HostPayloadPlan::directoryPath($this->installDir), $this->appName,
-            $this->dependencyRecoverySnapshot(...));
+            $this->dependencyRecoverySnapshot(...),
+            fn(array $checkpoint, string $sha, array $current) => $this->hostPayloadDependencyChange()->confirmProviderRecovery($checkpoint, $sha, $current),
+            fn(?array $checkpoint, array $current) => $this->hostPayloadDependencyChange()->inspectProviderTransition($checkpoint, $current));
     }
 
     public function inspectDependencyRecovery(): array
@@ -2366,10 +2369,21 @@ class InstallLogic
         }
         foreach (['runtime', 'dependencies'] as $kind) {
             $path = $state . '/' . $this->appName . '.' . $kind . '.json'; $this->assertSafePath($path);
-            if (!file_exists($path)) { $transactions[$kind] = null; continue; }
+            if (!file_exists($path)) {
+                $sha=$kind==='runtime'?$this->hostPayloadDependencyChange()->recoveredRuntimeArchive():null;
+                if ($sha!==null) {
+                    $transactions[$kind]=$this->hostPayloadRuntimeChangeFiles($info)->inspectArchivedSnapshot($sha);
+                    $transactions[$kind]['journal_sha256']=$sha;
+                } else $transactions[$kind]=null;
+                continue;
+            }
             $transaction = $kind === 'runtime' ? $this->hostPayloadRuntimeChangeFiles($info) : $this->hostPayloadDependencyChange();
-            $transactions[$kind] = $transaction->inspectSnapshot();
+            $transactions[$kind] = $kind === 'dependencies' ? $transaction->inspectDependencyRecoverySnapshot() : $transaction->inspectSnapshot();
             if ($transactions[$kind]['phase'] !== 'complete') throw new ApiException('运行文件或依赖声明变更尚未完成', 400);
+        }
+        if (isset($transactions['dependencies']['provider_requirement_update']) && $transactions['runtime'] !== null
+            && !isset($transactions['runtime']['journal_sha256'])) {
+            $transactions['runtime']['journal_sha256'] = hash_file('sha256', $state . '/' . $this->appName . '.runtime.json');
         }
         $freshPath = $state . '/' . $this->appName . '.fresh.json'; $this->assertSafePath($freshPath);
         if (file_exists($freshPath)) {
@@ -2429,6 +2443,7 @@ class InstallLogic
             }
             $this->commandType = $type;
             $this->commandNonce = bin2hex(random_bytes(16));
+            if ($this->hostPayloadDependencyChange()->hasProviderTransition()) $this->hostPayloadDependencyChange()->bindProviderCommand($type,$this->commandNonce,$this->dependencyRecoverySnapshot());
             $this->setInfo(['dependency_command_nonce' => $this->commandNonce]);
             return $this->commandNonce;
         } catch (Throwable $error) {
@@ -2526,7 +2541,12 @@ class InstallLogic
         }
         $info['dependency_completed_nonce'] = $nonce;
         unset($info['dependency_failed_nonce']);
+        if ($completed && $this->hostPayloadDependencyChange()->hasProviderTransition()) {
+            $proof=$this->hostPayloadDependencyChange()->providerCompletionProof($type,$nonce,$this->dependencyRecoverySnapshot());
+            $info['dependency_provider_completion_sha256']=hash('sha256',json_encode($proof,JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES));
+        }
         $this->saveDependencyInfo($info);
+        if ($completed && $this->hostPayloadDependencyChange()->hasProviderTransition()) $this->hostPayloadDependencyChange()->recordProviderCompletion($type, $nonce, $this->dependencyRecoverySnapshot());
         $this->closeReapedDependencyMarker($nonce);
         if ($completed && ($info['dependency_restart_pending'] ?? 0) === 1) $this->requestDependencyRestart();
         return ['advanced' => true, 'completed' => $completed];

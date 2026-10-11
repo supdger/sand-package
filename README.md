@@ -19,7 +19,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
 
 ```bash
-composer require supdger/sand-package:^0.2.10
+composer require supdger/sand-package:^0.2.11
 ```
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
@@ -96,6 +96,8 @@ php webman sandpackage:recover recover-dependency <插件标识> --confirmation=
 ```
 
 它只请求重载，不执行依赖或 SQL。输出 `signal_requested` 表示已发出重载请求，不能代替 worker 轮换和实际运行验收。请求途中再次中断会显示结果未知，须重新检查后明确重试；不能自动重发旧确认。历史记录未保存原重载选择时显示 `restart_intent=unknown`，不会自动重载；已明确不重载的新安装不会提供此动作。
+
+等待中的任务可能跨越安装器自身的正常 Composer 更新。检查只允许原依赖事务已经完成、旧备份和候选声明仍精确一致，且宿主 `require` 中仅 `supdger/sand-package` 的一个版本值变化；该要求必须满足当前锁定版本，锁定记录、安装记录与实际执行的安装器来源必须一致。其他字段、格式或载荷变化仍拒绝。检查结果以 `provider_requirement_update_verified=true` 标识此有限兼容，并以 `other_lock_history_verified=false` 明确不证明其他锁定依赖的历史变化，也不证明原任务成功。恢复仍仅归档原占用记录、回到依赖待执行状态，不恢复或重写 Composer 清单、锁文件及已安装依赖。正式重试依赖任务成功后，系统保留本次确认与成功登记的证明，使后续正常升级或卸载可以归档原事务；原事务内容不会被改写。成功登记后的收尾中断仍使用上述正式检查和恢复入口。普通安装和回滚没有这些已确认、已完成的证明时，依赖清单校验保持严格。
 
 超级管理员 API 为 `POST /app/sandpackage/install/inspectDependencyRecovery`（`appName`）与 `POST /app/sandpackage/install/recoverDependency`（`appName`、完整 `confirmation`，仅重载动作另传 `restart=1`）。Unix 进程检查需要 POSIX；无法证明原进程退出的平台会拒绝。旧记录没有进程标记且仍有占用 nonce 时不具备恢复证明，仍须保留现场。
 

@@ -18,6 +18,8 @@ final class DependencyCommandRecovery
         private readonly string $storage,
         private readonly string $app,
         private readonly Closure $snapshot,
+        private readonly ?Closure $providerTransition = null,
+        private readonly ?Closure $providerTransitionInspection = null,
     ) {
         if (preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) !== 1) throw new RuntimeException('依赖恢复插件标识无效');
         $this->marker = HostPayloadPlan::directoryPrefix($storage) . 'locks/host-upstream.process.json';
@@ -30,6 +32,7 @@ final class DependencyCommandRecovery
     {
         $current = ($this->snapshot)();
         $checkpoint = $this->readCheckpoint();
+        $this->providerTransitionInspection?->__invoke($checkpoint, $current);
         $raw = $this->read($this->marker);
         if ($checkpoint === null) {
             if ($raw === null) {
@@ -123,7 +126,10 @@ final class DependencyCommandRecovery
         $this->save($checkpoint);
         $fault?->__invoke('nonce_cleared');
         $this->inspect();
-        $closed = $this->journal . '.' . hash('sha256', $this->read($this->journal)) . '.history';
+        $closedSha256 = hash('sha256', $this->read($this->journal));
+        $this->providerTransition?->__invoke($checkpoint, $closedSha256, ($this->snapshot)());
+        $fault?->__invoke('provider-transition-written');
+        $closed = $this->journal . '.' . $closedSha256 . '.history';
         HostPayloadPlan::assertSafePath($closed);
         if (file_exists($closed) || !rename($this->journal, $closed)) throw new RuntimeException('依赖恢复检查点未能归档');
         return ['app' => $this->app, 'action' => $inspection['actions'][0], 'state' => ($this->snapshot)()['info']['state'],
@@ -133,12 +139,17 @@ final class DependencyCommandRecovery
 
     private function result(array $current, ?string $marker, string $phase, array $actions, ?array $checkpoint): array
     {
-        return ['app' => $this->app, 'operation' => 'dependency-recovery', 'phase' => $phase,
+        $result = ['app' => $this->app, 'operation' => 'dependency-recovery', 'phase' => $phase,
             'state' => $current['info']['state'], 'actions' => $actions,
             'command_success_proven' => false,
             'restart_intent' => match ($current['info']['dependency_restart_pending'] ?? null) { 0 => 'not_requested', 1 => 'requested', default => 'unknown' },
             'reload_result' => ($current['info']['dependency_restart_status'] ?? null) === 'requesting' ? 'unknown' : 'not_requested',
-            'fingerprint' => hash('sha256', json_encode([$current, $marker, $checkpoint], JSON_THROW_ON_ERROR))];
+            'fingerprint' => hash('sha256', json_encode([$current, $marker, $checkpoint, $this->providerTransitionInspection?->__invoke($checkpoint, $current)], JSON_THROW_ON_ERROR))];
+        if (isset($current['transactions']['dependencies']['provider_requirement_update'])) {
+            $result['provider_requirement_update_verified'] = true;
+            $result['other_lock_history_verified'] = false;
+        }
+        return $result;
     }
 
     private function after(array $checkpoint): array
