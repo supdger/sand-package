@@ -241,6 +241,23 @@ class InstallController extends BaseController
         return $this->success(array_merge($info, LegacyInstallLogic::presentInfo($info)), '插件登记完成');
     }
 
+    public function inspectDependencyRecovery(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('依赖任务检查仅支持 POST', 400);
+        $app = trim((string) $request->post('appName', ''));
+        if ($app === '') throw new ApiException('请填写插件标识', 400);
+        return $this->success((new InstallLogic($app))->inspectDependencyRecovery());
+    }
+
+    public function recoverDependency(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('依赖任务恢复仅支持 POST', 400);
+        $app = trim((string) $request->post('appName', ''));
+        if ($app === '') throw new ApiException('请填写插件标识', 400);
+        return $this->success((new InstallLogic($app))->recoverDependencyCommand(
+            (string) $request->post('confirmation', ''), $request->post('restart', false) === true || $request->post('restart', '') === '1'));
+    }
+
     public function inspectCandidate(Request $request): Response
     {
         if (strtoupper($request->method()) !== 'POST') throw new ApiException('候选检查仅支持 POST 请求', 400);

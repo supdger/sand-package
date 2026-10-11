@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.10（2026-10-11）
+
+- 增加依赖执行中断后的正式 `inspect-dependency` / `recover-dependency` 与超级管理员 API，确认绑定原任务、候选、nonce、进程和恢复检查点。仅在原进程确已结束时归档占用、回到依赖等待，不证明命令成功，不重跑依赖或插件 SQL。对应 issue #31。
+- 保留依赖完成登记与原进程清理之间的收尾证明；`finish-dependency-cleanup` 只完成旧记录清理，保留已登记状态。恢复或完成收尾中断后可重新检查，旧确认不能跨现场使用；没有原进程记录、进程仍活动或证明不可信时继续拒绝。
+- 安装等待依赖期间延后原服务重载意图，最后一个依赖成功登记后才处理重载；原选择不重载保持不重载。结果未知时仅提供显式确认的 `restart-only`，`signal_requested` 不能代替 worker 轮换或实际运行验收。
+- 无数据库结构、宿主骨架或依赖版本变更，继续配套 Sand Core 0.2.4。Unix 进程证明需要 POSIX；不具备证明的平台拒绝恢复，发行不会操作既有宿主。
+
 ## 0.2.9（2026-10-11）
 
 - 修复新驱动仅上传升级包、尚未开始当前插件生命周期时，待安装候选不能经正式入口撤回并重新上传的问题。新增 Recover `inspect-candidate` / `discard-candidate` 和超级管理员 API `inspectCandidate`，现有 `discardCandidate` 按驱动处理。对应 issue #29。
