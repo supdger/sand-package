@@ -249,6 +249,12 @@ class InstallController extends BaseController
         return $this->success((new InstallLogic($app))->inspectDependencyRecovery());
     }
 
+    public function inspectDependencyStart(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('依赖启动检查仅支持 POST 请求', 400);
+        return $this->success(\plugin\sandpackage\app\service\TerminalRunner::inspectStart((string) $request->post('command', '')));
+    }
+
     public function recoverDependency(Request $request): Response
     {
         if (strtoupper($request->method()) !== 'POST') throw new ApiException('依赖任务恢复仅支持 POST', 400);

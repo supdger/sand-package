@@ -4,6 +4,7 @@ namespace plugin\sandpackage\app\service;
 
 use Generator;
 use plugin\sandpackage\app\logic\InstallLogic;
+use support\Log;
 use Tinywan\Jwt\JwtToken;
 use Throwable;
 
@@ -80,21 +81,28 @@ PHP;
             return;
         }
 
-        $this->install = new InstallLogic($appName);
         $this->callback = $command['callback'];
+        $stage = 'dependency_init';
+        $startedAt = hrtime(true);
         try {
+            $this->install = new InstallLogic($appName);
+            $stage = 'runtime_support';
             if (!self::canLaunchProcessGroup()) {
                 throw new \RuntimeException('dependency process-group support is unavailable');
             }
+            $stage = 'dependency_begin';
             $this->nonce = $this->install->beginDependencyCommand($this->callback);
+            $stage = 'execution_lock';
             $this->install->acquireDependencyExecutionLock($this->callback, $this->nonce);
             $pipes = [];
             // Only inherit the host process environment; request data never
             // supplies environment values for these fixed dependency commands.
+            $stage = 'process_spawn';
             $this->process = @proc_open($this->groupLauncherCommand($command['argv']), [1 => ['pipe', 'w'], 2 => ['pipe', 'w'], 3 => ['pipe', 'r'], 4 => ['pipe', 'w']], $pipes, $command['cwd'], null);
             if (!is_resource($this->process)) {
                 throw new \RuntimeException('dependency process did not start');
             }
+            $stage = 'supervisor';
             $status = proc_get_status($this->process);
             $this->processPid = is_int($status['pid'] ?? null) ? $status['pid'] : null;
             $this->launcherControl = $pipes[3] ?? null;
@@ -137,6 +145,7 @@ PHP;
                     stream_set_blocking($pipe, false);
                 }
             }
+            $stage = 'stream';
             yield $this->output('connection-success');
 
             $exitCode = 1;
@@ -195,13 +204,16 @@ PHP;
                     $exitCode = $closeCode;
                 }
             }
+            $stage = 'process_exit';
             if ($exitCode !== 0) {
                 throw new \RuntimeException('dependency process returned a non-zero exit status');
             }
+            $stage = 'process_cleanup';
             if (!$this->terminateAndReap()) {
                 throw new \RuntimeException('dependency process group could not be confirmed reaped');
             }
 
+            $stage = 'completion';
             $result = $this->install->dependentInstallComplete($this->callback, $this->nonce, $this->callback === 'composer');
             if (($result['advanced'] ?? false) !== true) {
                 throw new \RuntimeException('dependency command did not advance its installation state');
@@ -209,8 +221,9 @@ PHP;
             $this->businessFinalized = true;
             $completed = true;
             yield $this->output('exec-success');
-        } catch (Throwable) {
-            yield $this->output('依赖命令未完成，请检查输出和安装状态；未声明回滚插件文件或数据库');
+        } catch (Throwable $error) {
+            $incident = $this->recordFailure($error, $stage, $appName, $key, $startedAt);
+            yield $this->output('依赖命令未完成（阶段：' . $stage . '，记录号：' . $incident . '）。请管理员按记录号查看宿主日志并检查安装状态；未声明回滚插件文件或数据库');
             yield $this->output('exec-error');
         } finally {
             $reaped = $this->terminateAndReap();
@@ -262,6 +275,70 @@ PHP;
     public function recordDeliveryFailure(): void
     {
         error_log('SandPackage dependency command completed but its terminal response was not delivered');
+    }
+
+    /** Read-only hints from this worker; never tests a lock, write or process launch. */
+    public static function inspectStart(string $commandKey): array
+    {
+        if (!isset(self::ALLOWED[$commandKey])) {
+            throw new \plugin\sandadmin\exception\ApiException('依赖命令不可用', 400);
+        }
+        $functions = [];
+        foreach (['proc_open', 'proc_get_status', 'proc_terminate', 'proc_close', 'posix_setsid', 'posix_getpgid', 'posix_kill',
+            'pcntl_exec', 'pcntl_fork', 'pcntl_waitpid', 'posix_getpgrp', 'shell_exec', 'flock', 'fsync'] as $function) {
+            $functions[$function] = function_exists($function);
+        }
+        $command = self::allowedCommand($commandKey);
+        return [
+            'operation' => 'dependency-start-inspection',
+            'readonly_only' => true,
+            'command_key' => $commandKey,
+            'worker_pid' => getmypid(),
+            'php_sapi' => PHP_SAPI,
+            'php_version' => PHP_VERSION,
+            'functions' => $functions,
+            'configuration_valid' => $command !== null,
+            'workdir_readable' => $command !== null ? is_readable($command['cwd']) : null,
+            'workdir_writable_hint' => $command !== null ? is_writable($command['cwd']) : null,
+            'child_runtime_support' => 'unknown',
+            'lock_acquisition' => 'unknown',
+            'durable_write' => 'unknown',
+            'process_launch' => 'unknown',
+            'next_action' => '仅检查当前 worker 的能力和配置提示；实际锁、登记写入与进程启动仍未执行验证',
+        ];
+    }
+
+    private function recordFailure(Throwable $error, string $stage, string $app, string $commandKey, int $startedAt): string
+    {
+        try {
+            $incident = bin2hex(random_bytes(16));
+        } catch (Throwable) {
+            $incident = 'unavailable';
+        }
+        $package = dirname(__DIR__, 2) . DIRECTORY_SEPARATOR;
+        $file = $error->getFile();
+        $exceptionType = get_class($error);
+        $context = [
+            'incident' => $incident,
+            'stage' => $stage,
+            'app' => $app,
+            'command_key' => $commandKey,
+            'worker_pid' => getmypid(),
+            'elapsed_ms' => (int) ((hrtime(true) - $startedAt) / 1000000),
+            'exception_type' => preg_match('/^[a-zA-Z_][a-zA-Z0-9_\\\\]{0,191}$/D', $exceptionType) === 1 ? $exceptionType : 'Throwable',
+            'source' => str_starts_with($file, $package) ? substr($file, strlen($package)) : 'external',
+            'source_line' => $error->getLine(),
+        ];
+        try {
+            Log::error('SandPackage dependency command failed', $context);
+        } catch (Throwable) {
+            try {
+                error_log('SandPackage dependency command failed ' . json_encode($context, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+            } catch (Throwable) {
+                // Diagnostics must not replace the command failure or its cleanup.
+            }
+        }
+        return $incident;
     }
 
     /** @return array{argv:list<string>,cwd:string,callback:'npm'|'composer'}|null */
