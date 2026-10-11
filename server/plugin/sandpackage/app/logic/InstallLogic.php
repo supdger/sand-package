@@ -1725,14 +1725,18 @@ class InstallLogic
         foreach ($requirements as $name => $version) {
             $dependency = new self($name);
             if ($dependency->getInstallState() !== self::INSTALLED) {
-                throw new ApiException("请先安装插件依赖 {$name}@{$version}；未执行当前插件数据库脚本", 400);
+                throw new ApiException("请先安装插件依赖 {$name}（最低版本 {$version}）；未执行当前插件数据库脚本", 400);
             }
             $info = $dependency->getInfo();
+            $installedVersion = $info['version'] ?? null;
             if (($info['lifecycle_driver'] ?? null) !== self::DRIVER
-                || !hash_equals($version, (string) ($info['version'] ?? ''))
+                || !is_string($installedVersion)
+                || preg_match('/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?!0[0-9]+(?:\.|\+|$))[0-9A-Za-z-]+(?:\.(?!0[0-9]+(?:\.|\+|$))[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/D', $installedVersion) !== 1
+                || PluginVersion::compare(explode('+', $installedVersion, 2)[0], $version) < 0
                 || !is_file(base_path() . '/plugin/' . $name . '/app/functions.php')
                 || is_link(base_path() . '/plugin/' . $name . '/app/functions.php')) {
-                throw new ApiException("插件依赖 {$name}@{$version} 不兼容；未执行当前插件数据库脚本", 400);
+                throw new ApiException("插件依赖 {$name} 不兼容（最低版本 {$version}，当前版本 "
+                    . (is_string($installedVersion) ? $installedVersion : '未登记') . "）；未执行当前插件数据库脚本", 400);
             }
         }
         foreach ($requirements as $name => $version) {

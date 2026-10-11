@@ -300,6 +300,7 @@ PHP;
             'configuration_valid' => $command !== null,
             'workdir_readable' => $command !== null ? is_readable($command['cwd']) : null,
             'workdir_writable_hint' => $command !== null ? is_writable($command['cwd']) : null,
+            'provider_identity' => HostPayloadDependencyChange::inspectCurrentProvider(base_path('composer.json')),
             'child_runtime_support' => 'unknown',
             'lock_acquisition' => 'unknown',
             'durable_write' => 'unknown',

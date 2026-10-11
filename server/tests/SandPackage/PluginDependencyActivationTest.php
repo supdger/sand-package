@@ -52,7 +52,10 @@ namespace {
     use Webman\Config;
 
     $scenarios = ['automatic', 'existing', 'activation-failure', 'loader-failure', 'external-file',
-        'symlink-file', 'symlink-config', 'disabled-catalog', 'incompatible-dependency', 'continue-fresh'];
+        'symlink-file', 'symlink-config', 'disabled-catalog', 'incompatible-dependency', 'continue-fresh',
+        'existing-higher', 'existing-higher-preview', 'existing-build', 'existing-lower', 'existing-prerelease', 'existing-invalid', 'upgrade-higher',
+        'existing-preview-zero', 'existing-invalid-preview', 'existing-invalid-preview-member', 'existing-alpha-zero', 'existing-build-zero',
+        'continue-fresh-higher', 'bundle-sha', 'bundle-version', 'bundle-app', 'candidate-version', 'candidate-sha'];
     if ($argc === 1) {
         foreach ($scenarios as $scenario) {
             echo "[SCENARIO] $scenario\n";
@@ -95,14 +98,14 @@ namespace {
         if (!$condition) throw new RuntimeException($message);
         echo "[PASS] $message\n";
     }
-    function zipActivation(string $path, string $app, array $files, array $config = []): void {
+    function zipActivation(string $path, string $app, array $files, array $config = [], string $version = '1.0.0'): void {
         $zip = new ZipArchive();
         if ($zip->open($path, ZipArchive::CREATE) !== true) throw new RuntimeException('ZIP creation failed');
         $common = [
-            'info.ini' => "app=$app\ntitle=Fixture\nabout=Dependency activation\nauthor=Test\nversion=1.0.0\nsupport=\">=0.1.0\"\n",
+            'info.ini' => "app=$app\ntitle=Fixture\nabout=Dependency activation\nauthor=Test\nversion=$version\nsupport=\">=0.1.0\"\n",
             'config.json' => json_encode($config, JSON_THROW_ON_ERROR),
             'install.sql' => "SELECT '$app-install';", 'update.sql' => '', 'uninstall.sql' => '',
-            "plugin/$app/config/app.php" => '<?php return ["version"=>"1.0.0"];',
+            "plugin/$app/config/app.php" => '<?php return ["version"=>' . var_export($version, true) . '];',
         ];
         foreach (array_merge($common, $files) as $name => $content) $zip->addFromString($name, $content);
         $zip->close();
@@ -123,6 +126,10 @@ namespace {
     writeActivation($root . '/sandadmin-artd/package.json', '{"dependencies":{}}');
     ini_set('error_log', $root . '/expected-errors.log');
     register_shutdown_function(static function () use ($root): void {
+        $temporary = realpath(sys_get_temp_dir());
+        $actual = realpath($root);
+        if ($temporary === false || $actual === false || dirname($actual) !== $temporary
+            || !str_starts_with(basename($actual), 'sandpackage-activation-') || is_link($root)) return;
         Filesystem::delDir($root);
     });
     $loader = <<<'PHP'
@@ -142,7 +149,7 @@ PHP;
 namespace plugin\SandIam\app\runtime;
 final class ServiceCatalog {
     public function inspectServiceActions(array $service, array $actions): array {
-        if (\Webman\Config::get('plugin.sand-iam.app.version') !== '1.0.0') throw new \RuntimeException('Dependency config not loaded');
+        if (\Webman\Config::get('plugin.sand-iam.app.version') !== ($GLOBALS['expected_dependency_version'] ?? '1.0.0')) throw new \RuntimeException('Dependency config not loaded');
         if (empty($GLOBALS['recovery_inspection'])
             && array_filter(\think\facade\Db::$sql, static fn(string $sql): bool => str_contains($sql, 'neutral-target-install'))) {
             throw new \RuntimeException('Catalog preflight ran after target SQL');
@@ -168,17 +175,60 @@ PHP;
         'plugin/sand-iam/app/functions.php' => $loader,
         'plugin/sand-iam/app/runtime/ServiceCatalog.php' => $catalog,
     ]);
+    if (in_array($scenario, ['bundle-version', 'bundle-app'], true)) {
+        zipActivation($dependencyZip, $scenario === 'bundle-app' ? 'other-dependency' : 'sand-iam', [], [],
+            $scenario === 'bundle-version' ? '2.0.0' : '1.0.0');
+    }
     $targetZip = $root . '/target.zip';
     zipActivation($targetZip, 'neutral-target', [
         'dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip),
     ], [
-        'plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0', 'sha256' => hash_file('sha256', $dependencyZip)]],
+        'plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0', 'sha256' => $scenario === 'bundle-sha' ? str_repeat('0', 64) : hash_file('sha256', $dependencyZip)]],
         'service_catalog' => ['service' => ['code' => 'neutral_target', 'name' => 'Neutral target'],
             'actions' => ['neutral_target.read' => 'Read']],
     ]);
     expectActivation(!class_exists(\plugin\SandIam\app\runtime\ServiceCatalog::class), 'dependency port is initially unavailable');
-    if ($scenario !== 'automatic') {
+    $installedVersion = match ($scenario) {
+        'existing-higher', 'continue-fresh-higher', 'upgrade-higher' => '1.1.0',
+        'existing-higher-preview' => '1.1.0-foo',
+        'existing-preview-zero' => '1.1.0-0',
+        'existing-invalid-preview' => '1.1.0-01',
+        'existing-invalid-preview-member' => '1.1.0-alpha.01',
+        'existing-alpha-zero' => '1.1.0-alpha01',
+        'existing-build-zero' => '1.0.0+01',
+        'existing-build' => '1.0.0+build.1',
+        'existing-lower' => '0.9.0',
+        'existing-prerelease' => '1.0.0-foo',
+        default => '1.0.0',
+    };
+    $GLOBALS['expected_dependency_version'] = $installedVersion;
+    $installedZip = $dependencyZip;
+    if ($installedVersion !== '1.0.0') {
+        $installedZip = $root . '/installed-dependency.zip';
+        zipActivation($installedZip, 'sand-iam', [
+            'plugin/sand-iam/config/autoload.php' => $autoload,
+            'plugin/sand-iam/app/functions.php' => $loader,
+            'plugin/sand-iam/app/runtime/ServiceCatalog.php' => $catalog,
+        ], [], $installedVersion);
+    }
+    if (in_array($scenario, ['bundle-sha', 'bundle-version', 'bundle-app'], true)) {
+        rejectsActivation(fn () => (new InstallLogic())->uploadFromPath($targetZip), '插件依赖工件');
+        expectActivation(Db::$sql === [], 'invalid bundled SHA or identity executes zero SQL');
+        expectActivation((new InstallLogic('neutral-target'))->getInstallState() === InstallLogic::UNINSTALLED,
+            'invalid bundled identity does not stage a target candidate');
+        exit(0);
+    }
+    if (in_array($scenario, ['candidate-version', 'candidate-sha'], true)) {
         (new InstallLogic())->uploadFromPath($dependencyZip);
+        $dependency = new InstallLogic('sand-iam');
+        $dependency->setInfo($scenario === 'candidate-version' ? ['version' => '1.1.0'] : ['package_sha256' => str_repeat('0', 64)]);
+        (new InstallLogic())->uploadFromPath($targetZip);
+        rejectsActivation(fn () => (new InstallLogic('neutral-target'))->install(false), '候选包与声明不一致');
+        expectActivation(Db::$sql === [], 'waiting dependency still requires exact version and SHA before SQL');
+        exit(0);
+    }
+    if ($scenario !== 'automatic') {
+        (new InstallLogic())->uploadFromPath($installedZip);
         (new InstallLogic('sand-iam'))->install(false);
         expectActivation(!class_exists(\plugin\SandIam\app\runtime\ServiceCatalog::class), 'install(false) alone leaves the original worker loader absent');
     }
@@ -204,13 +254,15 @@ PHP;
     }
     if ($scenario === 'incompatible-dependency') {
         $dependency = new InstallLogic('sand-iam');
-        $dependency->setInfo(['version' => '2.0.0']);
+        $dependency->setInfo(['version' => '0.9.0']);
     }
+    if ($scenario === 'existing-invalid') (new InstallLogic('sand-iam'))->setInfo(['version' => '999invalid']);
     $failures = ['activation-failure' => '运行加载失败', 'loader-failure' => '运行加载失败',
         'external-file' => '运行加载失败', 'symlink-file' => '不兼容',
         'symlink-config' => '运行加载失败', 'disabled-catalog' => '目录预检失败',
-        'incompatible-dependency' => '不兼容'];
-    if ($scenario === 'continue-fresh') {
+        'incompatible-dependency' => '不兼容', 'existing-lower' => '不兼容', 'existing-prerelease' => '不兼容', 'existing-invalid' => '不兼容',
+        'existing-invalid-preview' => '不兼容', 'existing-invalid-preview-member' => '不兼容'];
+    if (in_array($scenario, ['continue-fresh', 'continue-fresh-higher'], true)) {
         $GLOBALS['fail_target_deployment'] = true;
         try {
             $target->install(false);
@@ -259,6 +311,20 @@ PHP;
     expectActivation(($GLOBALS['dependency_loader_calls'] ?? 0) === 1
         && !empty($GLOBALS['catalog_inspected']) && !empty($GLOBALS['catalog_registered']),
         'official autoload files expose a real callable catalog before SQL and register after deployment');
+    if ($scenario === 'upgrade-higher') {
+        $upgradeZip = $root . '/target-upgrade.zip';
+        zipActivation($upgradeZip, 'neutral-target', [
+            'dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip),
+        ], ['plugin_dependencies' => ['sand-iam' => ['version' => '1.0.0',
+            'sha256' => hash_file('sha256', $dependencyZip)]]], '2.0.0');
+        $target->uploadFromPath($upgradeZip);
+        $target->install(false, 'UPGRADE neutral-target@1.0.0->2.0.0');
+        expectActivation($target->getInfo()['version'] === '2.0.0'
+            && (new InstallLogic('sand-iam'))->getInfo()['version'] === '1.1.0',
+            'ordinary target upgrade accepts the exact higher installed dependency without downgrading');
+        expectActivation(count(array_filter(Db::$sql, static fn (string $sql): bool => str_contains($sql, 'sand-iam-install'))) === 1,
+            'target upgrade does not reinstall or replay dependency SQL');
+    }
     if ($scenario === 'existing') {
         $anotherZip = $root . '/another.zip';
         zipActivation($anotherZip, 'another-target', ['dependencies/sand-iam-1.0.0.zip' => file_get_contents($dependencyZip)],
