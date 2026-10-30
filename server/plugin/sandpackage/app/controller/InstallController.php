@@ -5,8 +5,10 @@ namespace plugin\sandpackage\app\controller;
 use plugin\sandadmin\app\cache\UserMenuCache;
 use plugin\sandadmin\app\middleware\SystemLog;
 use plugin\sandadmin\app\middleware\CheckLogin;
+use plugin\sandadmin\app\middleware\CheckAuth;
 use plugin\sandadmin\basic\BaseController;
 use plugin\sandadmin\exception\ApiException;
+use plugin\sandadmin\service\Permission;
 use plugin\sandpackage\app\logic\InstallLogic;
 use plugin\sandpackage\app\logic\LegacyInstallLogic;
 use plugin\sandpackage\app\service\PluginStorage;
@@ -18,7 +20,7 @@ use support\Request;
 use support\Response;
 use Throwable;
 
-#[Middleware(CheckLogin::class, SystemLog::class)]
+#[Middleware(CheckLogin::class, CheckAuth::class, SystemLog::class)]
 class InstallController extends BaseController
 {
     /**
@@ -305,6 +307,150 @@ class InstallController extends BaseController
         $appName = trim((string) $request->post('appName', ''));
         if ($appName === '') throw new ApiException('请填写插件标识', 400);
         return $this->success((new LegacyInstallLogic($appName))->inspectFailedUpgradeRecovery($this->adminId), '恢复状态检查完成');
+    }
+
+    // ========== PostgreSQL 生命周期驱动恢复入口 ==========
+    // 以下端点与 `php webman sandpackage:recover` 的同名动作共用 InstallLogic，
+    // 不复制恢复判定；CLI 语义保持不变。
+
+    /** Read-only inspection of a failed controlled host-file upgrade. */
+    #[Permission(title: '检查宿主升级恢复', slug: 'sandpackage:install:inspectHostUpgradeRecovery')]
+    public function inspectHostUpgradeRecovery(Request $request): Response
+    {
+        return $this->success(
+            $this->postgresLogic($request)->inspectHostUpgradeRecovery(),
+            '宿主升级恢复现场已核对',
+        );
+    }
+
+    /** Restore the exact pre-upgrade candidate; bound to the recorded failure identity. */
+    #[Permission(title: '回滚宿主升级', slug: 'sandpackage:install:recoverHostUpgradeRollback')]
+    public function recoverHostUpgradeRollback(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        return $this->success($logic->recoverHostUpgradeRollback($confirmation), '宿主升级已回滚到原候选');
+    }
+
+    /** Resume a verified host upgrade from its recorded checkpoint. */
+    #[Permission(title: '继续宿主升级', slug: 'sandpackage:install:continueHostUpgrade')]
+    public function continueHostUpgrade(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        return $this->success(
+            $logic->continueHostUpgrade($confirmation, $this->recoveryRestart($request)),
+            '宿主升级已继续',
+        );
+    }
+
+    /** Read-only inspection of a failed controlled host-file uninstall. */
+    #[Permission(title: '检查宿主卸载恢复', slug: 'sandpackage:install:inspectHostUninstallRecovery')]
+    public function inspectHostUninstallRecovery(Request $request): Response
+    {
+        return $this->success(
+            $this->postgresLogic($request)->inspectHostUninstallRecovery(),
+            '宿主卸载恢复现场已核对',
+        );
+    }
+
+    /** Roll back a failed controlled host-file uninstall. */
+    #[Permission(title: '回滚宿主卸载', slug: 'sandpackage:install:recoverHostUninstallRollback')]
+    public function recoverHostUninstallRollback(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        return $this->success($logic->recoverHostUninstallRollback($confirmation), '宿主卸载已回滚');
+    }
+
+    /** Resume a verified host uninstall from its recorded checkpoint. */
+    #[Permission(title: '继续宿主卸载', slug: 'sandpackage:install:continueHostUninstall')]
+    public function continueHostUninstall(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        return $this->success(
+            $logic->continueHostUninstall($confirmation, $this->recoveryRestart($request)),
+            '宿主卸载已继续',
+        );
+    }
+
+    /** Read-only inspection of an interrupted first install. */
+    #[Permission(title: '检查首次安装恢复', slug: 'sandpackage:install:inspectFreshInstallRecovery')]
+    public function inspectFreshInstallRecovery(Request $request): Response
+    {
+        return $this->success(
+            $this->postgresLogic($request)->inspectFreshInstallRecovery($this->recoveryPlan($request)),
+            '首次安装恢复现场已核对',
+        );
+    }
+
+    /**
+     * Execute one confirmed first-install recovery action. The permitted action
+     * set is decided by the inspection record inside FreshInstallRecovery.
+     */
+    #[Permission(title: '执行首次安装恢复', slug: 'sandpackage:install:recoverFreshInstall')]
+    public function recoverFreshInstall(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        $action = trim((string) $request->post('action', ''));
+        if (!in_array($action, self::FRESH_RECOVERY_ACTIONS, true)) {
+            throw new ApiException('请选择检查结果允许的首次安装恢复动作', 400);
+        }
+        return $this->success(
+            $logic->recoverFreshInstall(
+                $action, $confirmation, $this->recoveryPlan($request), $this->recoveryRestart($request),
+            ),
+            '首次安装恢复动作已执行',
+        );
+    }
+
+    /** Mirrors the CLI's `*-fresh` actions; the logic re-validates against the journal. */
+    private const FRESH_RECOVERY_ACTIONS = [
+        'cleanup-fresh', 'manual-cleanup-fresh', 'finish-cleanup-fresh', 'continue-fresh',
+    ];
+
+    private function recoveryApp(Request $request): string
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('恢复操作仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够操作恢复', 403);
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        return $appName;
+    }
+
+    /** Resolve the PostgreSQL-driver logic, refusing plugins on the legacy driver. */
+    private function postgresLogic(Request $request): InstallLogic
+    {
+        $logic = new InstallLogic($this->recoveryApp($request));
+        if (!$logic->usesPostgresLifecycle()) {
+            throw new ApiException('此插件不使用上游 PostgreSQL 安装流程，请使用对应的恢复入口', 400);
+        }
+        return $logic;
+    }
+
+    /** @return array{InstallLogic,string} */
+    private function postgresWrite(Request $request): array
+    {
+        $logic = $this->postgresLogic($request);
+        $confirmation = (string) $request->post('confirmation', '');
+        if ($confirmation === '') throw new ApiException('请填写检查结果给出的完整确认内容', 400);
+        return [$logic, $confirmation];
+    }
+
+    /** Reload is a separate operation authorisation, exactly as in the CLI. */
+    private function recoveryRestart(Request $request): bool
+    {
+        return $request->post('restart', false) === true || $request->post('restart', '') === '1';
+    }
+
+    /** @return array<string,mixed>|null The reviewed manual cleanup plan, if supplied. */
+    private function recoveryPlan(Request $request): ?array
+    {
+        $plan = $request->post('plan');
+        if ($plan === null || $plan === '') return null;
+        if (is_string($plan)) {
+            try { $plan = json_decode($plan, true, 512, JSON_THROW_ON_ERROR); }
+            catch (Throwable) { throw new ApiException('人工清理计划不是有效的 JSON', 400); }
+        }
+        if (!is_array($plan)) throw new ApiException('人工清理计划格式错误', 400);
+        return $plan;
     }
 
     /** Restore only runtime files from the identity-bound pre-upgrade backup. */

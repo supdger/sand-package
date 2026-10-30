@@ -31,6 +31,7 @@ use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PluginVersion;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
 use plugin\sandpackage\app\service\DependencyCommandRecovery;
+use plugin\sandpackage\app\service\LifecycleFailureLog;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -392,14 +393,32 @@ class InstallLogic
                 $hostJournal?->complete();
                 return $info;
             } catch (Throwable $error) {
-                $this->setInfo(['state' => self::FAILED, 'operation_pending' => 1]);
+                $stage = match (true) {
+                    $attachProof !== null => 'existing_schema_attach',
+                    $isUpdate => 'database_update',
+                    default => 'database_install',
+                };
+                $diagnosticId = LifecycleFailureLog::newDiagnosticId();
+                $this->setInfo([
+                    'state' => self::FAILED,
+                    'operation_pending' => 1,
+                    'last_error_code' => LifecycleFailureLog::failureCode($stage),
+                    'diagnostic_id' => $diagnosticId,
+                ]);
                 if ($recovery !== null) {
                     try { $recovery->checkpoint(); } catch (Throwable $checkpointError) {
-                        error_log('SandPackage recovery checkpoint unavailable: ' . $checkpointError->getMessage());
+                        LifecycleFailureLog::record(
+                            $diagnosticId, 'recovery_checkpoint', $this->appName, $checkpointError,
+                        );
                     }
                 }
-                error_log('SandPackage ' . $this->appName . ': ' . $error);
-                throw new ApiException('插件安装未完成，请检查服务日志；禁止直接重试');
+                LifecycleFailureLog::record($diagnosticId, $stage, $this->appName, $error, [
+                    'upgrade' => $isUpdate ? 1 : 0,
+                    'package_version' => is_string($info['version'] ?? null) ? $info['version'] : null,
+                ]);
+                throw new ApiException(
+                    '插件安装未完成，诊断编号 ' . $diagnosticId . '。请根据诊断编号查看服务日志；禁止直接重试',
+                );
             }
         } finally {
             $this->unlock();
@@ -515,9 +534,20 @@ class InstallLogic
                 return ['app' => $this->appName, 'state' => self::INSTALLED,
                     'sql_executed' => false, 'restart_required' => true];
             } catch (Throwable $error) {
-                $this->setInfo(['state' => self::FAILED, 'operation_pending' => 1]);
-                error_log('SandPackage attach recovery ' . $this->appName . ': ' . $error);
-                throw new ApiException('重接恢复未完成，请检查服务日志；数据库未执行安装脚本');
+                $diagnosticId = LifecycleFailureLog::newDiagnosticId();
+                $this->setInfo([
+                    'state' => self::FAILED,
+                    'operation_pending' => 1,
+                    'last_error_code' => LifecycleFailureLog::failureCode('existing_schema_attach_recovery'),
+                    'diagnostic_id' => $diagnosticId,
+                ]);
+                LifecycleFailureLog::record(
+                    $diagnosticId, 'existing_schema_attach_recovery', $this->appName, $error,
+                );
+                throw new ApiException(
+                    '重接恢复未完成，诊断编号 ' . $diagnosticId
+                    . '。请根据诊断编号查看服务日志；数据库未执行安装脚本',
+                );
             }
         } finally {
             $this->unlock();
@@ -579,6 +609,12 @@ class InstallLogic
             )->inspect($plan);
         }
         finally { $this->unlock(); }
+    }
+
+    /** True when this plugin is registered against the upstream PostgreSQL lifecycle driver. */
+    public function usesPostgresLifecycle(): bool
+    {
+        return ($this->getInfo()['lifecycle_driver'] ?? null) === self::DRIVER;
     }
 
     /** The failed source remains discoverable while its registration directory is quarantined. */
@@ -1575,9 +1611,18 @@ class InstallLogic
                 }
                 $hostJournal?->complete();
             } catch (Throwable $error) {
-                if ($hostRemoval === null && is_dir($this->appDir)) $this->setInfo(['state' => self::FAILED]);
-                error_log('SandPackage uninstall ' . $this->appName . ': ' . $error);
-                throw new ApiException('插件卸载未完成，请检查服务日志；禁止直接重试');
+                $diagnosticId = LifecycleFailureLog::newDiagnosticId();
+                if ($hostRemoval === null && is_dir($this->appDir)) {
+                    $this->setInfo([
+                        'state' => self::FAILED,
+                        'last_error_code' => LifecycleFailureLog::failureCode('database_uninstall'),
+                        'diagnostic_id' => $diagnosticId,
+                    ]);
+                }
+                LifecycleFailureLog::record($diagnosticId, 'database_uninstall', $this->appName, $error);
+                throw new ApiException(
+                    '插件卸载未完成，诊断编号 ' . $diagnosticId . '。请根据诊断编号查看服务日志；禁止直接重试',
+                );
             }
         } finally {
             $this->unlock();
