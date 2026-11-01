@@ -9,6 +9,8 @@ import {
   FAILED_UPGRADE_RUNTIME_RESTORE_UNCONFIRMED_MESSAGE,
   FAILED_UPGRADE_ZIP_MAX_BYTES,
   assertFailedUpgradeZip,
+  packageZipOversizeMessage,
+  setPackageZipMaxBytes,
   createFailedUpgradeSession,
   exactReplaceConfirmation,
   exactRetryConfirmation,
@@ -425,11 +427,27 @@ export async function runFailedUpgradeRecoveryBehaviorHarness(): Promise<string[
   const zipOk = new File([new Uint8Array(8)], 'ok.zip', {
     type: 'application/zip'
   })
-  const zipOver = new File([new Uint8Array(FAILED_UPGRADE_ZIP_MAX_BYTES + 1)], 'over.zip', {
+  // 上限改由后端 effectiveLimit 下发；这里显式设定一个小上限来验证超限文案。
+  const probeMax = setPackageZipMaxBytes(4096)
+  const zipOver = new File([new Uint8Array(probeMax + 1)], 'over.zip', {
     type: 'application/zip'
   })
   expectTrue(assertFailedUpgradeZip(zipOk) === null, 'small zip ok')
-  expectTrue(assertFailedUpgradeZip(zipOver) === '插件包不能超过 5MB', 'oversize zip')
+  expectTrue(
+    assertFailedUpgradeZip(zipOver) === packageZipOversizeMessage(probeMax + 1, probeMax),
+    'oversize zip'
+  )
+  expectTrue(
+    humanizeRecoveryMessage(packageZipOversizeMessage(probeMax + 1, probeMax), 'fallback') ===
+      packageZipOversizeMessage(probeMax + 1, probeMax),
+    'oversize message kept'
+  )
+  // 兜底上限不可被放大，越界值被忽略。
+  expectTrue(
+    setPackageZipMaxBytes(FAILED_UPGRADE_ZIP_MAX_BYTES + 1) === probeMax,
+    'oversize limit rejected'
+  )
+  setPackageZipMaxBytes(FAILED_UPGRADE_ZIP_MAX_BYTES)
 
   const durable = exactFailedRow({
     ...exactReplacementMarkers(),

@@ -2,10 +2,33 @@
 /** Independent native-PHP updater. No framework/vendor autoload is permitted here. */
 declare(strict_types=1);
 
+// Plugin config files (e.g. plugin/sandadmin/config/app.php) may call the
+// framework's env() helper; this process has no framework bootstrap, so a
+// faithful minimal polyfill keeps `require config/app.php` readable.
+if (!function_exists('env')) {
+    function env(string $key, $default = null)
+    {
+        $value = getenv($key);
+        if ($value === false) return $default;
+        return match (strtolower(trim($value, '()'))) {
+            'true' => true,
+            'false' => false,
+            'null' => null,
+            'empty' => '',
+            default => $value,
+        };
+    }
+}
+
 final class SandSystemUpdateRuntime
 {
     public const PACKAGES = ['supdger/sand-core' => 'sandadmin', 'supdger/sand-package' => 'sandpackage'];
     public const STATIC_MANIFEST = '.sand-system-static-manifest.json';
+    /** Operating-system droppings are never managed content; they must not decide a gate. */
+    public const VOLATILE = ['.DS_Store', '._*', 'Thumbs.db', 'desktop.ini'];
+    /** Tool-generated, git-ignored frontend output. Managed release files stay hash-verified by manifest. */
+    public const GENERATED = ['node_modules', '.git', 'dist', '.vite', '.turbo', 'coverage', '.husky/_', 'src/types/import', '.auto-import.json', '.eslintcache', '*.local', '.DS_Store', '._*', 'Thumbs.db', 'desktop.ini'];
+    public const DEV_HINT = '若前端以 pnpm dev 方式运行，请重启前端 dev server，使其重新扫描组件与自动导入';
     private array $job;
     private string $directory;
     private bool $recoveryMutated = false;
@@ -86,6 +109,26 @@ final class SandSystemUpdateRuntime
         }
     }
 
+    /**
+     * Exclude patterns match a whole relative path, a nested path prefix, any single path
+     * segment (patterns without a separator) and shell wildcards. Directories matched here
+     * are never entered, so generated trees cost nothing to skip.
+     */
+    public static function excluded(string $relative, array $exclude): bool
+    {
+        foreach ($exclude as $pattern) {
+            if (!is_string($pattern) || $pattern === '') continue;
+            if (str_contains($pattern, '*')) {
+                if (fnmatch($pattern, $relative)) return true;
+                foreach (explode('/', $relative) as $segment) if (fnmatch($pattern, $segment)) return true;
+                continue;
+            }
+            if ($relative === $pattern || str_starts_with($relative, $pattern . '/')) return true;
+            if (!str_contains($pattern, '/') && in_array($pattern, explode('/', $relative), true)) return true;
+        }
+        return false;
+    }
+
     /** Relative-path to hash map. Links are preserved only when confined to this tree. */
     public static function tree(string $root, array $exclude = []): array
     {
@@ -97,7 +140,7 @@ final class SandSystemUpdateRuntime
         $walk = static function (string $directory, string $prefix) use (&$walk, &$files, $root, $exclude): void {
             foreach (new FilesystemIterator($directory, FilesystemIterator::SKIP_DOTS) as $item) {
                 $relative = $prefix . $item->getFilename();
-                if (in_array(explode('/', $relative)[0], $exclude, true)) continue;
+                if (self::excluded($relative, $exclude)) continue;
                 if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
                 if ($item->isLink()) {
                     $link = readlink($item->getPathname());
@@ -122,7 +165,7 @@ final class SandSystemUpdateRuntime
             $walk = static function (string $dir, string $prefix) use (&$walk, &$result, $exclude): void {
                 foreach (new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS) as $item) {
                     $relative = $prefix . $item->getFilename();
-                    if (in_array(explode('/', $relative)[0], $exclude, true) || $item->isLink()) continue;
+                    if (self::excluded($relative, $exclude) || $item->isLink()) continue;
                     if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
                     $result[$relative] = fileperms($item->getPathname()) & 0777;
                     if ($item->isDir()) $walk($item->getPathname(), $relative . '/');
@@ -132,22 +175,46 @@ final class SandSystemUpdateRuntime
         ksort($result); return $result;
     }
 
+    /**
+     * Only managed files and the directories holding them are gated. A directory that exists
+     * solely because a tool generated excluded content (dist, generated d.ts) must not be able
+     * to invalidate a recovery, so it is left out of the comparison.
+     */
     public static function fingerprint(array $scopes): string
     {
         $map = [];
-        foreach ($scopes as $scope) $map[$scope['path']] = [self::tree($scope['path'], $scope['exclude'] ?? []), self::modes($scope['path'], $scope['exclude'] ?? [])];
+        foreach ($scopes as $scope) {
+            $files = self::tree($scope['path'], $scope['exclude'] ?? []);
+            $owned = [];
+            foreach (array_keys($files) as $relative) {
+                $parts = explode('/', $relative);
+                array_pop($parts);
+                $prefix = '';
+                foreach ($parts as $part) { $prefix = $prefix === '' ? $part : $prefix . '/' . $part; $owned[$prefix] = true; }
+            }
+            $modes = [];
+            foreach (self::modes($scope['path'], $scope['exclude'] ?? []) as $relative => $mode) {
+                if ($relative === '' || isset($files[$relative]) || isset($owned[$relative])) $modes[$relative] = $mode;
+            }
+            $map[$scope['path']] = [$files, $modes];
+        }
         return hash('sha256', json_encode($map, JSON_THROW_ON_ERROR));
     }
 
+    /**
+     * Managed scopes only. Tool-generated frontend output (dist, generated d.ts, auto-import
+     * maps, local env overrides, OS droppings) is excluded, so a `pnpm dev` run can never
+     * invalidate the recovery fingerprint of files nobody manages.
+     */
     public static function scopes(array $plan): array
     {
         $server = $plan['server'];
         return [
             ['path' => $server . '/composer.json'], ['path' => $server . '/composer.lock'],
-            ['path' => $server . '/vendor'],
-            ['path' => $server . '/plugin/sandadmin'], ['path' => $server . '/plugin/sandpackage'],
-            ['path' => $plan['frontend'], 'exclude' => ['node_modules', '.git']],
-            ['path' => $plan['static']],
+            ['path' => $server . '/vendor', 'exclude' => self::VOLATILE],
+            ['path' => $server . '/plugin/sandadmin', 'exclude' => self::VOLATILE], ['path' => $server . '/plugin/sandpackage', 'exclude' => self::VOLATILE],
+            ['path' => $plan['frontend'], 'exclude' => self::GENERATED],
+            ['path' => $plan['static'], 'exclude' => self::VOLATILE],
         ];
     }
 
@@ -162,7 +229,7 @@ final class SandSystemUpdateRuntime
         }
         self::assertManagedSources($plan);
         $manifest = self::readJson($plan['static'] . '/' . self::STATIC_MANIFEST);
-        $actual = self::tree($plan['static']);
+        $actual = self::tree($plan['static'], self::VOLATILE);
         unset($actual[self::STATIC_MANIFEST]);
         if ($actual !== ($manifest['files'] ?? null)) throw new RuntimeException('静态发布目录含本地修改、未知文件或缺少发布基线');
         if (!is_file($plan['frontend'] . '/pnpm-lock.yaml')) throw new RuntimeException('前端 pnpm 锁文件缺失');
@@ -211,7 +278,7 @@ final class SandSystemUpdateRuntime
         }
         $candidate = [];
         foreach (self::PACKAGES as $name => $plugin) {
-            foreach (self::tree($plan['server'] . '/vendor/' . $name . '/sandadmin-artd') as $relative => $hash) {
+            foreach (self::tree($plan['server'] . '/vendor/' . $name . '/sandadmin-artd', self::VOLATILE) as $relative => $hash) {
                 self::relative($relative); self::safePath($plan['frontend'] . '/' . $relative);
                 if (isset($candidate[$relative]) && $candidate[$relative] !== $name) throw new RuntimeException('候选前端包文件归属重叠');
                 $candidate[$relative] = $name;
@@ -458,7 +525,7 @@ POWERSHELL;
                 if (microtime(true) - $start > $timeout) {
                     // The launcher owns the sole job handle. Terminating it closes that handle and all descendants.
                     if (!proc_terminate($process)) throw new RuntimeException('无法终止超时的 Windows 更新进程');
-                    throw new RuntimeException('更新命令超时，Windows 作业进程树已终止');
+                    throw new RuntimeException('更新命令超时，Windows 作业进程树已终止' . self::tail($captured));
                 }
                 usleep(50000);
             } while (true);
@@ -473,7 +540,7 @@ POWERSHELL;
             if ($identity !== '') $output('@system-windows-process-exited:' . $identity);
             foreach ([$stdout, $stderr, $identityFile, $ack, $payloadFile] as $file) if (is_file($file)) unlink($file);
         }
-        if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code);
+        if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code . self::tail($captured));
         return $captured;
     }
 
@@ -556,8 +623,9 @@ POWERSHELL;
     }
 
     /** Native detached creation gives the worker its own handles, console and hosting-job lifetime. */
-    public static function detachWindows(array $plan, string $directory, bool $recover): void
+    public static function detachWindows(array $plan, string $directory, string $mode): void
     {
+        if (!in_array($mode, ['run', 'recover', 'finalize'], true)) throw new RuntimeException('更新模式无效');
         $script = "Add-Type -TypeDefinition @'\n" . self::windowsNativeSource() . "\n" . <<<'POWERSHELL'
 '@
 $application = Get-Command -Name ([string]$data.php) -CommandType Application -ErrorAction Stop
@@ -565,7 +633,7 @@ if ([IO.Path]::GetExtension($application.Source) -ine '.exe') { throw 'Configure
 [SandUpdateCommand]::Detach($application.Source, [string[]]@($data.arguments), [string]$data.server, [string]$data.output, [string]$data.error)
 POWERSHELL;
         $log = $directory . '/dispatch.log';
-        $process = proc_open(self::powershellArguments($script, ['php' => $plan['php'], 'arguments' => [$directory . '/worker.php', $directory, $recover ? 'recover' : 'run'], 'server' => $plan['server'], 'output' => $directory . '/worker.log', 'error' => $directory . '/worker-error.log']),
+        $process = proc_open(self::powershellArguments($script, ['php' => $plan['php'], 'arguments' => [$directory . '/worker.php', $directory, $mode], 'server' => $plan['server'], 'output' => $directory . '/worker.log', 'error' => $directory . '/worker-error.log']),
             [0 => ['file', 'NUL', 'r'], 1 => ['file', $log, 'a'], 2 => ['file', $log, 'a']], $pipes, $plan['server'], null, ['bypass_shell' => true]);
         if (!is_resource($process) || proc_close($process) !== 0) throw new RuntimeException('Windows 独立进程启动失败，请检查任务 dispatch.log');
     }
@@ -602,7 +670,7 @@ NATIVE;
                 }
                 $status = proc_get_status($process);
                 if (!$status['running']) { $code = $status['exitcode']; break; }
-                if (microtime(true) - $start > $timeout) { posix_kill(-$group, SIGTERM); usleep(300000); posix_kill(-$group, SIGKILL); proc_terminate($process, SIGKILL); throw new RuntimeException('更新命令超时，执行进程组已终止'); }
+                if (microtime(true) - $start > $timeout) { posix_kill(-$group, SIGTERM); usleep(300000); posix_kill(-$group, SIGKILL); proc_terminate($process, SIGKILL); throw new RuntimeException('更新命令超时，执行进程组已终止' . self::tail($captured)); }
                 usleep(50000);
             }
             foreach ($pipes as $pipe) { $tail = stream_get_contents($pipe); if ($tail !== false) $pending .= $tail; }
@@ -613,7 +681,7 @@ NATIVE;
             if ($code < 0) $code = $closed;
             $output('@system-process-exited:' . $group);
         }
-        if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code);
+        if ($code !== 0) throw new RuntimeException('更新命令失败，退出码 ' . $code . self::tail($captured));
         return $captured;
     }
 
@@ -621,6 +689,17 @@ NATIVE;
     {
         $text = preg_replace('#(https?://)[^\s/@]+:[^\s/@]+@#', '$1[凭据已隐藏]@', $text) ?? '';
         return substr(preg_replace('/(?i)(password|token|authorization|secret)(\s*[=:]\s*)[^\s]+/', '$1$2[已隐藏]', $text) ?? '', 0, 4096);
+    }
+
+    /** Every command failure carries its own diagnosis; an exit code alone is not actionable. */
+    public static function tail(string $text, int $lines = 5, int $limit = 2048): string
+    {
+        $parts = [];
+        foreach (preg_split('/\R/', self::redact($text)) ?: [] as $line) { $line = trim($line); if ($line !== '') $parts[] = $line; }
+        $parts = array_slice($parts, -$lines);
+        if (!$parts) return '';
+        $joined = implode(' ⏎ ', $parts);
+        return '；命令输出尾部：' . (strlen($joined) > $limit ? '…' . substr($joined, -$limit) : $joined);
     }
 
     public static function composerArguments(array $plan, bool $dryRun): array
@@ -632,6 +711,78 @@ NATIVE;
         $argv = [...$argv, '--with-all-dependencies', '--no-interaction', '--no-scripts', '--no-plugins', '--prefer-dist', '--no-progress'];
         if ($dryRun) $argv[] = '--dry-run';
         return $argv;
+    }
+
+    /**
+     * Prefer a real tool entrypoint over a corepack/batch shim. A PATH-order first hit lets a
+     * broken shim shadow the installed CLI, which is how an upgrade loses its own rollback.
+     */
+    public static function nativeTool(string $tool, array $directories, string $php, ?callable $log = null): array
+    {
+        $node = '';
+        foreach ($directories as $directory) {
+            if (!is_string($directory) || $directory === '') continue;
+            $candidate = self::normalizePath($directory) . '/node.exe';
+            if (is_file($candidate)) { $node = $candidate; break; }
+        }
+        $ranked = $tool === 'composer'
+            ? ['composer.exe' => 1, 'composer.phar' => 2]
+            : ['pnpm.exe' => 1, 'node_modules/pnpm/bin/pnpm.cjs' => 2, 'pnpm.cjs' => 3, 'node_modules/corepack/dist/pnpm.js' => 4];
+        $best = null;
+        foreach ($directories as $directory) {
+            if (!is_string($directory) || $directory === '') continue;
+            $directory = self::normalizePath($directory);
+            foreach ($ranked as $entry => $rank) {
+                $file = $directory . '/' . $entry;
+                if (!is_file($file) || ($best !== null && $best['rank'] <= $rank)) continue;
+                self::safePath($file);
+                if (str_ends_with($entry, '.exe')) $argv = [$file];
+                elseif ($tool === 'composer') $argv = [$php, $file];
+                elseif ($node !== '') $argv = [$node, $file];
+                else continue;
+                $best = ['rank' => $rank, 'argv' => $argv];
+            }
+            if ($best !== null && $best['rank'] === 1) break;
+        }
+        if ($best === null) throw new RuntimeException('框架未找到已安装的 ' . $tool . ' 原生入口，当前环境缺少升级所需工具');
+        if ($log !== null) $log('已选定 ' . $tool . ' 原生入口：' . implode(' ', $best['argv']));
+        return $best['argv'];
+    }
+
+    /** Replace a live directory through renames; a locked unlink can never leave a half tree. */
+    public static function swap(string $source, string $destination, ?callable $log = null): void
+    {
+        self::safePath($source); self::safePath($destination);
+        if (!is_dir($source)) { self::remove($destination, [], false); self::copy($source, $destination); return; }
+        // A dot keeps the staged names outside every plugin-app name pattern the host scans.
+        $staged = $destination . '.sand-new-' . bin2hex(random_bytes(6));
+        $retired = $destination . '.sand-old-' . bin2hex(random_bytes(6));
+        self::copy($source, $staged);
+        if (self::tree($staged) !== self::tree($source)) { self::remove($staged); throw new RuntimeException('暂存目录摘要与来源不一致：' . $destination); }
+        $moved = false;
+        try {
+            if (file_exists($destination)) {
+                if (!@rename($destination, $retired)) throw new RuntimeException('无法移出运行中的目录（可能被进程占用）：' . $destination);
+                $moved = true;
+            }
+            if (!@rename($staged, $destination)) {
+                if ($moved && !@rename($retired, $destination)) throw new RuntimeException('目录交换失败且原目录已移至 ' . $retired . '，请人工移回：' . $destination);
+                throw new RuntimeException('无法就位新目录：' . $destination);
+            }
+        } catch (Throwable $error) {
+            if (is_dir($staged)) { try { self::remove($staged); } catch (Throwable) {} }
+            // Renaming needs a writable parent; where it is not available the previous
+            // in-place replacement remains correct, so this never becomes a new dead end.
+            if ($moved) throw $error;
+            if ($log !== null) $log('目录交换不可用，改为就地替换：' . self::redact($error->getMessage()));
+            self::remove($destination, [], true);
+            self::copy($source, $destination);
+            return;
+        }
+        if (!$moved) return;
+        // The swap already succeeded; a locked leftover is reported, never a failure.
+        try { self::remove($retired); }
+        catch (Throwable $error) { if ($log !== null) $log('旧目录未能清理，可稍后人工删除：' . $retired . '（' . self::redact($error->getMessage()) . '）'); }
     }
 
     private function emit(string $stage, string $message): void
@@ -666,27 +817,63 @@ NATIVE;
         $this->emit($stage, '完成');
     }
 
+    /** The dispatching request may still hold the locks for a moment; waiting is not a failure. */
+    private static function acquire(array $plan): array
+    {
+        $deadline = microtime(true) + 10;
+        do {
+            try { return self::locks($plan); }
+            catch (RuntimeException $error) { if (microtime(true) >= $deadline) throw $error; usleep(100000); }
+        } while (true);
+    }
+
+    private function checkpoint(string $name, mixed $value): void
+    {
+        $checkpoints = $this->job['checkpoints'] ?? [];
+        $checkpoints[$name] = $value;
+        $this->job['checkpoints'] = $checkpoints;
+        $this->save();
+    }
+
+    private function checkpointValue(string $name, mixed $default = false): mixed
+    {
+        return ($this->job['checkpoints'] ?? [])[$name] ?? $default;
+    }
+
+    public static function manualHint(string $directory): string
+    {
+        return '可在命令行核对现场：php ' . $directory . '/worker.php ' . $directory . ' manual-inspect';
+    }
+
+    /**
+     * task.json is the only record the API can read. If its atomic replacement fails the task
+     * would stay "running" forever, so the terminal state also lands in a sidecar record.
+     */
+    private function writeTerminalSidecar(): void
+    {
+        $record = ['state' => $this->job['state'] ?? 'failed', 'error' => self::redact((string) ($this->job['error'] ?? '')), 'recovery_available' => (bool) ($this->job['recovery_available'] ?? false), 'updated_at' => time()];
+        if (isset($this->job['failure_fingerprint'])) $record['failure_fingerprint'] = $this->job['failure_fingerprint'];
+        try { self::writeJson($this->directory . '/failed.json', $record); }
+        catch (Throwable) { @file_put_contents($this->directory . '/failed.json', (string) json_encode($record, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES)); }
+    }
+
+    /** Never let record-keeping hide a terminal state from the user. */
+    private function settle(string $stage, string $message): void
+    {
+        try { $this->emit($stage, $message); }
+        catch (Throwable) { $this->writeTerminalSidecar(); }
+    }
+
     public function run(bool $recover = false): void
     {
         $plan = self::readJson($this->directory . '/plan.json');
         $handles = [];
         try {
-            $deadline = microtime(true) + 10;
-            do {
-                try { $handles = self::locks($plan); break; }
-                catch (RuntimeException $error) { if (microtime(true) >= $deadline) throw $error; usleep(100000); }
-            } while (true);
+            $handles = self::acquire($plan);
             $this->job['state'] = $recover ? 'recovering' : 'running';
             $this->job['pid'] = getmypid();
             $this->save();
-            if ($recover) {
-                $this->restore($plan);
-                $this->job['state'] = 'recovered';
-                $this->job['error'] = '';
-                $this->job['recovery_available'] = false;
-                $this->emit('recovered', '原版本文件已恢复，健康检查通过');
-                return;
-            }
+            if ($recover) { $this->restore($plan); return; }
             $this->phase('preflight', function () use ($plan): void {
                 self::assertManaged($plan);
                 if (!hash_equals($plan['fingerprint'], self::fingerprint(self::scopes($plan)))) throw new RuntimeException('预检后宿主文件已变化，请重新检查');
@@ -695,7 +882,16 @@ NATIVE;
             $this->phase('backup', fn () => $this->backup($plan));
             $this->phase('composer', function () use ($plan): void {
                 $this->job['mutated'] = true; $this->save();
-                self::command(self::composerArguments($plan, false), $plan['server'], fn (string $line) => $this->emit('composer', $line));
+                $argv = self::composerArguments($plan, false);
+                // Transient download failures are the common case; the same require is idempotent.
+                for ($attempt = 1; ; $attempt++) {
+                    try { self::command($argv, $plan['server'], fn (string $line) => $this->emit('composer', $line)); break; }
+                    catch (Throwable $error) {
+                        if ($attempt >= 3) throw $error;
+                        $this->emit('composer-retry', '依赖安装第 ' . $attempt . ' 次失败，' . (3 - $attempt) . ' 次重试机会剩余：' . self::redact($error->getMessage()));
+                        sleep(min(10, $attempt * 3));
+                    }
+                }
                 $this->verifyPackages($plan);
             });
             $this->phase('publish', function () use ($plan): void {
@@ -708,8 +904,8 @@ NATIVE;
                     self::command($publisher, $plan['server'], fn (string $line) => $this->emit('publish', $line));
                     $source = $root . '/server/plugin/' . $plugin;
                     $destination = $plan['server'] . '/plugin/' . $plugin;
-                    self::remove($destination, [], true);
-                    self::copy($source, $destination);
+                    // The plugin tree is live: stage then rename, never empty it in place.
+                    self::swap($source, $destination, fn (string $line) => $this->emit('publish', $line));
                 }
                 foreach ($obsolete as $relative => $hash) {
                     $file = $plan['frontend'] . '/' . $relative; self::safePath($file);
@@ -718,6 +914,8 @@ NATIVE;
                 }
             });
             $this->phase('frontend', function () use ($plan): void {
+                // Recovery reads this checkpoint to decide whether node_modules needs re-checking.
+                $this->checkpoint('frontend_started', true);
                 self::command([...$plan['pnpm'], 'install', '--frozen-lockfile'], $plan['frontend'], fn (string $line) => $this->emit('frontend', $line));
                 $previousBase = getenv('VITE_BASE_URL');
                 try {
@@ -726,24 +924,24 @@ NATIVE;
                 } finally { if (isset($plan['frontend_base'])) putenv($previousBase === false ? 'VITE_BASE_URL' : 'VITE_BASE_URL=' . $previousBase); }
                 $dist = $plan['frontend'] . '/dist';
                 if (!is_file($dist . '/index.html')) throw new RuntimeException('前端构建未生成 index.html');
-                self::remove($plan['static'], [], true);
-                self::copy($dist, $plan['static']);
-                if (!is_file($plan['static'] . '/index.html') || self::tree($plan['static']) !== self::tree($dist)) throw new RuntimeException('静态发布内容与构建产物不一致');
-                self::writeJson($plan['static'] . '/' . self::STATIC_MANIFEST, ['files' => self::tree($plan['static'])]);
+                // The static root is served live: stage then rename instead of emptying it.
+                self::swap($dist, $plan['static'], fn (string $line) => $this->emit('frontend', $line));
+                if (!is_file($plan['static'] . '/index.html') || self::tree($plan['static'], self::VOLATILE) !== self::tree($dist, self::VOLATILE)) throw new RuntimeException('静态发布内容与构建产物不一致');
+                self::writeJson($plan['static'] . '/' . self::STATIC_MANIFEST, ['files' => self::tree($plan['static'], self::VOLATILE)]);
             });
             $this->reloadAndHealth($plan);
             $this->job['state'] = 'succeeded';
             $this->job['recovery_available'] = false;
-            $this->emit('succeeded', '系统更新完成，健康检查通过');
+            $this->settle('succeeded', '系统更新完成，健康检查通过。' . self::DEV_HINT);
         } catch (Throwable $error) {
             $this->job['state'] = $recover ? 'recovery_required' : 'failed';
-            $this->job['error'] = self::redact($error->getMessage());
+            $this->job['error'] = self::redact($error->getMessage()) . '；' . self::manualHint($this->directory);
             if ($handles && ($this->job['mutated'] ?? false) && (!$recover || $this->recoveryMutated)) {
                 try { $this->job['failure_fingerprint'] = self::fingerprint(self::scopes($plan)); }
                 catch (Throwable) { $this->job['state'] = 'recovery_required'; }
             }
             $this->job['recovery_available'] = is_file($this->directory . '/backup.json') && isset($this->job['failure_fingerprint']);
-            $this->emit('failed', $error->getMessage());
+            $this->settle('failed', $error->getMessage());
         } finally {
             self::unlock($handles);
         }
@@ -757,7 +955,7 @@ NATIVE;
             if (isset($selected[$name])) continue;
             $found = null;
             foreach ($lock['packages'] ?? [] as $package) if ($package['name'] === $name) $found = $package;
-            if ($found === null || ltrim($found['version'], 'v') !== $pin['version'] || ($found['source']['reference'] ?? '') !== $pin['reference'] || self::tree($plan['server'] . '/vendor/' . $name) !== $pin['files']) throw new RuntimeException('未选择的基础包被依赖求解变更，拒绝发布：' . $name);
+            if ($found === null || ltrim($found['version'], 'v') !== $pin['version'] || ($found['source']['reference'] ?? '') !== $pin['reference'] || self::tree($plan['server'] . '/vendor/' . $name, self::VOLATILE) !== $pin['files']) throw new RuntimeException('未选择的基础包被依赖求解变更，拒绝发布：' . $name);
         }
         foreach ($plan['targets'] as $target) {
             $found = null;
@@ -796,24 +994,117 @@ NATIVE;
         self::writeJson($this->directory . '/backup.json', $entries);
     }
 
+    /**
+     * File restoration and finishing steps are separated on purpose: once the original files
+     * are back, a broken pnpm, reload or health probe is a warning to act on, never a reason
+     * to tell the user their files were not restored.
+     */
     private function restore(array $plan): void
     {
-        if (!isset($this->job['failure_fingerprint']) || !hash_equals($this->job['failure_fingerprint'], self::fingerprint(self::scopes($plan)))) throw new RuntimeException('失败后宿主文件发生外部变化，拒绝覆盖；请保留备份人工核对');
-        $entries = self::readJson($this->directory . '/backup.json');
-        $scopes = self::scopes($plan);
-        if (count($entries) !== count($scopes)) throw new RuntimeException('恢复备份范围不完整');
-        foreach ($entries as $index => $entry) {
-            if ($entry['path'] !== $scopes[$index]['path'] || $entry['backup'] !== $this->directory . '/backup/' . $index || (self::tree($entry['backup']) !== $entry['files'] || self::modes($entry['backup']) !== $entry['modes'])) throw new RuntimeException('恢复备份摘要或路径无效');
-        }
-        $this->phase('restore', function () use ($entries): void {
-            $this->recoveryMutated = true;
-            foreach ($entries as $entry) {
-                self::remove($entry['path'], $entry['exclude'] ?? [], is_dir($entry['path']));
-                if ($entry['exists']) self::copy($entry['backup'], $entry['path']);
+        if ($this->checkpointValue('files_restored') === true) $this->emit('restore', '文件已在上一次恢复中还原，跳过重复覆盖');
+        else {
+            if (!isset($this->job['failure_fingerprint']) || !hash_equals($this->job['failure_fingerprint'], self::fingerprint(self::scopes($plan)))) throw new RuntimeException('失败后宿主文件发生外部变化，拒绝覆盖；请保留备份人工核对。' . self::manualHint($this->directory));
+            $entries = self::readJson($this->directory . '/backup.json');
+            $scopes = self::scopes($plan);
+            if (count($entries) !== count($scopes)) throw new RuntimeException('恢复备份范围不完整');
+            foreach ($entries as $index => $entry) {
+                if ($entry['path'] !== $scopes[$index]['path'] || $entry['backup'] !== $this->directory . '/backup/' . $index || (self::tree($entry['backup']) !== $entry['files'] || self::modes($entry['backup']) !== $entry['modes'])) throw new RuntimeException('恢复备份摘要或路径无效');
             }
-        });
-        $this->phase('frontend-restore', fn () => self::command([...$plan['pnpm'], 'install', '--frozen-lockfile'], $plan['frontend'], fn (string $line) => $this->emit('frontend-restore', $line)));
-        $this->reloadAndHealth($plan, true);
+            $this->phase('restore', function () use ($plan, $entries): void {
+                $this->recoveryMutated = true;
+                $done = $this->checkpointValue('restored_scopes', []);
+                foreach ($entries as $index => $entry) {
+                    if (in_array($index, is_array($done) ? $done : [], true)) { $this->emit('restore', '范围已在上一次恢复中还原，续跑下一范围：' . $entry['path']); continue; }
+                    // Live trees whose only exclusions are OS droppings can be swapped by rename.
+                    $swappable = $entry['exists'] && is_dir($entry['backup']) && self::live($entry['path'], $plan)
+                        && array_diff($entry['exclude'] ?? [], self::VOLATILE) === [];
+                    if ($swappable) self::swap($entry['backup'], $entry['path'], fn (string $line) => $this->emit('restore', $line));
+                    else {
+                        self::remove($entry['path'], $entry['exclude'] ?? [], is_dir($entry['path']));
+                        if ($entry['exists']) self::copy($entry['backup'], $entry['path']);
+                    }
+                    $done[] = $index;
+                    $this->checkpoint('restored_scopes', array_values(array_unique($done)));
+                }
+            });
+            $this->checkpoint('files_restored', true);
+        }
+        $this->finishing($plan, false);
+    }
+
+    /** Live trees the host serves or loads while the worker runs. */
+    private static function live(string $path, array $plan): bool
+    {
+        if (self::pathKey($path) === self::pathKey($plan['static'])) return true;
+        return str_starts_with(self::pathKey($path) . '/', self::pathKey($plan['server'] . '/plugin') . '/');
+    }
+
+    /**
+     * Closing steps for both automatic recovery and the confirmed manual finalisation. The
+     * task always reaches a terminal state; every failed step leaves its diagnosis behind.
+     */
+    private function finishing(array $plan, bool $manual): void
+    {
+        $warnings = [];
+        $tools = $this->resolvedTools($plan);
+        if ($this->checkpointValue('frontend_started') === true) {
+            try { $this->phase('frontend-restore', fn () => self::command([...$tools['pnpm'], 'install', '--frozen-lockfile'], $plan['frontend'], fn (string $line) => $this->emit('frontend-restore', $line))); }
+            catch (Throwable $error) {
+                $warnings[] = '前端依赖核对失败，请在 ' . $plan['frontend'] . ' 手工执行 pnpm install --frozen-lockfile：' . self::redact($error->getMessage());
+                $this->emit('frontend-restore', '前端依赖核对失败，已记录为收尾警告：' . self::redact($error->getMessage()));
+            }
+        } else $this->emit('frontend-restore', '本次任务未进入前端阶段，前端依赖无需重新核对，已跳过 pnpm');
+        try { $this->reloadAndHealth($plan, !$manual); }
+        catch (Throwable $error) {
+            $warnings[] = '服务重载或健康检查未通过，请人工检查宿主进程与站点：' . self::redact($error->getMessage());
+            $this->emit('health', '收尾健康检查未通过，已记录为收尾警告：' . self::redact($error->getMessage()));
+        }
+        $this->job['state'] = 'recovered';
+        $this->job['recovery_available'] = false;
+        $this->job['error'] = $warnings === [] ? '' : implode('；', $warnings) . '；' . self::DEV_HINT . '；' . self::manualHint($this->directory);
+        if ($manual) $this->job['manual_finalized'] = true;
+        $message = $manual
+            ? ($warnings === [] ? '已按管理员确认跳过文件还原，收尾完成' : '已按管理员确认跳过文件还原，收尾存在警告，请按提示人工处理')
+            : ($warnings === [] ? '原版本文件已恢复，健康检查通过' : '原版本文件已恢复；收尾步骤存在警告，请按提示人工处理');
+        $this->settle('recovered', $message . '。' . self::DEV_HINT);
+    }
+
+    /**
+     * Recovery must not inherit a frozen plan's broken tool shim: the toolchain is resolved
+     * again at recovery time and only replaced when a native entrypoint is actually found.
+     */
+    private function resolvedTools(array $plan): array
+    {
+        if (PHP_OS_FAMILY !== 'Windows') return $plan;
+        $directories = array_values(array_filter(explode(PATH_SEPARATOR, getenv('PATH') ?: '')));
+        foreach (['composer', 'pnpm'] as $tool) {
+            try { $argv = self::nativeTool($tool, $directories, $plan['php'], fn (string $line) => $this->emit('recover-tools', $line)); }
+            catch (Throwable $error) { $this->emit('recover-tools', '恢复期间未能重新解析 ' . $tool . '，沿用任务冻结的命令：' . self::redact($error->getMessage())); continue; }
+            if ($argv !== ($plan[$tool] ?? null)) $this->emit('recover-tools', $tool . ' 命令已在恢复期重新解析，替换任务冻结的命令');
+            $plan[$tool] = $argv;
+        }
+        return $plan;
+    }
+
+    /** Explicitly confirmed exit: no file is overwritten, only the finishing steps run. */
+    public function finalize(): void
+    {
+        $plan = self::readJson($this->directory . '/plan.json');
+        $handles = [];
+        try {
+            $handles = self::acquire($plan);
+            $this->job['state'] = 'recovering';
+            $this->job['pid'] = getmypid();
+            $this->save();
+            $this->emit('manual_finalize', '管理员已精确确认接受当前文件现场：跳过文件还原与指纹覆盖，仅执行收尾');
+            $this->finishing($plan, true);
+        } catch (Throwable $error) {
+            // A confirmed finalisation always closes the task; the reason stays readable.
+            $this->job['state'] = 'abandoned';
+            $this->job['recovery_available'] = false;
+            $this->job['error'] = '人工收尾未能执行：' . self::redact($error->getMessage()) . '；任务已按管理员确认关闭。' . self::manualHint($this->directory);
+            $this->settle('failed', $error->getMessage());
+        } finally { self::unlock($handles); }
     }
 
     private function reloadAndHealth(array $plan, bool $restoring = false): void
@@ -856,7 +1147,7 @@ NATIVE;
                     $data = is_string($body) ? json_decode($body, true) : null;
                     if ($code === 200 && is_array($data) && hash_equals($token, $data['token'] ?? '') && ($data['versions'] ?? null) === $expected) {
                         $manifest = self::readJson($plan['static'] . '/' . self::STATIC_MANIFEST);
-                        if ($restoring && ($manifest['files'] ?? null) === [] && self::tree($plan['static']) === [self::STATIC_MANIFEST => hash_file('sha256', $plan['static'] . '/' . self::STATIC_MANIFEST)]) { $this->emit('health', '原服务版本已恢复；原部署没有受管理静态页面'); return; }
+                        if ($restoring && ($manifest['files'] ?? null) === [] && self::tree($plan['static'], self::VOLATILE) === [self::STATIC_MANIFEST => hash_file('sha256', $plan['static'] . '/' . self::STATIC_MANIFEST)]) { $this->emit('health', '原服务版本已恢复；原部署没有受管理静态页面'); return; }
                         $staticHandle = curl_init($plan['deployment']['url'] . $plan['deployment']['static_uri']);
                         curl_setopt_array($staticHandle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 3, CURLOPT_CONNECTTIMEOUT => 1, CURLOPT_FOLLOWLOCATION => false, CURLOPT_PROXY => '']);
                         $index = curl_exec($staticHandle); $staticCode = curl_getinfo($staticHandle, CURLINFO_RESPONSE_CODE); curl_close($staticHandle);
@@ -950,12 +1241,13 @@ NATIVE;
             $this->job['mutated'] = true;
             $this->job['state'] = 'recovering';
             $this->emit('explicit_manual_recovery', '管理员显式确认现场；已保全当前现场，开始备份版本恢复');
-            try { $this->restore($plan); $this->job['state'] = 'recovered'; $this->job['error'] = ''; $this->job['recovery_available'] = false; $this->emit('recovered', '手工恢复完成，健康检查通过'); }
+            // restore() owns the terminal state and keeps any finishing warning in error.
+            try { $this->restore($plan); $this->emit('explicit_manual_recovery', '手工恢复已收尾'); }
             catch (Throwable $error) {
-                $this->job['state'] = 'recovery_required'; $this->job['error'] = $error->getMessage();
+                $this->job['state'] = 'recovery_required'; $this->job['error'] = self::redact($error->getMessage()) . '；' . self::manualHint($this->directory);
                 if ($this->recoveryMutated) $this->job['failure_fingerprint'] = self::fingerprint(self::scopes($plan));
                 $this->job['recovery_available'] = $this->recoveryMutated;
-                $this->emit('failed', $error->getMessage());
+                $this->settle('failed', $error->getMessage());
                 throw $error;
             }
         } finally { self::unlock($handles); }
@@ -984,24 +1276,29 @@ NATIVE;
     {
         self::safePath($root);
         if (!file_exists($root)) return;
-        if (is_file($root)) { if (!unlink($root)) throw new RuntimeException('文件恢复失败'); return; }
-        $walk = static function (string $directory, bool $top) use (&$walk, $exclude, $keepRoot): void {
+        if (is_file($root)) { if (!unlink($root)) throw new RuntimeException('文件恢复失败：' . $root); return; }
+        // Excluded entries are preserved at any depth, so their parents must survive too.
+        $walk = static function (string $directory, string $prefix, bool $top) use (&$walk, $exclude, $keepRoot): bool {
+            $kept = false;
             foreach (new FilesystemIterator($directory, FilesystemIterator::SKIP_DOTS) as $item) {
-                if ($top && in_array($item->getFilename(), $exclude, true)) continue;
+                $relative = $prefix . $item->getFilename();
+                if (self::excluded($relative, $exclude)) { $kept = true; continue; }
                 if (PHP_OS_FAMILY === 'Windows') self::safePath($item->getPathname());
-                if ($item->isDir() && !$item->isLink()) $walk($item->getPathname(), false);
-                elseif (!unlink($item->getPathname())) throw new RuntimeException('文件恢复失败');
+                if ($item->isDir() && !$item->isLink()) { if ($walk($item->getPathname(), $relative . '/', false)) $kept = true; }
+                elseif (!unlink($item->getPathname())) throw new RuntimeException('文件恢复失败：' . $item->getPathname());
             }
-            if ((!$top || (!$exclude && !$keepRoot)) && !rmdir($directory)) throw new RuntimeException('目录恢复失败');
+            if ($kept || ($top && ($keepRoot || $exclude !== []))) return true;
+            if (!rmdir($directory)) throw new RuntimeException('目录恢复失败：' . $directory);
+            return false;
         };
-        $walk($root, true);
+        $walk($root, '', true);
     }
 }
 
 if (PHP_SAPI === 'cli' && realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
     $directory = $argv[1] ?? '';
     $mode = $argv[2] ?? 'run';
-    if (!in_array($mode, ['run', 'recover', 'detach-run', 'detach-recover', 'manual-inspect', 'manual-recover'], true)) { fwrite(STDERR, "更新模式无效\n"); exit(2); }
+    if (!in_array($mode, ['run', 'recover', 'finalize', 'detach-run', 'detach-recover', 'detach-finalize', 'manual-inspect', 'manual-recover'], true)) { fwrite(STDERR, "更新模式无效\n"); exit(2); }
     if (str_starts_with($mode, 'detach-')) {
         if (!function_exists('pcntl_fork') || !function_exists('posix_setsid')) { fwrite(STDERR, "独立进程能力不可用\n"); exit(2); }
         $pid = pcntl_fork();
@@ -1013,6 +1310,7 @@ if (PHP_SAPI === 'cli' && realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE
         $runtime = new SandSystemUpdateRuntime($directory);
         if ($mode === 'manual-inspect') fwrite(STDOUT, json_encode($runtime->manualInspect(), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . PHP_EOL);
         elseif ($mode === 'manual-recover') $runtime->manualRecover($argv[3] ?? '', $argv[4] ?? '');
+        elseif (str_ends_with($mode, 'finalize')) $runtime->finalize();
         else $runtime->run(str_ends_with($mode, 'recover'));
     }
     catch (Throwable $error) { fwrite(STDERR, SandSystemUpdateRuntime::redact($error->getMessage()) . "\n"); exit(1); }

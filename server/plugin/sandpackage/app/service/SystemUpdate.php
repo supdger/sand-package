@@ -12,6 +12,10 @@ require_once __DIR__ . '/SystemUpdateEnvironment.php';
 /** Super-admin API coordinator. Commands and paths are trusted host configuration only. */
 final class SystemUpdate
 {
+    /** Exact confirmations for the manual exits; neither ever overwrites a host file. */
+    public const FINALIZE_CONFIRMATION = 'accept-current-files';
+    public const ABANDON_CONFIRMATION = 'abandon-task';
+
     private array $settings;
     private string $root;
     private string $server;
@@ -56,7 +60,11 @@ final class SystemUpdate
             $targets[] = $match;
         }
         try { $plan = $this->plan($targets); }
-        catch (Throwable $error) { return ['confirmation' => '', 'targets' => $this->publicTargets($targets), 'checks' => $checks, 'can_start' => false, 'expires_at' => time()]; }
+        catch (Throwable $error) {
+            // A silent can_start=false leaves the user without a reason to act on.
+            $checks[] = $this->check('plan', '宿主更新计划', false, \SandSystemUpdateRuntime::redact($error->getMessage()));
+            return ['confirmation' => '', 'targets' => $this->publicTargets($targets), 'checks' => $checks, 'can_start' => false, 'expires_at' => time()];
+        }
         $candidateHost = $installed['supdger/sand-core'] ?? '';
         foreach ($targets as $target) if ($target['package'] === 'supdger/sand-core') $candidateHost = $target['version'];
         foreach ($targets as $target) {
@@ -79,7 +87,7 @@ final class SystemUpdate
                 \SandSystemUpdateRuntime::command(\SandSystemUpdateRuntime::composerArguments($plan, true), $this->server, static function (string $line): void {}, 120);
                 $checks[] = $this->check('solver', '依赖兼容', true, '精确版本 Composer 求解通过，不执行安装钩子');
                 $plan['fingerprint'] = \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($plan));
-            } catch (Throwable $error) { $checks[] = $this->check('preflight', '宿主升级预检', false, $error->getMessage()); }
+            } catch (Throwable $error) { $checks[] = $this->check('preflight', '宿主升级预检', false, \SandSystemUpdateRuntime::redact($error->getMessage())); }
             finally { \SandSystemUpdateRuntime::unlock($handles); }
         }
         $confirmation = bin2hex(random_bytes(32));
@@ -100,12 +108,14 @@ final class SystemUpdate
             $this->assertNoPending();
             $record = \SandSystemUpdateRuntime::readJson($file);
             if ($record['expires_at'] < time()) throw new ApiException('预检已过期，请重新检查', 400);
-            if (!hash_equals($record['plan']['fingerprint'], \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($record['plan'])))) throw new ApiException('预检后宿主文件已变化，请重新检查', 400);
+            // One scan of the managed scopes answers both the gate and the frozen plan.
+            $fingerprint = \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($record['plan']));
+            if (!hash_equals($record['plan']['fingerprint'], $fingerprint)) throw new ApiException('预检后宿主文件已变化，请重新检查', 400);
             // Local deployment commands must not change between inspection and execution.
             $current = $this->plan($record['plan']['targets']);
             unset($record['plan']['fingerprint']);
             if ($current !== $record['plan']) throw new ApiException('宿主更新配置已变化，请重新检查', 400);
-            $record['plan']['fingerprint'] = \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($current));
+            $record['plan']['fingerprint'] = $fingerprint;
             $id = bin2hex(random_bytes(16));
             $directory = $this->root . '/jobs/' . $id;
             if (!mkdir($directory, 0700)) throw new RuntimeException('无法创建系统更新任务');
@@ -116,9 +126,20 @@ final class SystemUpdate
             \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $task);
             // Consume atomically under the same global lock before dispatch.
             if (!rename($file, $directory . '/confirmation.used.json')) throw new RuntimeException('无法消费预检确认信息');
-            $this->launch($directory, false);
+            $this->launch($directory, 'run');
             return $this->publicTask($task);
         } finally { \SandSystemUpdateRuntime::unlock($handles); }
+    }
+
+    /** task.json plus its terminal-state sidecar; a failed record write must not read as running. */
+    private function readTask(string $directory): array
+    {
+        $task = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
+        if (!is_file($directory . '/failed.json') || !in_array($task['state'] ?? '', ['queued', 'running', 'recovering'], true)) return $task;
+        try { $sidecar = \SandSystemUpdateRuntime::readJson($directory . '/failed.json'); }
+        catch (Throwable) { return $task; }
+        foreach (['state', 'error', 'recovery_available', 'failure_fingerprint', 'updated_at'] as $key) if (isset($sidecar[$key])) $task[$key] = $sidecar[$key];
+        return $task;
     }
 
     public function task(mixed $id): array
@@ -126,19 +147,26 @@ final class SystemUpdate
         if (!is_string($id) || !preg_match('/^[a-f0-9]{32}$/D', $id)) throw new ApiException('系统更新任务编号无效', 400);
         $directory = $this->root . '/jobs/' . $id;
         if (!is_file($directory . '/task.json')) throw new ApiException('系统更新任务不存在', 400);
-        $task = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
+        $task = $this->readTask($directory);
         if (in_array($task['state'], ['queued', 'running', 'recovering'], true) && time() - $task['updated_at'] > 30) {
             $lock = @fopen($this->root . '/update.lock', 'r');
             if (is_resource($lock)) {
                 if (flock($lock, LOCK_EX | LOCK_NB)) {
                     try {
-                        $task = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
+                        $task = $this->readTask($directory);
                         if (!in_array($task['state'], ['queued', 'running', 'recovering'], true)) return $this->publicTask($task);
-                        $task['state'] = 'recovery_required';
-                        $task['error'] = '独立升级进程已中断，请检查任务日志和备份后恢复';
                         $task['recovery_available'] = false;
-                        // No fingerprint of an unobserved crash is fabricated. Recovery refuses unexplained external changes.
-                        if (isset($task['failure_fingerprint'])) $task['recovery_available'] = is_file($directory . '/backup.json');
+                        if (!($task['mutated'] ?? false)) {
+                            // Nothing was changed, so nothing needs recovering: a plain failure
+                            // keeps the user one click away from checking updates again.
+                            $task['state'] = 'failed';
+                            $task['error'] = '独立升级进程在改动任何宿主文件之前已中断，宿主仍是原版本，可重新检查更新。' . \SandSystemUpdateRuntime::manualHint($directory);
+                        } else {
+                            $task['state'] = 'recovery_required';
+                            $task['error'] = '独立升级进程已中断，请检查任务日志和备份后恢复。' . \SandSystemUpdateRuntime::manualHint($directory);
+                            // No fingerprint of an unobserved crash is fabricated. Recovery refuses unexplained external changes.
+                            if (isset($task['failure_fingerprint'])) $task['recovery_available'] = is_file($directory . '/backup.json');
+                        }
                         \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $task);
                     } finally { flock($lock, LOCK_UN); }
                 }
@@ -151,37 +179,88 @@ final class SystemUpdate
     public function recover(mixed $id): array
     {
         $task = $this->task($id);
-        if (!$task['recovery_available'] || !in_array($task['state'], ['failed', 'recovery_required'], true)) throw new ApiException('此任务没有可安全自动恢复的文件现场', 400);
         $directory = $this->root . '/jobs/' . $id;
+        if (!$task['recovery_available'] || !in_array($task['state'], ['failed', 'recovery_required'], true)) throw new ApiException('此任务没有可安全自动恢复的文件现场。' . $this->exitHint($directory), 400);
         $plan = \SandSystemUpdateRuntime::readJson($directory . '/plan.json');
         $handles = \SandSystemUpdateRuntime::locks($plan);
         try {
             foreach ($this->tasks() as $other) if ($other['id'] !== $id && in_array($other['state'], ['queued', 'running', 'recovering', 'recovery_required'], true)) throw new ApiException('另一个系统任务尚未收尾', 400);
-            $raw = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
+            $raw = $this->readTask($directory);
             if (!in_array($raw['state'], ['failed', 'recovery_required'], true) || !($raw['recovery_available'] ?? false)) throw new ApiException('该任务已在恢复或已完成，请刷新状态', 400);
-            if (!isset($raw['failure_fingerprint']) || !hash_equals($raw['failure_fingerprint'], \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($plan)))) throw new ApiException('失败后文件已被外部修改，拒绝覆盖，请核对备份', 400);
+            if (!isset($raw['failure_fingerprint']) || !hash_equals($raw['failure_fingerprint'], \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($plan)))) {
+                throw new ApiException('失败后受管理文件已被外部修改，自动恢复拒绝覆盖，请核对备份。' . $this->exitHint($directory), 400);
+            }
             $raw['state'] = 'recovering'; $raw['updated_at'] = time();
             \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $raw);
-            $this->launch($directory, true);
+            $this->launch($directory, 'recover');
             return $this->publicTask($raw);
         } finally { \SandSystemUpdateRuntime::unlock($handles); }
     }
 
-    private function launch(string $directory, bool $recover): void
+    /**
+     * Confirmed exit for a task automatic recovery refuses. It never overwrites a file: with
+     * FINALIZE it only runs the finishing steps, with ABANDON it only closes the record, so a
+     * fingerprint mismatch or a broken toolchain can no longer lock the host out of updating.
+     */
+    public function finalize(mixed $id, mixed $confirmation): array
     {
+        $task = $this->task($id);
+        $directory = $this->root . '/jobs/' . $id;
+        if (!is_string($confirmation) || !in_array($confirmation, [self::FINALIZE_CONFIRMATION, self::ABANDON_CONFIRMATION], true)) {
+            throw new ApiException('请输入精确确认文本：' . self::FINALIZE_CONFIRMATION . '（接受当前文件现场并只执行收尾）或 ' . self::ABANDON_CONFIRMATION . '（仅关闭任务记录，不执行任何命令）', 400);
+        }
+        if (!in_array($task['state'], ['failed', 'recovery_required'], true)) throw new ApiException('仅升级失败或需要恢复的任务可以人工收尾', 400);
+        $plan = \SandSystemUpdateRuntime::readJson($directory . '/plan.json');
+        $handles = \SandSystemUpdateRuntime::locks($plan);
+        try {
+            foreach ($this->tasks() as $other) if ($other['id'] !== $id && in_array($other['state'], ['queued', 'running', 'recovering'], true)) throw new ApiException('另一个系统任务尚未收尾', 400);
+            $raw = $this->readTask($directory);
+            if (!in_array($raw['state'], ['failed', 'recovery_required'], true)) throw new ApiException('该任务已在恢复或已完成，请刷新状态', 400);
+            $previous = (string) ($raw['error'] ?? '');
+            $raw['manual_finalize'] = ['confirmation' => $confirmation, 'admin' => 1, 'at' => time()];
+            $raw['logs'][] = ['time' => time(), 'stage' => 'manual_finalize', 'message' => '超级管理员提交精确确认 ' . $confirmation . '：跳过文件覆盖'];
+            $raw['logs'] = array_slice($raw['logs'], -500);
+            if ($confirmation === self::ABANDON_CONFIRMATION) {
+                $raw['state'] = 'abandoned';
+                $raw['recovery_available'] = false;
+                $raw['updated_at'] = time();
+                $raw['error'] = '管理员确认放弃本任务，未执行任何文件或服务操作；原失败原因：' . ($previous !== '' ? $previous : '未记录') . '。备份保留在 ' . $directory . '/backup，' . \SandSystemUpdateRuntime::manualHint($directory);
+                \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $raw);
+                if (is_file($directory . '/failed.json')) unlink($directory . '/failed.json');
+                return $this->publicTask($raw);
+            }
+            $raw['state'] = 'recovering';
+            $raw['updated_at'] = time();
+            \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $raw);
+            if (is_file($directory . '/failed.json')) unlink($directory . '/failed.json');
+            $this->launch($directory, 'finalize');
+            return $this->publicTask($raw);
+        } finally { \SandSystemUpdateRuntime::unlock($handles); }
+    }
+
+    private function exitHint(string $directory): string
+    {
+        return '仍可人工收尾：确认文本 ' . self::FINALIZE_CONFIRMATION . ' 跳过文件覆盖只执行收尾，' . self::ABANDON_CONFIRMATION . ' 仅关闭任务记录；' . \SandSystemUpdateRuntime::manualHint($directory);
+    }
+
+    private function launch(string $directory, string $mode): void
+    {
+        if (!in_array($mode, ['run', 'recover', 'finalize'], true)) throw new ApiException('系统更新执行模式无效', 400);
         $plan = \SandSystemUpdateRuntime::readJson($directory . '/plan.json');
         try {
-            if (PHP_OS_FAMILY === 'Windows') \SandSystemUpdateRuntime::detachWindows($plan, $directory, $recover);
+            if (PHP_OS_FAMILY === 'Windows') \SandSystemUpdateRuntime::detachWindows($plan, $directory, $mode);
             else {
                 $pipes = [];
-                $process = proc_open([$plan['php'], $directory . '/worker.php', $directory, $recover ? 'detach-recover' : 'detach-run'], [0 => ['file', \SandSystemUpdateRuntime::nullDevice(), 'r'], 1 => ['file', $directory . '/worker.log', 'a'], 2 => ['file', $directory . '/worker.log', 'a']], $pipes, $this->server, null, ['bypass_shell' => true]);
+                $process = proc_open([$plan['php'], $directory . '/worker.php', $directory, 'detach-' . $mode], [0 => ['file', \SandSystemUpdateRuntime::nullDevice(), 'r'], 1 => ['file', $directory . '/worker.log', 'a'], 2 => ['file', $directory . '/worker.log', 'a']], $pipes, $this->server, null, ['bypass_shell' => true]);
                 if (!is_resource($process) || proc_close($process) !== 0) throw new RuntimeException('无法启动独立更新进程');
             }
         } catch (Throwable $error) {
             $task = \SandSystemUpdateRuntime::readJson($directory . '/task.json');
-            $task['state'] = 'failed'; $task['error'] = \SandSystemUpdateRuntime::redact($error->getMessage());
+            $task['state'] = 'failed';
+            $task['error'] = \SandSystemUpdateRuntime::redact($error->getMessage()) . '；' . $this->exitHint($directory);
+            $task['updated_at'] = time();
             \SandSystemUpdateRuntime::writeJson($directory . '/task.json', $task);
-            throw new ApiException('无法启动独立更新进程，请检查 PHP CLI 与进程权限', 400);
+            throw new ApiException('无法启动独立更新进程，请检查 PHP CLI 与进程权限：' . \SandSystemUpdateRuntime::redact($error->getMessage()), 400);
         }
     }
 
@@ -272,10 +351,23 @@ final class SystemUpdate
         foreach (['reload' => '服务重载', 'health' => '健康检查', 'composer' => 'Composer', 'pnpm' => '前端构建'] as $key => $label) {
             $automatic = in_array($key, ['reload', 'health'], true) && $plan[$key] === [] && !empty($plan['deployment']);
             $ok = $automatic || (is_array($plan[$key]) && array_is_list($plan[$key]) && count($plan[$key]) > 0);
-            $checks[] = $this->check($key, $label, $ok, $automatic ? '框架自动执行宿主' . $label : ($ok ? '宿主固定命令可用' : '框架未找到可执行的' . $label . '程序'));
+            $message = $automatic ? '框架自动执行宿主' . $label : ($ok ? '宿主固定命令可用：' . implode(' ', $plan[$key]) : '框架未找到可执行的' . $label . '程序');
+            // "Configured" is not "working": a crashing shim must fail here, not mid-upgrade.
+            if ($ok && $native && !$automatic && in_array($key, ['composer', 'pnpm'], true)) {
+                [$ok, $probe] = $this->probe($key, [...$plan[$key], '--version'], $key === 'pnpm' ? $plan['frontend'] : $plan['server']);
+                $message = $ok ? '命令验活通过：' . implode(' ', $plan[$key]) . ' → ' . $probe : $label . '命令无法执行：' . $probe;
+            }
+            $checks[] = $this->check($key, $label, $ok, $message);
+        }
+        if ($native) {
+            [$phpOk, $phpProbe] = $this->probe('php', [$plan['php'], '-v'], $this->server);
+            $checks[] = $this->check('php', 'PHP CLI', $phpOk, $phpOk ? '命令验活通过：' . $plan['php'] . ' → ' . $phpProbe : 'PHP CLI 无法执行：' . $phpProbe);
         }
         try { SystemUpdateEnvironment::staticFiles($plan); $checks[] = $this->check('static', '静态发布目录', true, '框架自动核对并准备专用静态发布基线'); }
-        catch (Throwable $error) { $checks[] = $this->check('static', '静态发布目录', false, $error->getMessage()); }
+        catch (Throwable $error) { $checks[] = $this->check('static', '静态发布目录', false, \SandSystemUpdateRuntime::redact($error->getMessage())); }
+        try { [$readyOk, $readyMessage] = SystemUpdateEnvironment::runtimeReadiness($this->server, $plan, config('static.enable')); }
+        catch (Throwable $error) { $readyOk = false; $readyMessage = \SandSystemUpdateRuntime::redact($error->getMessage()); }
+        $checks[] = $this->check('runtime', '重载与健康路径', $readyOk, $readyMessage);
         foreach (['frontend' => '前端源码', 'server' => '宿主目录'] as $key => $label) $checks[] = $this->check($key, $label, is_dir($plan[$key]) && is_writable($plan[$key]), is_dir($plan[$key]) && is_writable($plan[$key]) ? '目录存在且可写' : $label . '不可写或不存在');
         return $checks;
     }
@@ -285,7 +377,7 @@ final class SystemUpdate
         $pins = [];
         foreach (\SandSystemUpdateRuntime::readJson($this->server . '/composer.lock')['packages'] ?? [] as $package) {
             if (!isset(\SandSystemUpdateRuntime::PACKAGES[$package['name']])) continue;
-            $pins[$package['name']] = ['version' => ltrim($package['version'], 'v'), 'reference' => $package['source']['reference'] ?? '', 'files' => \SandSystemUpdateRuntime::tree($this->server . '/vendor/' . $package['name'])];
+            $pins[$package['name']] = ['version' => ltrim($package['version'], 'v'), 'reference' => $package['source']['reference'] ?? '', 'files' => \SandSystemUpdateRuntime::tree($this->server . '/vendor/' . $package['name'], \SandSystemUpdateRuntime::VOLATILE)];
         }
         if (count($pins) !== 2) throw new RuntimeException('宿主缺少完整基础包锁定版本');
         return $pins;
@@ -310,10 +402,32 @@ final class SystemUpdate
         }
     }
 
+    /**
+     * Bounded liveness probe with a short cache: three subprocesses must not be paid on every
+     * status poll, while a repaired toolchain is re-checked within a minute.
+     *
+     * @return array{0: bool, 1: string}
+     */
+    private function probe(string $key, array $argv, string $cwd): array
+    {
+        $cache = $this->root . '/toolchain.json';
+        $signature = hash('sha256', json_encode([$argv, $cwd, PHP_OS_FAMILY], JSON_THROW_ON_ERROR));
+        $saved = [];
+        if (is_file($cache)) { try { $saved = \SandSystemUpdateRuntime::readJson($cache); } catch (Throwable) { $saved = []; } }
+        $entry = $saved[$key] ?? null;
+        if (is_array($entry) && ($entry['signature'] ?? '') === $signature && is_int($entry['time'] ?? null)
+            && $entry['time'] > time() - (($entry['ok'] ?? false) ? 300 : 60)) return [(bool) $entry['ok'], (string) ($entry['message'] ?? '')];
+        try { $message = SystemUpdateEnvironment::probeTool($argv, is_dir($cwd) ? $cwd : $this->server); $ok = true; }
+        catch (Throwable $error) { $ok = false; $message = \SandSystemUpdateRuntime::redact($error->getMessage()); }
+        $saved[$key] = ['signature' => $signature, 'ok' => $ok, 'message' => $message, 'time' => time()];
+        if (is_dir($this->root)) { try { \SandSystemUpdateRuntime::writeJson($cache, $saved); } catch (Throwable) {} }
+        return [$ok, $message];
+    }
+
     private function tasks(): array
     {
         $tasks = [];
-        foreach (glob($this->root . '/jobs/*/task.json') ?: [] as $file) $tasks[] = \SandSystemUpdateRuntime::readJson($file);
+        foreach (glob($this->root . '/jobs/*/task.json') ?: [] as $file) $tasks[] = $this->readTask(dirname($file));
         usort($tasks, static fn (array $a, array $b): int => $b['created_at'] <=> $a['created_at']);
         return $tasks;
     }
@@ -333,5 +447,12 @@ final class SystemUpdate
     private function check(string $code, string $label, bool $ok, string $message): array { return ['code' => $code, 'label' => $label, 'state' => $ok ? 'ok' : 'fail', 'message' => $message]; }
     private function failed(array $checks): bool { foreach ($checks as $check) if ($check['state'] === 'fail') return true; return false; }
     private function publicTargets(array $targets): array { return array_map(static fn (array $target): array => array_intersect_key($target, array_flip(['package', 'name', 'version', 'notes'])), $targets); }
-    private function publicTask(array $task): array { return array_intersect_key($task, array_flip(['id', 'state', 'stage', 'targets', 'created_at', 'updated_at', 'logs', 'error', 'recovery_available'])); }
+    /** The confirmed manual exits stay visible for every task the automatic path cannot finish. */
+    private function publicTask(array $task): array
+    {
+        $task['finalize_available'] = in_array($task['state'] ?? '', ['failed', 'recovery_required'], true);
+        $task['finalize_confirmation'] = self::FINALIZE_CONFIRMATION;
+        $task['abandon_confirmation'] = self::ABANDON_CONFIRMATION;
+        return array_intersect_key($task, array_flip(['id', 'state', 'stage', 'targets', 'created_at', 'updated_at', 'logs', 'error', 'recovery_available', 'finalize_available', 'finalize_confirmation', 'abandon_confirmation']));
+    }
 }

@@ -22,7 +22,7 @@ class Recover extends Command
 
     protected function configure(): void
     {
-        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-dependency|recover-dependency|inspect-candidate|discard-candidate|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-host-upgrade|restore-host-upgrade|continue-host-upgrade|inspect-host-uninstall|restore-host-uninstall|continue-host-uninstall|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
+        $this->addArgument('action', InputArgument::REQUIRED, 'inspect|inspect-dependency|recover-dependency|inspect-candidate|discard-candidate|inspect-fresh-candidate|discard-fresh-candidate|inspect-guards|cleanup-guards|inspect-fresh|cleanup-fresh|manual-cleanup-fresh|finish-cleanup-fresh|continue-fresh|inspect-host-upgrade|restore-host-upgrade|continue-host-upgrade|inspect-host-uninstall|restore-host-uninstall|continue-host-uninstall|inspect-pre-upgrade|restore-pre-upgrade|restore|gate-a|verify|prepare|replace|retry')
             ->addArgument('app', InputArgument::REQUIRED, '插件标识')
             ->addOption('replacement-id', null, InputOption::VALUE_REQUIRED, '已预检替换候选标识')
             ->addOption('archive', null, InputOption::VALUE_REQUIRED, 'prepare 的本地 ZIP 文件')
@@ -46,7 +46,9 @@ class Recover extends Command
         }
         try {
             $normal = new \plugin\sandpackage\app\logic\InstallLogic($app);
-            $info = $normal->getInfo();
+            // A damaged registration must not hide the guard/candidate entries
+            // that exist precisely to clean it up.
+            try { $info = $normal->getInfo(); } catch (\Throwable) { $info = []; }
             if ($action === 'inspect-dependency') {
                 $result = $normal->inspectDependencyRecovery();
             } elseif ($action === 'recover-dependency') {
@@ -55,6 +57,14 @@ class Recover extends Command
                 $result = $normal->inspectCandidateWithdrawal();
             } elseif ($action === 'discard-candidate') {
                 $result = $normal->discardCandidate((string) $input->getOption('confirmation'));
+            } elseif ($action === 'inspect-fresh-candidate') {
+                $result = $normal->inspectFreshCandidateWithdrawal();
+            } elseif ($action === 'discard-fresh-candidate') {
+                $result = $normal->discardFreshCandidate((string) $input->getOption('confirmation'));
+            } elseif ($action === 'inspect-guards') {
+                $result = $normal->inspectGlobalGuards();
+            } elseif ($action === 'cleanup-guards') {
+                $result = $normal->cleanupGlobalGuards((string) $input->getOption('confirmation'));
             } elseif ($action === 'inspect-host-upgrade') {
                 $result = $normal->inspectHostUpgradeRecovery();
             } elseif ($action === 'restore-host-upgrade') {

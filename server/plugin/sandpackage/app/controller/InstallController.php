@@ -102,7 +102,10 @@ class InstallController extends BaseController
 
 
         return $this->success([
+            // 容量配置损坏不得让整个插件列表不可用；自检项会单独报 fail。
+            'limits' => self::safePackageLimits(),
             'version' => [
+                'package_size' => self::packageSizeCheck(),
                 'php_version' => [
                     'describe' => $phpVersion,
                     'state' => $phpVersionCompare ? self::$ok : self::$fail,
@@ -121,6 +124,86 @@ class InstallController extends BaseController
             ],
             'data' => $data
         ]);
+    }
+
+    /**
+     * Multipart framing, boundary and field headers travel with the ZIP body, so
+     * the HTTP layer must accept more than the archive limit itself.
+     */
+    private const MULTIPART_OVERHEAD_BYTES = 65536;
+
+    /**
+     * Single source of truth for every size gate, shared with the browser so the
+     * frontend never hardcodes its own limit.
+     *
+     * @return array<string,mixed>
+     */
+    private static function packageLimits(): array
+    {
+        $effective = PackageArchivePolicy::effectiveLimit();
+        $httpRaw = config('server.max_package_size');
+        $http = is_int($httpRaw) ? $httpRaw : (is_string($httpRaw) && preg_match('/^[1-9][0-9]{0,12}$/D', $httpRaw) === 1 ? (int) $httpRaw : null);
+        return [
+            'effective_limit' => $effective,
+            'ceiling' => PackageArchivePolicy::MAX_BYTES,
+            'configured_key' => 'plugin.sandpackage.upload.size',
+            'multipart_overhead' => self::MULTIPART_OVERHEAD_BYTES,
+            'http_max_package_size' => $http,
+            'http_required' => $effective + self::MULTIPART_OVERHEAD_BYTES,
+            'layers' => [
+                'frontend' => '前端校验（install-box.vue / failed-upgrade-recovery.ts）',
+                'http' => 'HTTP 层 server.max_package_size',
+                'archive' => '后端归档校验 PackageArchivePolicy',
+            ],
+        ];
+    }
+
+    /** @return array<string,mixed>|null Null when the size configuration itself is invalid. */
+    private static function safePackageLimits(): ?array
+    {
+        try { return self::packageLimits(); }
+        catch (Throwable) { return null; }
+    }
+
+    /**
+     * Self-check: the HTTP layer must leave room for the archive limit plus the
+     * multipart envelope, otherwise an in-limit upload is cut before any PHP
+     * validation can explain it.
+     *
+     * @return array{describe:string,state:string,notes:string}
+     */
+    private static function packageSizeCheck(): array
+    {
+        try {
+            $limits = self::packageLimits();
+        } catch (Throwable $error) {
+            return ['describe' => '未知', 'state' => self::$fail,
+                'notes' => $error instanceof ApiException ? $error->getMessage() : '插件包容量配置不可读取'];
+        }
+        $required = $limits['http_required'];
+        $http = $limits['http_max_package_size'];
+        $describe = '归档上限 ' . $limits['effective_limit'] . ' bytes / HTTP '
+            . ($http === null ? '未配置' : $http . ' bytes');
+        if ($http === null) {
+            return ['describe' => $describe, 'state' => self::$warn,
+                'notes' => 'server.max_package_size 未配置或不是正整数；请在 config/server.php 设为 >= '
+                    . $required . ' bytes（归档上限 ' . $limits['effective_limit'] . ' + multipart 余量 '
+                    . $limits['multipart_overhead'] . '）'];
+        }
+        if ($http < $required) {
+            return ['describe' => $describe, 'state' => self::$fail,
+                'notes' => 'HTTP 层上限不足：actual=' . $http . ' bytes，need>=' . $required
+                    . ' bytes；请把 config/server.php 的 max_package_size 调到 ' . $required
+                    . ' 以上，或把 plugin.sandpackage.upload.size 降到 ' . ($http - $limits['multipart_overhead'])
+                    . ' 以下后重载服务'];
+        }
+        return ['describe' => $describe, 'state' => self::$ok, 'notes' => '正常'];
+    }
+
+    /** Expose the one authoritative size limit to the browser. */
+    public function limits(Request $request): Response
+    {
+        return $this->success(array_merge(self::packageLimits(), ['self_check' => self::packageSizeCheck()]));
     }
 
     /**
@@ -148,7 +231,9 @@ class InstallController extends BaseController
         if (!in_array($spl_file->getUploadExtension(), $config['type'])) {
             return $this->fail('文件格式上传失败,请选择zip格式文件上传');
         }
-        PackageArchivePolicy::assertSize($spl_file->getSize(), PackageArchivePolicy::effectiveLimit());
+        PackageArchivePolicy::assertSize(
+            $spl_file->getSize(), PackageArchivePolicy::effectiveLimit(), 'HTTP 上传入口 install/upload',
+        );
         $install = new InstallLogic();
         $info = $install->upload($spl_file);
         return $this->success($info);
@@ -300,12 +385,66 @@ class InstallController extends BaseController
         return $this->success(array_merge($info, LegacyInstallLogic::presentInfo($info)), '升级候选已撤回，数据库未执行无需回滚');
     }
 
+    /** Read-only inspection of a never-started first-install candidate. */
+    #[Permission(title: '检查首次安装候选撤回', slug: 'sandpackage:install:inspectFreshCandidate')]
+    public function inspectFreshCandidate(Request $request): Response
+    {
+        return $this->success(
+            $this->postgresLogic($request)->inspectFreshCandidateWithdrawal(),
+            '首次安装候选撤回现场已核对',
+        );
+    }
+
+    /**
+     * Delete a never-started first-install candidate so the application name is
+     * free again. No SQL, runtime file or dependency state is involved.
+     *
+     * @throws Throwable
+     */
+    #[Permission(title: '撤回首次安装候选', slug: 'sandpackage:install:discardFreshCandidate')]
+    public function discardFreshCandidate(Request $request): Response
+    {
+        [$logic, $confirmation] = $this->postgresWrite($request);
+        return $this->success(
+            $logic->discardFreshCandidate($confirmation),
+            '首次安装候选已撤回，应用名已释放，可以重新上传',
+        );
+    }
+
+    /** Read-only inspection of host-level guard records that block every plugin. */
+    #[Permission(title: '检查宿主守卫记录', slug: 'sandpackage:install:inspectGlobalGuards')]
+    public function inspectGlobalGuards(Request $request): Response
+    {
+        return $this->success(
+            (new InstallLogic($this->recoveryApp($request)))->inspectGlobalGuards(),
+            '宿主守卫记录已核对',
+        );
+    }
+
+    /** Remove only orphan guard records and abandoned upload staging. */
+    #[Permission(title: '清理孤儿宿主守卫', slug: 'sandpackage:install:cleanupGlobalGuards')]
+    public function cleanupGlobalGuards(Request $request): Response
+    {
+        $appName = $this->recoveryApp($request);
+        $confirmation = (string) $request->post('confirmation', '');
+        if ($confirmation === '') throw new ApiException('请填写检查结果给出的完整确认内容', 400);
+        return $this->success(
+            (new InstallLogic($appName))->cleanupGlobalGuards($confirmation),
+            '孤儿守卫记录与残留上传暂存已清理',
+        );
+    }
+
     /** Read-only recovery inspection; no directory, journal or runtime mutation. */
     public function inspectFailedUpgradeRecovery(Request $request): Response
     {
         if (strtoupper($request->method()) !== 'POST') throw new ApiException('恢复检查仅支持 POST 请求', 400);
-        $appName = trim((string) $request->post('appName', ''));
-        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        $appName = $this->recoveryApp($request);
+        // The upstream PostgreSQL driver rejects every legacy recovery entry, so
+        // this shared entry reports that driver's own recovery surface instead.
+        $logic = new InstallLogic($appName);
+        if ($logic->usesPostgresLifecycle()) {
+            return $this->success($this->postgresRecoveryOverview($logic, $appName), '恢复状态检查完成');
+        }
         return $this->success((new LegacyInstallLogic($appName))->inspectFailedUpgradeRecovery($this->adminId), '恢复状态检查完成');
     }
 
@@ -405,6 +544,57 @@ class InstallController extends BaseController
     private const FRESH_RECOVERY_ACTIONS = [
         'cleanup-fresh', 'manual-cleanup-fresh', 'finish-cleanup-fresh', 'continue-fresh',
     ];
+
+    /**
+     * Probe each PostgreSQL-driver recovery surface read-only and report which
+     * one applies, so the management side has a single usable recovery entry.
+     *
+     * @return array<string,mixed>
+     */
+    private function postgresRecoveryOverview(InstallLogic $logic, string $appName): array
+    {
+        $surfaces = [
+            'host_upgrade' => ['inspect' => fn(): array => $logic->inspectHostUpgradeRecovery(),
+                'endpoint' => '/app/sandpackage/install/inspectHostUpgradeRecovery'],
+            'host_uninstall' => ['inspect' => fn(): array => $logic->inspectHostUninstallRecovery(),
+                'endpoint' => '/app/sandpackage/install/inspectHostUninstallRecovery'],
+            'fresh_install' => ['inspect' => fn(): array => $logic->inspectFreshInstallRecovery(),
+                'endpoint' => '/app/sandpackage/install/inspectFreshInstallRecovery'],
+            'candidate_withdrawal' => ['inspect' => fn(): array => $logic->inspectCandidateWithdrawal(),
+                'endpoint' => '/app/sandpackage/install/inspectCandidate'],
+            'fresh_candidate_withdrawal' => ['inspect' => fn(): array => $logic->inspectFreshCandidateWithdrawal(),
+                'endpoint' => '/app/sandpackage/install/inspectFreshCandidate'],
+            'dependency' => ['inspect' => fn(): array => $logic->inspectDependencyRecovery(),
+                'endpoint' => '/app/sandpackage/install/inspectDependencyRecovery'],
+            'global_guards' => ['inspect' => fn(): array => $logic->inspectGlobalGuards(),
+                'endpoint' => '/app/sandpackage/install/inspectGlobalGuards'],
+        ];
+        $available = [];
+        $unavailable = [];
+        foreach ($surfaces as $kind => $surface) {
+            try {
+                $available[] = ['recovery_kind' => $kind, 'endpoint' => $surface['endpoint'],
+                    'inspection' => ($surface['inspect'])()];
+            } catch (ApiException $error) {
+                $unavailable[] = ['recovery_kind' => $kind, 'reason' => $error->getMessage()];
+            } catch (Throwable) {
+                // An unreadable surface must not hide the ones that do apply.
+                $unavailable[] = ['recovery_kind' => $kind, 'reason' => '该恢复现场无法读取，请检查服务日志'];
+            }
+        }
+        $info = $logic->getInfo();
+        return [
+            'app' => $appName,
+            'lifecycle_driver' => 'saipackage-pg-v1',
+            'recovery_mode' => 'postgres_lifecycle',
+            'state' => $info['state'] ?? null,
+            'diagnostic_id' => $info['diagnostic_id'] ?? null,
+            'last_error_code' => $info['last_error_code'] ?? null,
+            'available_recoveries' => $available,
+            'unavailable_recoveries' => $unavailable,
+            'cli_equivalent' => 'php webman sandpackage:recover <action> ' . $appName,
+        ];
+    }
 
     private function recoveryApp(Request $request): string
     {
@@ -626,7 +816,7 @@ class InstallController extends BaseController
     {
         [$app, $version, $sha256] = $this->repositorySelection($request, true);
         $logic = $this->repositoryLogic();
-        return $this->repositoryResponse($request, fn(callable $complete) => $logic->document($app, $version, $sha256, $complete));
+        return $this->repositoryResponse($request, fn(callable $complete) => $logic->document($app, $version, $sha256, $complete, (string) $request->get('type', 'readme')));
     }
 
     /** @return array{string,string,string} */

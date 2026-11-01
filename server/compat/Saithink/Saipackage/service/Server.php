@@ -116,8 +116,27 @@ class Server
                 $ini[] = "$key = $val";
             }
         }
-        if (!file_put_contents($infoFile, implode("\n", $ini) . "\n", LOCK_EX)) {
+        // Atomic registration write: a crash mid-write must leave the previous
+        // complete info.ini in place, never a truncated one.
+        $body = implode("\n", $ini) . "\n";
+        if (str_contains($infoFile, "\0")) {
+            throw new Exception("安装登记路径不安全");
+        }
+        $temporary = $infoFile . '.' . bin2hex(random_bytes(8)) . '.tmp';
+        $handle = fopen($temporary, 'xb');
+        if ($handle === false) {
             throw new Exception("配置文件没有写入权限");
+        }
+        try {
+            if (fwrite($handle, $body) !== strlen($body) || !fflush($handle) || !fsync($handle)) {
+                throw new Exception("安装登记未完整写入");
+            }
+            if (!rename($temporary, $infoFile)) {
+                throw new Exception("无法替换安装登记文件");
+            }
+        } finally {
+            fclose($handle);
+            if (is_file($temporary)) unlink($temporary);
         }
         return true;
     }
