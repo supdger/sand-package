@@ -42,6 +42,10 @@ foreach ([
     'continueHostUninstall',
     'inspectFreshInstallRecovery',
     'recoverFreshInstall',
+    'inspectFreshCandidate',
+    'discardFreshCandidate',
+    'inspectGlobalGuards',
+    'cleanupGlobalGuards',
 ] as $sandpackageRecoveryAction) {
     Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, $sandpackageRecoveryAction]);
     Route::post(
@@ -57,6 +61,9 @@ Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController:
 Route::get('/tool/install/repository/catalog', [plugin\sandpackage\app\controller\InstallController::class, 'repositoryCatalog']);
 Route::post('/tool/install/repository/download', [plugin\sandpackage\app\controller\InstallController::class, 'repositoryDownload']);
 Route::get('/tool/install/repository/document', [plugin\sandpackage\app\controller\InstallController::class, 'repositoryDocument']);
+
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'limits']);
+Route::get('/app/sandpackage/install/limits', [plugin\sandpackage\app\controller\InstallController::class, 'limits']);
 
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectCleanup']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'cleanup']);
@@ -76,6 +83,8 @@ Route::post('/app/sandpackage/systemUpdate/inspect', [plugin\sandpackage\app\con
 Route::post('/app/sandpackage/systemUpdate/start', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'start']);
 Route::get('/app/sandpackage/systemUpdate/task', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'task']);
 Route::post('/app/sandpackage/systemUpdate/recover', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'recover']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateController::class, 'finalize']);
+Route::post('/app/sandpackage/systemUpdate/finalize', [plugin\sandpackage\app\controller\SystemUpdateController::class, 'finalize']);
 
 // This health protocol is loopback-only and requires the independent worker's random challenge.
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\SystemUpdateProbeController::class, 'probe']);

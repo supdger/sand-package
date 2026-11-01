@@ -12,7 +12,6 @@ interface RepositoryReadOptions {
   showErrorMessage?: boolean
 }
 
-
 export interface AppInfo {
   app: string
   title: string
@@ -87,9 +86,58 @@ export interface VersionInfo {
   }
 }
 
+/** 后端下发的唯一容量口径；前端不再自行定义业务上限。 */
+export interface PackageLimits {
+  effective_limit: number
+  ceiling: number
+  configured_key: string
+  multipart_overhead: number
+  http_max_package_size: number | null
+  http_required: number
+  layers: Record<string, string>
+  self_check?: { describe: string; state: string; notes: string }
+}
+
 export interface AppListResponse {
   data: AppInfo[]
   version: VersionInfo
+  limits?: PackageLimits | null
+}
+
+export interface FreshCandidateWithdrawal {
+  app: string
+  operation: 'fresh-candidate-withdrawal'
+  candidate_version: string
+  candidate_tree_sha256: string
+  candidate_files: number
+  sql_executed: false
+  runtime_files_present: false
+  fingerprint: string
+  confirmation: string
+  actions: string[]
+}
+
+export interface GlobalGuardRecord {
+  record: string
+  path: string
+  owner: string | null
+  entry: string
+  orphan: boolean
+  bytes: number | null
+  modified: number | null
+}
+
+export interface GlobalGuardInspection {
+  app: string
+  operation: 'global-guards'
+  guards: GlobalGuardRecord[]
+  orphan_guards: GlobalGuardRecord[]
+  stale_staging: Array<{ path: string; bytes: number | null; modified: number | null }>
+  blocking: boolean
+  fingerprint: string
+  confirmation: string
+  actions: string[]
+  notice: string
 }
 
 export interface RepositoryPluginVersion {
@@ -128,7 +176,6 @@ export interface RepositoryPlugin {
   about: string
   author: string
   local: RepositoryPluginLocal
-  recommended_version?: string | null
   versions: RepositoryPluginVersion[]
 }
 
@@ -193,11 +240,48 @@ export default {
     return request.get<AppListResponse>({ url: '/app/sandpackage/install/index', ...options })
   },
 
+  /** 读取后端下发的插件包容量口径与 HTTP 层自检结论。 */
+  getPackageLimits(options: RepositoryReadOptions = {}) {
+    return request.get<PackageLimits>({ url: '/app/sandpackage/install/limits', ...options })
+  },
+
   /**
    * 上传插件包
    */
   uploadApp(data: FormData) {
     return request.post<AppInfo>({ url: '/app/sandpackage/install/upload', data })
+  },
+
+  /** 只读检查从未开始的首次安装候选能否撤回。 */
+  inspectFreshCandidate(data: { appName: string }) {
+    return request.post<FreshCandidateWithdrawal>({
+      url: '/app/sandpackage/install/inspectFreshCandidate',
+      data
+    })
+  },
+
+  /** 删除从未开始的首次安装候选，释放应用名；不执行 SQL，也不动运行文件。 */
+  discardFreshCandidate(data: { appName: string; confirmation: string }) {
+    return request.post<unknown>({
+      url: '/app/sandpackage/install/discardFreshCandidate',
+      data
+    })
+  },
+
+  /** 只读检查阻塞全部插件操作的宿主守卫记录与残留上传暂存。 */
+  inspectGlobalGuards(data: { appName: string }) {
+    return request.post<GlobalGuardInspection>({
+      url: '/app/sandpackage/install/inspectGlobalGuards',
+      data
+    })
+  },
+
+  /** 仅清理所属插件已不存在的孤儿守卫记录与残留上传暂存。 */
+  cleanupGlobalGuards(data: { appName: string; confirmation: string }) {
+    return request.post<unknown>({
+      url: '/app/sandpackage/install/cleanupGlobalGuards',
+      data
+    })
   },
 
   /**
@@ -354,8 +438,8 @@ export default {
     })
   },
 
-  /** 读取与清单版本、校验和绑定的发布包 README。 */
-  getRepositoryDocument(params: RepositoryDownloadRequest) {
+  /** 读取与清单版本、校验和绑定的发布包文档。 */
+  getRepositoryDocument(params: RepositoryDownloadRequest & { type?: 'readme' | 'changelog' }) {
     return request.get<RepositoryDocumentResponse>({
       url: '/tool/install/repository/document',
       params,

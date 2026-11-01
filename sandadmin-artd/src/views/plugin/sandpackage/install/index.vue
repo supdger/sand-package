@@ -210,6 +210,14 @@
                     >升级包不完整，请联系管理员</ElTag
                   >
                   <ElLink
+                    v-if="row.state === 2"
+                    type="warning"
+                    :disabled="pluginOperationBusy"
+                    @click="handleDiscardFreshCandidate(row)"
+                  >
+                    <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回候选
+                  </ElLink>
+                  <ElLink
                     v-if="row.state === 8 && row.existing_schema_attach_pending === 1"
                     type="warning"
                     :disabled="pluginOperationBusy"
@@ -368,24 +376,10 @@
                   </ElTooltip>
                   <div class="repository-card-version">
                     {{ item.app }}
-                    <template v-if="item.recommended">
-                      · 最新兼容版本 v{{ item.recommended.version }}
-                    </template>
-                    <template v-else>
-                      ·
-                      {{
-                        item.recommended_version === undefined
-                          ? '请更新安装器后查看推荐版本'
-                          : '暂无兼容版本'
-                      }}
+                    <template v-if="item.versions[0]">
+                      · 仓库版本 v{{ item.versions[0].version }}
                     </template>
                   </div>
-                  <ElTag
-                    v-if="item.recommended && isRepositoryPrerelease(item.recommended)"
-                    size="small"
-                    type="warning"
-                    >预发布</ElTag
-                  >
                 </div>
               </div>
               <p class="repository-card-about">{{ item.about }}</p>
@@ -405,11 +399,11 @@
                 <div class="repository-card-footer">
                   <div class="repository-card-secondary-actions">
                     <ElButton
-                      v-if="item.recommended"
+                      v-if="item.versions[0]"
                       link
                       type="primary"
                       size="small"
-                      @click="openRepositoryDocument(item, item.recommended)"
+                      @click="openRepositoryDocument(item, item.versions[0])"
                     >
                       查看文档
                     </ElButton>
@@ -424,20 +418,20 @@
                     </ElButton>
                   </div>
                   <ElButton
-                    v-if="item.recommended"
+                    v-if="item.versions[0]"
                     class="repository-card-primary-action"
                     size="small"
-                    :type="repositoryActionType(item.recommended.action)"
-                    :loading="downloadingKey === repositoryVersionKey(item, item.recommended)"
-                    :disabled="repositoryActionDisabled(item, item.recommended)"
-                    @click="handleRepositoryVersionAction(item, item.recommended)"
+                    :type="repositoryActionType(item.versions[0].action)"
+                    :loading="downloadingKey === repositoryVersionKey(item, item.versions[0])"
+                    :disabled="repositoryActionDisabled(item, item.versions[0])"
+                    @click="handleRepositoryVersionAction(item, item.versions[0])"
                   >
                     {{
-                      downloadingKey === repositoryVersionKey(item, item.recommended)
-                        ? item.recommended.action === 'upgrade'
+                      downloadingKey === repositoryVersionKey(item, item.versions[0])
+                        ? item.versions[0].action === 'upgrade'
                           ? '正在升级'
                           : '正在安装'
-                        : repositoryVersionActionLabel(item, item.recommended)
+                        : repositoryVersionActionLabel(item, item.versions[0])
                     }}
                   </ElButton>
                 </div>
@@ -599,7 +593,9 @@
                 选择 ZIP 插件包
               </ElButton>
               <template #tip>
-                <div class="failed-upgrade-upload-tip">仅接受 ZIP，且不超过 5MB</div>
+                <div class="failed-upgrade-upload-tip">
+                  仅接受 ZIP，且不超过 {{ Math.round(packageZipMaxBytesValue() / 1048576) }}MB
+                </div>
               </template>
             </ElUpload>
             <ElButton
@@ -918,16 +914,18 @@
             <div class="version-info-row">
               <span class="version-name">v{{ item.version }}</span>
               <ElTag size="small" type="info">{{ item.tag }}</ElTag>
-              <ElTag v-if="isRepositoryPrerelease(item)" size="small" type="warning">预发布</ElTag>
             </div>
             <div class="version-compatibility">
               兼容 SandAdmin {{ item.host_min
               }}{{ item.host_max ? ` 至 ${item.host_max}` : ' 及以上' }}
             </div>
-            <div class="version-remark">{{ item.notes }}</div>
+            <div class="version-remark">{{ item.notes || '该版本尚未提供更新摘要，可查看包内更新日志。' }}</div>
             <div class="version-action-reason">{{ item.action_reason }}</div>
           </div>
           <ElSpace wrap>
+            <ElButton size="small" @click="openRepositoryDocument(currentRepositoryPlugin, item, 'changelog')">
+              更新日志
+            </ElButton>
             <ElButton size="small" @click="openRepositoryDocument(currentRepositoryPlugin, item)">
               查看文档
             </ElButton>
@@ -978,7 +976,7 @@
       </ElAlert>
       <ElEmpty
         v-else-if="repositoryDocumentMarkdown === ''"
-        description="该版本未提供 README 文档"
+        :description="repositoryDocumentTarget?.type === 'changelog' ? '该版本发布包未提供更新日志' : '该版本未提供 README 文档'"
       />
       <pre v-else class="repository-document">{{ repositoryDocumentMarkdown }}</pre>
     </ElDrawer>
@@ -1031,6 +1029,7 @@
     isRuntimeRestoreVerificationPresentation,
     isRecoveryWriteBusy,
     inspectFailedUpgradeRecovery,
+    packageZipMaxBytesValue,
     prepareFailedUpgradeReplacement,
     readFailedUpgradeFromVersion,
     readFailedUpgradeReason,
@@ -1041,6 +1040,7 @@
     replaceFailedUpgradeCandidate,
     restoreRuntimeFromBackup,
     retryFailedUpgrade,
+    setPackageZipMaxBytes,
     shouldHideGlobalPluginWrites,
     tuplesMatch,
     verifyFailedUpgradeRecovery,
@@ -1060,6 +1060,7 @@
   }
 
   interface RepositoryDocumentTarget {
+    type: 'readme' | 'changelog'
     app: string
     title: string
     version: string
@@ -2170,6 +2171,47 @@
     }
   }
 
+  const handleDiscardFreshCandidate = async (record: SandpackageInstallRow) => {
+    if (pluginOperationBusy.value) return
+    if (rejectOrdinaryAction(record)) return
+    let expected = ''
+    try {
+      const inspection = await sandpackageApi.inspectFreshCandidate({ appName: record.app })
+      expected = inspection.confirmation
+    } catch {
+      return
+    }
+    let confirmation = ''
+    try {
+      const result = await ElMessageBox.prompt(
+        '系统将删除这个尚未开始安装的候选并释放插件名；不会执行数据库脚本，也不改动运行文件。请输入下方确认内容。',
+        '撤回安装候选',
+        {
+          confirmButtonText: '撤回候选',
+          cancelButtonText: '取消',
+          inputPlaceholder: expected,
+          inputValidator: (value: string) => value === expected || '确认内容不匹配'
+        }
+      )
+      confirmation = result.value
+    } catch {
+      return
+    }
+    if (!acquireLocalWrite('discard')) return
+    try {
+      await sandpackageApi.discardFreshCandidate({
+        appName: record.app,
+        confirmation
+      })
+      ElMessage.success('安装候选已撤回，可重新上传插件包')
+    } catch {
+      // Error already handled by http utility
+    } finally {
+      await getList()
+      releaseLocalWrite('discard')
+    }
+  }
+
   const handleRegisterExisting = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value) return
     if (rejectOrdinaryAction(record)) return
@@ -2309,6 +2351,7 @@
       if (!read.isCurrent()) return
       installList.value = resp?.data || []
       version.value = resp?.version || {}
+      setPackageZipMaxBytes(resp?.limits?.effective_limit)
       syncFailedUpgradeSessions(installList.value)
     } catch (error: unknown) {
       if (!read.isCurrent()) return
@@ -2340,14 +2383,7 @@
   const repositoryDocumentTarget = ref<RepositoryDocumentTarget | null>(null)
   let repositoryDocumentRequestId = 0
 
-  const repositoryPlugins = computed(() =>
-    (repositoryCatalog.value?.plugins ?? []).map((plugin) => ({
-      ...plugin,
-      recommended: plugin.versions.find((release) => release.version === plugin.recommended_version)
-    }))
-  )
-  const isRepositoryPrerelease = (release: RepositoryPluginVersion): boolean =>
-    /(?:preview|alpha|beta|rc)(?:[.\d-]|$)/i.test(release.tag) || release.version.includes('-')
+  const repositoryPlugins = computed(() => repositoryCatalog.value?.plugins ?? [])
   const repositoryCandidateRows = computed(() =>
     installList.value.filter((row) => row.state === 2 && canInstallLocal(row))
   )
@@ -2403,7 +2439,7 @@
   )
   const repositoryDocumentTitle = computed(() => {
     const target = repositoryDocumentTarget.value
-    return target ? `${target.title} v${target.version}` : '插件文档'
+    return target ? `${target.title} v${target.version} · ${target.type === 'changelog' ? '更新日志' : '使用文档'}` : '插件文档'
   })
 
   const fetchRepositoryCatalog = async (): Promise<void> => {
@@ -2411,9 +2447,6 @@
     const read = catalogRead.begin()
     repositoryLoading.value = true
     repositoryError.value = ''
-    repositoryCatalog.value = null
-    currentRepositoryPlugin.value = null
-    repositoryVersionVisible.value = false
     try {
       const response = await read.run((signal) =>
         sandpackageApi.getRepositoryCatalog({ signal, showErrorMessage: false })
@@ -2479,8 +2512,6 @@
     ) {
       return '上方处理本地包'
     }
-    if (item.action === 'upgrade') return `升级到 v${item.version}`
-    if (item.action === 'install') return `安装 v${item.version}`
     return repositoryActionLabel(item.action)
   }
 
@@ -2495,7 +2526,6 @@
     plugin: RepositoryPlugin | null,
     item: RepositoryPluginVersion
   ): boolean => {
-    if (repositoryLoading.value || repositoryError.value !== '') return true
     if (item.action === 'manage') {
       return (
         pluginOperationBusy.value ||
@@ -2730,7 +2760,8 @@
       const response = await sandpackageApi.getRepositoryDocument({
         app: target.app,
         version: target.version,
-        sha256: target.sha256
+        sha256: target.sha256,
+        type: target.type
       })
       if (requestId !== repositoryDocumentRequestId) return
       if (response.app !== target.app || response.version !== target.version) {
@@ -2747,10 +2778,12 @@
 
   const openRepositoryDocument = (
     plugin: RepositoryPlugin | null,
-    item: RepositoryPluginVersion
+    item: RepositoryPluginVersion,
+    type: 'readme' | 'changelog' = 'readme'
   ): void => {
     if (!plugin) return
     const target: RepositoryDocumentTarget = {
+      type,
       app: plugin.app,
       title: plugin.title,
       version: item.version,
@@ -3245,6 +3278,8 @@
   }
 
   .version-remark {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
     flex: 1;
     font-size: 13px;
     color: var(--el-text-color-regular);

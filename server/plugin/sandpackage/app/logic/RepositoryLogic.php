@@ -6,7 +6,6 @@ namespace plugin\sandpackage\app\logic;
 
 use plugin\sandadmin\exception\ApiException;
 use plugin\sandpackage\app\service\RepositoryClient;
-use plugin\sandpackage\app\service\PluginVersion;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
 use Throwable;
 use ZipArchive;
@@ -82,9 +81,13 @@ final class RepositoryLogic
     }
 
     /** Documentation is package-only and deliberately ignores broken local state. @param callable(?array, ?Throwable): void $complete */
-    public function document(string $app, string $version, string $sha256, callable $complete): void
+    public function document(string $app, string $version, string $sha256, callable $complete, string $type = 'readme'): void
     {
-        $this->fetchCatalog(false, function (?array $catalog, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
+        if (!in_array($type, ['readme', 'changelog'], true)) {
+            $complete(null, new ApiException('不支持的插件文档类型', 400));
+            return;
+        }
+        $this->fetchCatalog(false, function (?array $catalog, ?Throwable $error) use ($app, $version, $sha256, $complete, $type): void {
             if ($error !== null) { $complete(null, $error); return; }
             try {
                 $release = $this->selectRelease($catalog, $app, $version);
@@ -92,10 +95,10 @@ final class RepositoryLogic
                 $url = $this->releaseUrl($release);
                 $maxBytes = PackageArchivePolicy::effectiveLimit();
             } catch (Throwable $error) { $complete(null, $error); return; }
-            $this->client->get($url, $maxBytes, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete): void {
+            $this->client->get($url, $maxBytes, function (?string $body, ?Throwable $error) use ($app, $version, $sha256, $complete, $type): void {
                 if ($error !== null) { $complete(null, $error); return; }
                 try {
-                    $markdown = $this->readDocument($body ?? '', $app, $version, $sha256);
+                    $markdown = $this->readDocument($body ?? '', $app, $version, $sha256, $type);
                 } catch (Throwable $error) { $complete(null, $error); return; }
                 $complete(['app' => $app, 'version' => $version, 'markdown' => $markdown], null);
             });
@@ -172,18 +175,19 @@ final class RepositoryLogic
         } finally { if (is_file($file)) unlink($file); }
     }
 
-    private function readDocument(string $body, string $app, string $version, string $sha256): string
+    private function readDocument(string $body, string $app, string $version, string $sha256, string $type): string
     {
         $file = $this->archiveFile($body, $sha256);
         try {
             $zip = $this->verifiedZip($file, $app, $version);
             try {
                 $matches = [];
-                foreach (self::README_NAMES as $name) {
+                foreach ($type === 'changelog' ? ['CHANGELOG.md'] : self::README_NAMES as $name) {
                     if ($zip->locateName($name) !== false) {
                         $matches[] = $name;
                     }
                 }
+                if ($type === 'changelog' && $matches === []) return '';
                 if (count($matches) !== 1) throw new ApiException('插件包缺少唯一的根目录 README.md');
                 $stat = $zip->statName($matches[0]);
                 if (!is_array($stat) || ($stat['size'] ?? 0) > 262144) throw new ApiException('插件文档超过 256 KiB 限制');
@@ -198,7 +202,9 @@ final class RepositoryLogic
 
     private function archiveFile(string $body, string $sha256): string
     {
-        PackageArchivePolicy::assertSize(strlen($body), PackageArchivePolicy::effectiveLimit());
+        PackageArchivePolicy::assertSize(
+            strlen($body), PackageArchivePolicy::effectiveLimit(), '插件仓库下载 RepositoryLogic',
+        );
         if (!hash_equals($sha256, hash('sha256', $body))) {
             throw new ApiException('插件包校验失败');
         }
@@ -256,12 +262,7 @@ final class RepositoryLogic
         foreach ($catalog['plugins'] as &$plugin) {
             $local = (new InstallLogic($plugin['app']))->ordinaryStatus();
             $plugin['local'] = $local;
-            usort($plugin['versions'], static fn(array $left, array $right): int => PluginVersion::compare($right['version'], $left['version']));
-            $plugin['recommended_version'] = null;
             foreach ($plugin['versions'] as &$release) {
-                if ($plugin['recommended_version'] === null && $this->compatible($release)) {
-                    $plugin['recommended_version'] = $release['version'];
-                }
                 [$release['action'], $release['action_reason']] = $this->releaseAction($local, $release);
             }
             unset($release);
@@ -293,7 +294,7 @@ final class RepositoryLogic
         if ($local['state'] !== InstallLogic::INSTALLED || $local['installed_version'] === null) {
             return ['manage', $local['reason'] !== '' ? $local['reason'] : '当前安装状态需要从已安装插件管理页继续'];
         }
-        $comparison = PluginVersion::compare($release['version'], $local['installed_version']);
+        $comparison = version_compare($release['version'], $local['installed_version']);
         if ($comparison === 0) return ['installed', '当前已经安装此版本'];
         if ($comparison < 0) return ['downgrade', '所选版本低于已安装版本，禁止降级'];
         return ['upgrade', '可从 ' . $local['installed_version'] . ' 升级到此版本'];

@@ -46,7 +46,7 @@
               将插件包文件拖到此处，或
               <span class="text-primary ml-2">点击上传</span>
             </div>
-            <div class="mt-2 text-sm text-gray-500">仅支持 ZIP 格式，文件不能超过 5MB</div>
+            <div class="mt-2 text-sm text-gray-500">{{ uploadHint }}</div>
           </div>
         </ElUpload>
       </div>
@@ -55,10 +55,15 @@
 </template>
 
 <script setup lang="ts">
-  import { ref, reactive } from 'vue'
+  import { ref, reactive, computed } from 'vue'
   import { ElMessage } from 'element-plus'
   import type { UploadProps, UploadRequestOptions } from 'element-plus'
   import sandpackageApi, { type AppInfo } from '../api/index'
+  import {
+    packageZipMaxBytesValue,
+    packageZipOversizeMessage,
+    setPackageZipMaxBytes
+  } from './failed-upgrade-recovery'
 
   const props = withDefaults(
     defineProps<{
@@ -81,7 +86,31 @@
   const visible = ref(false)
   const loading = ref(false)
 
-  const uploadSize = 5 * 1024 * 1024
+  /** 上限由后端 effectiveLimit 下发，取不到时沿用模块兜底，不在前端定义业务值。 */
+  const uploadSize = ref(packageZipMaxBytesValue())
+
+  const uploadHint = computed(
+    () => `仅支持 ZIP 格式，单个插件包不超过 ${formatBytes(uploadSize.value)}（${uploadSize.value} 字节）`
+  )
+
+  function formatBytes(bytes: number): string {
+    if (bytes >= 1024 * 1024) return `${Math.floor((bytes / (1024 * 1024)) * 10) / 10}MB`
+    if (bytes >= 1024) return `${Math.floor(bytes / 1024)}KB`
+    return `${bytes}B`
+  }
+
+  const refreshUploadLimit = async (): Promise<void> => {
+    try {
+      const limits = await sandpackageApi.getPackageLimits({ showErrorMessage: false })
+      uploadSize.value = setPackageZipMaxBytes(limits?.effective_limit)
+      if (limits?.self_check?.state === 'fail' || limits?.self_check?.state === 'warn') {
+        ElMessage.warning(limits.self_check.notes)
+      }
+    } catch {
+      // 读取不到后端口径时保留当前兜底上限，上传仍由后端做最终判定。
+      uploadSize.value = packageZipMaxBytesValue()
+    }
+  }
 
   const initialApp: AppInfo = {
     app: '',
@@ -98,8 +127,8 @@
     if (!file.name.toLowerCase().endsWith('.zip')) {
       return '仅支持 ZIP 格式的插件包'
     }
-    if (file.size > uploadSize) {
-      return '文件不能超过 5MB'
+    if (file.size > uploadSize.value) {
+      return packageZipOversizeMessage(file.size, uploadSize.value)
     }
     return undefined
   }
@@ -148,6 +177,7 @@
     if (props.disabled || loading.value) return
     visible.value = true
     Object.assign(appInfo, initialApp)
+    void refreshUploadLimit()
   }
 
   const beforeClose = (done: () => void): void => {

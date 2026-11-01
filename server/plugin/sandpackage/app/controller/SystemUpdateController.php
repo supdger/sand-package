@@ -31,4 +31,6 @@ final class SystemUpdateController extends BaseController
     public function start(Request $request): Response { return $this->respond(static fn (): array => (new SystemUpdate())->start($request->post('confirmation'))); }
     public function task(Request $request): Response { return $this->respond(static fn (): array => (new SystemUpdate())->task($request->get('id'))); }
     public function recover(Request $request): Response { return $this->respond(static fn (): array => (new SystemUpdate())->recover($request->post('id'))); }
+    /** Confirmed manual exit for tasks automatic recovery refuses; never overwrites host files. */
+    public function finalize(Request $request): Response { return $this->respond(static fn (): array => (new SystemUpdate())->finalize($request->post('id'), $request->post('confirmation'))); }
 }

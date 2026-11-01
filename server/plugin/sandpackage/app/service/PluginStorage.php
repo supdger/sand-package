@@ -13,6 +13,9 @@ final class PluginStorage
 {
     private const RESERVED = ['sandadmin', 'sandpackage', 'saiadmin', 'saipackage', 'locks', 'backups', 'archives', 'uploads', 'replacements', 'quarantine', 'fresh-recovery', 'runtime-restores', 'cleanup', 'host-payload'];
 
+    /** Upload/withdrawal staging is never a plugin, including legacy root-level residue. */
+    private const RESERVED_PREFIXES = ['upload-', 'discarded-'];
+
     public function __construct(private ?string $runtime = null, private ?string $server = null)
     {
         $this->runtime ??= rtrim(runtime_path(), DIRECTORY_SEPARATOR);
@@ -93,7 +96,7 @@ final class PluginStorage
         $this->assertDirectoryPath($cleanupDirectory);
         foreach (glob($cleanupDirectory . '/*.json') ?: [] as $journal) {
             $app = basename($journal, '.json');
-            if (!preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) || in_array($app, self::RESERVED, true)) continue;
+            if (!$this->isApp($app)) continue;
             if (AbnormalPluginCleanup::pending($root, $app) && !isset($records[$app])) {
                 $records[$app] = ['app' => $app, 'title' => $app, 'version' => '', 'state' => 8];
             }
@@ -102,7 +105,7 @@ final class PluginStorage
         $this->assertDirectoryPath($hostPayloadDirectory);
         foreach (glob($hostPayloadDirectory . '/*.lifecycle.json') ?: [] as $journal) {
             if (!preg_match('/^([a-z][a-z0-9-]{1,63})\.lifecycle\.json$/D', basename($journal), $match)
-                || in_array($match[1], self::RESERVED, true)) continue;
+                || !$this->isApp($match[1])) continue;
             $app = $match[1];
             if (HostPayloadLifecycleJournal::pending($hostPayloadDirectory, $app) && !isset($records[$app])) {
                 $records[$app] = [
@@ -288,6 +291,12 @@ final class PluginStorage
 
     private function isApp(string $app): bool
     {
-        return preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) === 1 && !in_array($app, self::RESERVED, true);
+        if (preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) !== 1 || in_array($app, self::RESERVED, true)) {
+            return false;
+        }
+        foreach (self::RESERVED_PREFIXES as $prefix) {
+            if (str_starts_with($app, $prefix)) return false;
+        }
+        return true;
     }
 }

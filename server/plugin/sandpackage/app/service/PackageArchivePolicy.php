@@ -30,23 +30,25 @@ final class PackageArchivePolicy
         return $configured;
     }
 
-    public static function assertSize(mixed $actual, int $max): void
+    /** Every size rejection names the layer that rejected it, plus actual/max. */
+    public static function assertSize(mixed $actual, int $max, string $layer = '后端归档校验 PackageArchivePolicy'): void
     {
         if (!is_int($actual) || $actual < 0) {
-            throw new ApiException('无法测量 ZIP 安装包大小；max=' . $max . ' bytes', 400);
+            throw new ApiException('无法测量 ZIP 安装包大小；限制层=' . $layer . '，max=' . $max . ' bytes', 400);
         }
         if ($actual > $max) {
             throw new ApiException(
-                'ZIP 安装包超过大小限制：actual=' . $actual . ' bytes，max=' . $max . ' bytes',
+                'ZIP 安装包超过大小限制：限制层=' . $layer . '，actual=' . $actual . ' bytes，max=' . $max
+                . ' bytes；上限由 plugin.sandpackage.upload.size 下发（ceiling=' . self::MAX_BYTES . ' bytes）',
                 400,
             );
         }
     }
 
-    public static function assertFile(string $file, ?int $max = null): void
+    public static function assertFile(string $file, ?int $max = null, string $layer = '后端归档校验 PackageArchivePolicy'): void
     {
         clearstatcache(true, $file);
-        self::assertSize(@filesize($file), $max ?? self::effectiveLimit());
+        self::assertSize(@filesize($file), $max ?? self::effectiveLimit(), $layer);
     }
 
     /** Validate member bytes before extraction, without buffering expanded files. */

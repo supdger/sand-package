@@ -50,10 +50,20 @@
       <h3>最近升级任务 · {{ stateLabels[task.state] }}</h3>
       <p>任务 {{ task.id }} · 当前阶段：{{ task.stage }}</p>
       <p>刷新或重新打开页面后，仍可查询任务结果；连接中断不代表升级失败。</p>
-      <ElAlert v-if="task.error && task.state !== 'recovered'" type="error" :closable="false" :title="task.error" />
+      <ElAlert v-if="task.error" :type="task.state === 'recovered' ? 'warning' : 'error'" :closable="false" :title="task.state === 'recovered' ? '恢复已完成，但收尾步骤留有警告' : '任务未完成'">
+        <p class="task-error">{{ task.error }}</p>
+      </ElAlert>
       <ElAlert v-if="task.state === 'succeeded'" type="success" :closable="false" title="升级完成，健康检查已通过。请刷新页面加载新版本。" />
       <ElAlert v-if="task.state === 'recovered'" type="warning" :closable="false" title="已恢复升级前版本。请检查失败原因后重新检查更新。" />
-      <ElButton v-if="recoveryEligible" type="warning" :disabled="busy || outcomeUnconfirmed || externalBusy" @click="confirmRecovery">恢复升级前版本</ElButton>
+      <ElAlert v-if="task.state === 'abandoned'" type="warning" :closable="false" title="任务已按人工确认关闭。请按错误说明核对现场后再重新检查更新。" />
+      <ElSpace wrap>
+        <ElButton v-if="recoveryEligible" type="warning" :disabled="busy || outcomeUnconfirmed || externalBusy" @click="confirmRecovery">恢复升级前版本</ElButton>
+        <ElButton v-if="finalizeEligible" :disabled="busy || outcomeUnconfirmed || externalBusy" @click="confirmFinalize('finalize')">我已人工核对，执行收尾</ElButton>
+        <ElButton v-if="finalizeEligible" :disabled="busy || outcomeUnconfirmed || externalBusy" @click="confirmFinalize('abandon')">放弃并关闭此任务</ElButton>
+      </ElSpace>
+      <p v-if="finalizeEligible" class="finalize-hint">
+        自动恢复被拒绝（例如失败后文件被外部修改）时，仍可人工收尾：“执行收尾”不覆盖任何文件，只重新核对前端依赖、重载服务并做健康检查；“放弃并关闭”只关闭任务记录，不执行任何命令。两者都需要输入精确确认文本。
+      </p>
       <ol class="task-logs" aria-label="升级日志" aria-live="polite">
         <li v-for="(log, index) in task.logs" :key="`${index}-${log.time}`"><time>{{ formatTime(log.time) }}</time> {{ log.message }}</li>
       </ol>
@@ -89,10 +99,11 @@ const outcomeUnconfirmed = ref(false)
 let disposed = false
 let timer: ReturnType<typeof setTimeout> | undefined
 let requestGeneration = 0
-const stateLabels: Record<UpdateTask['state'], string> = { queued: '等待执行', running: '正在升级', succeeded: '升级成功', failed: '升级失败', recovering: '正在恢复', recovered: '已恢复', recovery_required: '需要恢复' }
+const stateLabels: Record<UpdateTask['state'], string> = { queued: '等待执行', running: '正在升级', succeeded: '升级成功', failed: '升级失败', recovering: '正在恢复', recovered: '已恢复', recovery_required: '需要恢复', abandoned: '已人工关闭' }
 const taskRunning = computed(() => !!task.value && ['queued', 'running', 'recovering'].includes(task.value.state))
 const busy = computed(() => operation.value !== '' || taskRunning.value)
 const recoveryEligible = computed(() => !!task.value?.recovery_available && ['failed', 'recovery_required'].includes(task.value.state))
+const finalizeEligible = computed(() => !!task.value?.finalize_available)
 const updateBlocked = computed(() => outcomeUnconfirmed.value || task.value?.state === 'recovery_required')
 const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) as [SystemPackage, string][]).filter(([, version]) => !!version).map(([packageName, version]) => ({ package: packageName, version })))
 const checks = computed(() => inspection.value?.checks ?? status.value?.checks ?? [])
@@ -170,6 +181,33 @@ async function confirmRecovery() {
   catch (cause) { if (!disposed) { outcomeUnconfirmed.value = true; error.value = `恢复结果未确认：${message(cause)}。请重新连接查询结果。` } }
   finally { if (!disposed) { operation.value = ''; schedulePoll() } }
 }
+async function confirmFinalize(kind: 'finalize' | 'abandon') {
+  const current = task.value
+  if (busy.value || props.externalBusy || !current || !current.finalize_available || outcomeUnconfirmed.value) return
+  const confirmation = kind === 'finalize' ? current.finalize_confirmation : current.abandon_confirmation
+  const description =
+    kind === 'finalize'
+      ? `接受当前文件现场，不覆盖任何文件，只执行收尾（前端依赖核对、服务重载、健康检查）并关闭任务。请输入确认文本 ${confirmation}`
+      : `仅关闭任务记录，不执行任何文件或服务操作；备份会保留供人工核对。请输入确认文本 ${confirmation}`
+  let input: string | null = null
+  try {
+    const result: unknown = await ElMessageBox.prompt(description, kind === 'finalize' ? '人工收尾' : '放弃并关闭任务', {
+      type: 'warning',
+      confirmButtonText: kind === 'finalize' ? '执行收尾' : '关闭任务',
+      cancelButtonText: '取消',
+      inputPlaceholder: confirmation,
+      inputValidator: (value: string) => value === confirmation || `请输入 ${confirmation}`
+    })
+    if (typeof result === 'object' && result !== null && 'value' in result && typeof result.value === 'string') input = result.value
+  } catch { return }
+  if (disposed || input !== confirmation) return
+  if (busy.value || props.externalBusy || !task.value?.finalize_available || outcomeUnconfirmed.value) return
+  operation.value = 'finalize'
+  error.value = ''
+  try { const result = await systemUpdateApi.finalize(current.id, confirmation); if (!disposed) task.value = result }
+  catch (cause) { if (!disposed) { outcomeUnconfirmed.value = true; error.value = `人工收尾结果未确认：${message(cause)}。请重新连接查询结果。` } }
+  finally { if (!disposed) { operation.value = ''; schedulePoll() } }
+}
 onMounted(loadStatus)
 onBeforeUnmount(() => { disposed = true; requestGeneration++; clearTimeout(timer); emit('busy', false) })
 </script>
@@ -192,5 +230,7 @@ p { margin: 8px 0; line-height: 1.6; }
 .task-panel { border-top: 1px solid var(--el-border-color); padding-top: 20px; }
 .task-logs { max-height: 320px; overflow: auto; padding: 12px 12px 12px 32px; background: var(--el-fill-color-light); overflow-wrap: anywhere; }
 .task-logs li { margin: 8px 0; }
+.task-error { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.finalize-hint { color: var(--el-text-color-secondary); font-size: 13px; }
 time { color: var(--el-text-color-secondary); margin-right: 8px; }
 </style>

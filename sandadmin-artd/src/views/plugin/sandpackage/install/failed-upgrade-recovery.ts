@@ -25,8 +25,38 @@ export interface SandpackageInstallRow extends AppInfo {
   allowed_actions?: string[]
 }
 
-/** 恢复候选 ZIP 上限：5MB。 */
-export const FAILED_UPGRADE_ZIP_MAX_BYTES = 5 * 1024 * 1024
+/**
+ * 恢复候选 ZIP 上限的本地兜底，与后端 PackageArchivePolicy::MAX_BYTES 同口径。
+ * 实际上限由后端 `effectiveLimit` 下发（见 setPackageZipMaxBytes），前端不再自行定义业务值。
+ */
+export const FAILED_UPGRADE_ZIP_MAX_BYTES = 16 * 1024 * 1024
+
+let packageZipMaxBytes = FAILED_UPGRADE_ZIP_MAX_BYTES
+
+/** 接收后端下发的 effectiveLimit；非正整数或超过兜底上限时保持原值。 */
+export function setPackageZipMaxBytes(bytes: unknown): number {
+  if (
+    typeof bytes === 'number' &&
+    Number.isInteger(bytes) &&
+    bytes > 0 &&
+    bytes <= FAILED_UPGRADE_ZIP_MAX_BYTES
+  ) {
+    packageZipMaxBytes = bytes
+  }
+  return packageZipMaxBytes
+}
+
+/** 当前生效的插件包上限（字节）。 */
+export function packageZipMaxBytesValue(): number {
+  return packageZipMaxBytes
+}
+
+const PACKAGE_OVERSIZE_PREFIX = '插件包超过大小限制：限制层='
+
+/** 超限文案统一带限制层、实际字节数与上限。 */
+export function packageZipOversizeMessage(actual: number, max: number, layer = '前端校验'): string {
+  return `${PACKAGE_OVERSIZE_PREFIX}${layer}，实际 ${actual} 字节，上限 ${max} 字节`
+}
 
 /** 列表页在核验前展示的稳定人话。 */
 export const FAILED_UPGRADE_FAILURE_MESSAGE =
@@ -222,7 +252,7 @@ const HUMAN_MESSAGE_ALLOWLIST = new Set<string>([
   FAILED_UPGRADE_LIST_ERROR_MESSAGE,
   '请选择 ZIP 插件包，不能使用其他格式',
   '插件包文件无效',
-  '插件包不能超过 5MB',
+
   '请先选择已核验的 ZIP 插件包',
   '插件包检查结果无效，请重新选择插件包',
   '未能确认已检查的插件包，请重新选择插件包',
@@ -286,6 +316,8 @@ export function humanizeRecoveryMessage(raw: string, fallback: string): string {
   if (code && STABLE_CODE_MESSAGES[code]) return STABLE_CODE_MESSAGES[code]
   if (MACHINE_CODE_PATTERN.test(text) || extractStableCode(text)) return fallback
   if (containsInternalDetail(text)) return fallback
+  // 超限文案带动态 actual/max，无法进固定集合；它只含字节数与限制层，不含内部细节。
+  if (text.startsWith(PACKAGE_OVERSIZE_PREFIX)) return text
   if (HUMAN_MESSAGE_ALLOWLIST.has(text)) return text
   return fallback
 }
@@ -358,7 +390,7 @@ export function retryConfirmationText(
   )
 }
 
-/** 只接受 ZIP，且不超过 5MB。 */
+/** 只接受 ZIP，且不超过后端下发的 effectiveLimit。 */
 export function assertFailedUpgradeZip(file: File): string | null {
   const name = file.name.toLowerCase()
   if (!name.endsWith('.zip')) return '请选择 ZIP 插件包，不能使用其他格式'
@@ -370,7 +402,9 @@ export function assertFailedUpgradeZip(file: File): string | null {
   ])
   if (!allowedTypes.has(file.type)) return '请选择 ZIP 插件包，不能使用其他格式'
   if (file.size <= 0) return '插件包文件无效'
-  if (file.size > FAILED_UPGRADE_ZIP_MAX_BYTES) return '插件包不能超过 5MB'
+  if (file.size > packageZipMaxBytes) {
+    return packageZipOversizeMessage(file.size, packageZipMaxBytes)
+  }
   return null
 }
 
