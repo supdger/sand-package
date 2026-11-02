@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.16（2026-11-02）
+
+- Composer 发布生命周期加固：安装/更新改为先装后端载荷再发布前端；前端发布的任何失败（Sand Core 前端基线未就绪、文件冲突、写盘失败）降级为 `[sandadmin]` 前缀告警并附 `composer run-script sand:publish` 恢复命令，不再中止 Composer，也不回滚已安装的后端载荷。
+- 前端冲突判定由“存在即拒绝”改为内容寻址：与发布源逐字节相同的既有文件视为已发布并补写清单（fresh clone 已提交前端可直接收养），仅内容不同的同名文件才拒绝，错误消息列出具体文件、命中的判定与恢复路径。
+- 前端清单改两阶段提交：先写 `.sand-package-source-manifest.json.pending`，copy 完成后 rename 生效；重入时按 pending 判定补写或重做，不再把中断现场误判为“已被修改”。
+- 升级删除集：旧清单登记而新版载荷不再提供的文件，按旧哈希校验未改动才删除，已改动保留并告警；清单内已被本地修改的文件跳过覆盖并汇总报告。
+- 新增 `SAND_FRONTEND_PUBLISH=skip|force` 开关；未设置时行为不变。
+- 前端目标目录优先取宿主 `composer.json` 的 `extra.sandadmin.frontend-path`，目录名启发式仅作回退；目标必须位于宿主项目父级之内且路径各段非符号链接，违例拒绝并给出配置指引。
+- 后端载荷改安装记录驱动：`plugin/sandpackage/config/` 仅首次安装写入，更新不覆盖宿主定制；卸载只移除登记且未改动的文件与因此变空的目录，未登记或已改动的文件保留并在告警中列出（不再无差别 `remove_dir`）。
+- 移除 `retireLegacyTest` 的硬编码 sha256 预检：该文件被改动一个字节即中止 Composer 的问题消失，历史测试载荷的退场改由安装记录驱动；`plugin/sandpackage/tests/` 与前端测试夹具移出发布面。
+- 发布排除规则收敛到单一来源 `server/PublishExclusions.php`，`composer.json archive.exclude`、`.gitattributes export-ignore` 与发布器判定由其派生，一致性由 `tools/assert-publish-exclusions.php` 断言（含与 sand-core 同名规则的跨包比对）。
+
 ## 0.2.15（2026-10-31）
 
 - 系统更新健壮性：预检真实执行 composer/pnpm/php `--version` 验活（损坏工具链升级前拦截）；composer 阶段瞬时失败自动重试至多 3 次；在线目录改 staged rename 交换；指纹门禁仅覆盖受管文件（dist、生成 d.ts、OS 垃圾文件不再使恢复失效）；恢复解耦——文件还原成功后 pnpm/reload/health 收尾失败降级为警告并标记已恢复；新增 `finalize`/`abandon` 经确认收尾出口，指纹不匹配或任务不可恢复时不再死锁；`mutated=false` 的静默任务直接标 failed；终态写入 sidecar 兜底；失败消息带命令输出尾部。**旧任务注意**：本版前创建的 in-flight 升级任务，其指纹按旧范围计算，自动恢复会被拒——请使用新增的 finalize/abandon 收尾。
