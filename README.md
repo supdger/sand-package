@@ -16,7 +16,7 @@ SandAdmin 的 Composer 插件安装器，包含 PostgreSQL 插件生命周期、
 
 下列后端命令在宿主 `server/` 目录执行，需要 PHP ≥8.2 和 Composer，并保留宿主 `composer.json` 中 `support\Plugin::install` 的 `post-package-install`、`post-package-update` 钩子。安装前备份现有配置和前端修改；冲突时先核对发布清单，不强行覆盖。
 
-本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)；先完成其前端源码发布，再安装本包；包依赖下载不等于前端基线已发布。
+本版本要求 [Sand Core 0.2.4](https://github.com/supdger/sand-core)。建议先完成其前端源码发布再安装本包；core 前端基线未就绪时，本包只安装后端载荷并给出告警，不中止 Composer，可在基线就绪后补发前端。包依赖下载不等于前端基线已发布。
 
 ```bash
 composer require 'supdger/sand-package:>=0.2.14'
@@ -24,8 +24,19 @@ composer require 'supdger/sand-package:>=0.2.14'
 
 Composer 安装只发布运行源码，不创建数据库、不执行插件数据库迁移，也不启动或重启服务。业务插件继续使用 SandPackage ZIP 安装。
 
-Composer 安装或更新时，Webman 插件安装钩子会在 Sand Core 前端基线上自动发布
-SandPackage 管理页面源码，不需要额外执行工具脚本，并拒绝覆盖未知修改。
+Composer 安装或更新时，Webman 插件安装钩子先安装后端载荷，再在 Sand Core 前端基线上发布 SandPackage 管理页面源码，不需要额外执行工具脚本。前端发布的任何失败（core 基线未就绪、文件冲突、写盘失败）都降级为告警，不中止 Composer、不回滚已安装的后端载荷；告警带固定前缀 `[sandadmin]` 和恢复命令 `composer run-script sand:publish`（由宿主 Sand Core 提供）。
+
+前端目标目录已存在同名文件时按内容判定：与发布源逐字节相同视为已发布并补写清单；内容不同才拒绝，并列出具体文件。已登记且被本地修改的文件在更新时跳过覆盖并汇总报告，新版本不再提供的文件按原清单哈希校验未改动后才删除。
+
+| 环境变量 | 取值 | 作用 |
+| --- | --- | --- |
+| `SAND_FRONTEND_PUBLISH` | 未设置 | 默认行为，按清单发布 |
+| `SAND_FRONTEND_PUBLISH` | `skip` | 跳过前端发布，只安装后端载荷 |
+| `SAND_FRONTEND_PUBLISH` | `force` | 跳过修改校验、强制重发布并重建清单（丢弃本地前端改动） |
+
+前端目标目录优先取宿主 `composer.json` 的 `extra.sandadmin.frontend-path`；未声明时回退“宿主目录名为 `server` 则取同级 `sandadmin-artd`”的启发式。目标必须位于宿主项目父级目录之内且路径不含符号链接，否则拒绝发布并提示声明该配置。
+
+后端载荷 `plugin/sandpackage/config/` 仅首次安装写入，后续更新不覆盖宿主定制。卸载只移除安装记录登记且内容未变的文件及因此变空的目录，未登记或已修改的文件一律保留并在告警中列出。
 
 发布成功后，宿主应有 `server/plugin/sandpackage/`，前端目录应有 `.sand-package-source-manifest.json` 和 `src/views/plugin/sandpackage/`。这只确认源码发布；服务启动、登录及 ZIP 插件安装另按[宿主首次安装指南](https://github.com/supdger/sandadmin/wiki/getting-started)和[仓库插件分发](https://github.com/supdger/sandadmin/wiki/repository-plugin-distribution)操作。管理端运行条件沿用 [Sand Core](https://github.com/supdger/sand-core) 的 Node.js/pnpm 要求和宿主锁文件。
 
