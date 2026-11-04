@@ -130,34 +130,90 @@ final class DependencyCommandSupport
             return null;
         }
         $githubTouched = preg_match('/github\.com/i', $outputTail) === 1;
+        // 1) GitHub API 限额：优先按输出/响应头推算剩余等待，推算不出不给数字。
         if (preg_match('/rate.?limit|API limit|exceeded/i', $outputTail) === 1 && $githubTouched) {
-            $minutes = self::githubRateLimitResetMinutes();
-            $wait = $minutes === null ? '通常 1 小时内自动恢复' : '约 ' . $minutes . ' 分钟后自动恢复';
-            return 'GitHub 访问次数已用完（未配置令牌时每小时限 60 次），' . $wait
-                . '后可一键重试；也可在宿主 Composer 中配置 GitHub 令牌（composer config -g github-oauth.github.com <令牌>）后重试';
+            $minutes = self::githubRateLimitWaitMinutes($outputTail) ?? self::githubRateLimitResetMinutes();
+            $wait = $minutes === null
+                ? 'GitHub 访问次数用完（未配置令牌时每小时限 60 次），恢复后可一键重试'
+                : 'GitHub 访问次数用完，约 ' . $minutes . ' 分钟后可重试';
+            return $wait . '；也可在宿主 Composer 中配置 GitHub 令牌（composer config -g github-oauth.github.com <令牌>）';
         }
-        if ($githubTouched
-            && preg_match('/timed? ?out|Failed to connect|Could not resolve|Connection refused|unreachable|reset by peer|403|429|Forbidden|authentication failed/i', $outputTail) === 1) {
-            return '网络连接 GitHub 失败、超时或被拒绝，请检查宿主网络与代理设置后重试';
+        // 2) 磁盘空间 / 目录权限
+        if (preg_match('/No space left on device|disk quota exceeded|Permission denied|EACCES|EPERM|read.?only file system|failed to create director|cannot create director|mkdir\(\).{0,40}denied|file_put_contents\(\).{0,60}(denied|failed)/is', $outputTail) === 1) {
+            return '磁盘空间不足或依赖目录没有写入权限，请检查宿主磁盘空间与目录属主权限后重试';
         }
-        if ($type === 'composer') {
-            if (preg_match('/timed? ?out|Failed to connect|Could not resolve|Connection refused|unreachable|failed to open stream/i', $outputTail) === 1
-                && preg_match('/packagist|mirror|repo\.|composer/i', $outputTail) === 1) {
-                return '无法连接 Composer 依赖仓库，请检查网络、稍后重试，或为依赖命令配置可用的 Composer 镜像';
+        // 3) 依赖版本无法解析（composer 冲突 / npm 版本缺失）
+        if ($type === 'composer'
+            && preg_match('/your requirements could not be resolved|Can only install one of|Root composer\.json requires|requires? [\w\-\.\/]+ -> |conflicts? with|No matching version|not found in/i', $outputTail) === 1) {
+            return '插件声明的 PHP 依赖版本无法满足，请核对插件与宿主版本兼容性';
+        }
+        if ($type !== 'composer'
+            && preg_match('/ERESOLVE|No matching version|notarget|unable to resolve|404/i', $outputTail) === 1) {
+            return '前端依赖版本无法解析，请核对插件声明的依赖版本与仓库可用性';
+        }
+        // 4) 网络不可达 / 镜像不可用（curl 6/7/28、域名解析失败、连接被拒、超时等）
+        if (self::isNetworkFailure($outputTail)) {
+            if ($githubTouched) {
+                return '网络连接 GitHub 失败、超时或被拒绝，请检查宿主网络与代理设置后重试';
             }
-            if (preg_match('/requires? .* -> |your requirements could not be resolved|not found in|No matching version/i', $outputTail) === 1) {
-                return '插件声明的 PHP 依赖版本无法满足，请核对插件与宿主版本兼容性';
+            if ($type === 'composer') {
+                return '无法连接 Composer 依赖仓库或镜像，请检查网络后重试，或为依赖命令配置可用的 Composer 镜像';
             }
-            return null;
-        }
-        if (preg_match('/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|timed? ?out/i', $outputTail) === 1) {
             return '网络连接前端依赖仓库失败或超时，请检查网络或 npm/pnpm 镜像源后重试';
         }
-        if (preg_match('/EACCES|EPERM/i', $outputTail) === 1) {
-            return '前端依赖目录权限不足，请检查前端目录属主与写权限后重试';
+        return null;
+    }
+
+    /**
+     * 依赖命令输出尾部的网络类失败判定：curl 6（域名解析）、7（连接失败）、
+     * 28（超时）等传输错误，以及 npm/pnpm 的网络错误码。
+     */
+    private static function isNetworkFailure(string $outputTail): bool
+    {
+        return preg_match(
+            '/curl error (?:6|7|28|35|52|55|56)\b|Could not resolve host|Failed to connect|Could not connect|connect failed|Connection refused|connect(?:ion)? timed? ?out|temporary failure in name resolution|Failed to open stream|network is unreachable|reset by peer|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|403 Forbidden|authentication failed|502 Bad Gateway|503 Service Unavailable/i',
+            $outputTail,
+        ) === 1;
+    }
+
+    /**
+     * 未能归类时给管理员的最后一截原始输出摘录（已在采集时脱敏）。
+     * 返回 null 表示没有可用输出。
+     */
+    public static function failureExcerpt(string $outputTail): ?string
+    {
+        $text = trim(preg_replace('/\s+/u', ' ', $outputTail) ?? '');
+        if ($text === '') {
+            return null;
         }
-        if (preg_match('/ERESOLVE|404|No matching version|notarget/i', $outputTail) === 1) {
-            return '前端依赖版本无法解析，请核对插件声明的依赖版本与仓库可用性';
+        return mb_strlen($text) > 200 ? '…' . mb_substr($text, -200) : $text;
+    }
+
+    /**
+     * 从依赖命令输出尾部推算 GitHub 限额的重置等待分钟数：
+     * X-RateLimit-Reset 时间戳、Retry-After 秒数、「N 分钟后」与「某时间点」
+     * 四类报文；都推不出时返回 null，由调用方回退到 /rate_limit 探测或省略数字。
+     */
+    public static function githubRateLimitWaitMinutes(string $outputTail): ?int
+    {
+        if (preg_match('/rate.?limit.?reset["\'\s:=]+?(\d{9,13})/i', $outputTail, $m) === 1) {
+            $ts = (int) $m[1];
+            if ($ts > 9999999999) {
+                $ts = intdiv($ts, 1000);
+            }
+            return max(1, (int) ceil(($ts - time()) / 60));
+        }
+        if (preg_match('/retry.?after["\'\s:=]+?(\d{2,7})\b/i', $outputTail, $m) === 1) {
+            return max(1, (int) ceil(((int) $m[1]) / 60));
+        }
+        if (preg_match('/(?:try again|retry|wait|after)\D{0,20}?(\d{1,4})\s*(?:minutes?|分钟)/i', $outputTail, $m) === 1) {
+            return max(1, (int) $m[1]);
+        }
+        if (preg_match('/(?:until|at)\D{0,20}?(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?)/i', $outputTail, $m) === 1) {
+            $ts = strtotime($m[1]);
+            if (is_int($ts) && $ts > time()) {
+                return max(1, (int) ceil(($ts - time()) / 60));
+            }
         }
         return null;
     }

@@ -1010,6 +1010,11 @@
     type CleanupResult
   } from '../api/index'
   import { checkVersionCompatibility } from './version-compatibility'
+  import {
+    installOutcomeReason,
+    isUncertainInstallError,
+    pollInstallOutcome
+  } from './dependency-chain'
   import InstallForm from './install-box.vue'
   import TerminalBox from './terminal.vue'
   import SystemUpdate from './system-update.vue'
@@ -1873,18 +1878,33 @@
     if (!acquireLocalWrite('install')) return
 
     try {
-      const result = await sandpackageApi.installApp({ appName: record.app })
-      if (result.state === 1) {
+      let installed = false
+      try {
+        const result = await sandpackageApi.installApp({ appName: record.app })
+        installed = result.state === 1
+      } catch (error: unknown) {
+        // 超时/断连不代表服务端停止安装：PHP 会继续完成登记，交给轮询裁决；
+        // 业务拒绝沿用 http 工具已给出的提示，不再轮询。
+        if (!isUncertainInstallError(error)) throw error
+      }
+      if (installed) {
         ElMessage.success('安装成功')
-      } else if (
-        result.state === 4 ||
-        result.composer_dependent_wait_install === 1 ||
-        result.npm_dependent_wait_install === 1
-      ) {
-        const completed = await runDependencyChain(record.app, record.title || record.app)
-        if (completed) ElMessage.success('安装成功')
       } else {
-        ElMessage.warning(result.last_error || result.stage_label || '安装未完成，请查看插件状态')
+        const outcome = await pollInstallOutcome({
+          app: record.app,
+          refreshRows: getList,
+          readRows: () => installList.value
+        })
+        if (outcome.status === 'wait_dependencies') {
+          const completed = await runDependencyChain(record.app, record.title || record.app)
+          if (completed) ElMessage.success('安装成功')
+        } else if (outcome.status === 'installed') {
+          ElMessage.success('安装成功')
+        } else if (outcome.status === 'failed') {
+          ElMessage.warning(installOutcomeReason(outcome.row, '安装未完成，请查看插件状态'))
+        } else {
+          ElMessage.warning('安装请求未及时返回，服务端可能仍在执行；请到插件管理查看进度')
+        }
       }
     } catch {
       // Error already handled by http utility
@@ -2824,29 +2844,53 @@
         )
       }
 
-      await sandpackageApi.installApp({
-        appName: refreshed.plugin.app,
-        confirmation:
-          selectedAction === 'upgrade'
-            ? `UPGRADE ${refreshed.plugin.app}@${fromVersion}->${refreshed.item.version}`
-            : undefined
+      try {
+        await sandpackageApi.installApp({
+          appName: refreshed.plugin.app,
+          confirmation:
+            selectedAction === 'upgrade'
+              ? `UPGRADE ${refreshed.plugin.app}@${fromVersion}->${refreshed.item.version}`
+              : undefined
+        })
+      } catch (error: unknown) {
+        // 超时/断连不代表服务端停止安装：PHP 会继续完成登记。
+        // 业务拒绝照常中止；结果未知的场景交给服务端状态轮询裁决。
+        if (!isUncertainInstallError(error)) throw error
+      }
+
+      // 安装请求可能超时，但服务端仍在后台完成登记；依赖链入队条件只认
+      // 服务端 info.ini 的 *_dependent_wait_install 标志与 state，不依赖
+      // 本次请求的客户端成败或返回时序。
+      const installOutcome = await pollInstallOutcome({
+        app: refreshed.plugin.app,
+        refreshRows: getList,
+        readRows: () => installList.value
       })
-      await Promise.all([getList(), fetchRepositoryCatalog()])
+      await fetchRepositoryCatalog()
 
       // 安装/升级完成后自动执行依赖链（后端 composer → 前端 npm），
       // 失败时终端面板弹出并给出原因与一键重试，链内已刷新列表。
-      const pendingRow = installList.value.find((row) => row.app === refreshed.plugin.app)
-      if (
-        pendingRow &&
-        (pendingRow.composer_dependent_wait_install === 1 ||
-          pendingRow.npm_dependent_wait_install === 1)
-      ) {
+      if (installOutcome.status === 'wait_dependencies') {
         const completed = await runDependencyChain(
           refreshed.plugin.app,
           refreshed.plugin.title || refreshed.plugin.app
         )
         if (!completed) return
         await Promise.all([getList(), fetchRepositoryCatalog()])
+      }
+      if (installOutcome.status === 'failed') {
+        repositoryActionError.value = installOutcomeReason(
+          installOutcome.row,
+          '安装未完成，请到插件管理查看'
+        )
+        ElMessage.warning('插件尚未确认安装完成，请到插件管理查看')
+        return
+      }
+      if (installOutcome.status === 'pending') {
+        repositoryActionError.value =
+          '安装请求未及时返回，服务端可能仍在后台执行；请到插件管理查看进度'
+        ElMessage.warning('安装状态未确认，请到插件管理查看')
+        return
       }
 
       const installed = installList.value.find((row) => row.app === refreshed.plugin.app)

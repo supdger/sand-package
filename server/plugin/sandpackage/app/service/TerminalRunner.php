@@ -233,8 +233,14 @@ PHP;
             $hint = DependencyCommandSupport::failureHint($this->callback ?? '', $this->outputTail);
             if ($hint !== null) {
                 $detail .= '；【原因】' . $hint;
-            } elseif ($error instanceof \plugin\sandadmin\exception\ApiException) {
-                $detail .= '；【详情】' . mb_substr($error->getMessage(), 0, 240);
+            } else {
+                if ($error instanceof \plugin\sandadmin\exception\ApiException) {
+                    $detail .= '；【详情】' . mb_substr($error->getMessage(), 0, 240);
+                }
+                $excerpt = DependencyCommandSupport::failureExcerpt($this->outputTail);
+                if ($excerpt !== null) {
+                    $detail .= '；【输出摘录】' . $excerpt;
+                }
             }
             yield $this->output($detail);
             yield $this->output('exec-error');
