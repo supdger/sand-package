@@ -235,10 +235,12 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
   })
 
   /**
-   * 计划阶段失败的一键重试输入：依赖消解失败（仓库不可用/依赖被拒/
-   * dep 安装中断）时，重试应重跑整个编排而非只续依赖链。
+   * 计划阶段失败的一键重试入口：依赖消解失败（仓库不可用/依赖被拒/
+   * dep 安装中断）时，重试应重跑完整编排而非只续依赖链。start 与行级
+   * 续做各自登记自己的重入口——续做重试只消解依赖并按快照续链，绝不
+   * 重发目标安装请求（目标可能还停在 state=4）。
    */
-  const planRetryInput = ref<InstallOrchestrationInput | null>(null)
+  const planRetryHandler = ref<(() => Promise<InstallOrchestrationOutcome | null>) | null>(null)
 
   /** 收敛收尾：依赖失败登记 failure 并请求弹出面板；其余 outcome 原样返回。 */
   const settle = (outcome: InstallOrchestrationOutcome): InstallOrchestrationOutcome => {
@@ -263,7 +265,7 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
       }
     }
     failure.value = null
-    planRetryInput.value = input
+    planRetryHandler.value = () => start(input)
     runningApp.value = input.app
     // 断点记录先于安装请求写入：整页 reload 发生在安装任何阶段都能续跑。
     persistSession(input.app, input.title, 'install')
@@ -293,8 +295,8 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
   const retryChain = async (): Promise<InstallOrchestrationOutcome | null> => {
     const current = failure.value
     if (!current || runningApp.value !== '') return null
-    if (current.plan === true && planRetryInput.value !== null) {
-      return start(planRetryInput.value)
+    if (current.plan === true && planRetryHandler.value !== null) {
+      return planRetryHandler.value()
     }
     runningApp.value = current.app
     persistSession(current.app, current.title, 'chain')
@@ -316,10 +318,13 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
   }
 
   /**
-   * 行级「一键续做」：无需 session 记录，直接把等待依赖安装的行
+   * 行级「一键续做」：无需 session 记录，对等待依赖安装的行
    * （composer_dependent_wait_install / npm_dependent_wait_install=1）
-   * 重新入队剩余依赖任务。复用同一 runningApp 单飞与在途任务 attach，
-   * 重复点击与并发触发安全。
+   * 走完整续跑编排——先按计划端点重算并补齐未满足的插件依赖（例如升级
+   * 中断在依赖等待、已装依赖仍低于目标要求的场景），再按服务端行快照
+   * 裁决续跑剩余依赖任务；绝不重发目标安装请求。install 注入仅供依赖
+   * 消解使用（dep 需要市场升级/新装时经它发起，restart=false）。
+   * 复用同一 runningApp 单飞与在途任务 attach，重复点击与并发触发安全。
    */
   const resumeChainForRow = async (
     app: string,
@@ -327,9 +332,18 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
   ): Promise<InstallOrchestrationOutcome | null> => {
     if (runningApp.value !== '') return null
     runningApp.value = app
-    persistSession(app, title, 'chain')
+    planRetryHandler.value = () => resumeChainForRow(app, title)
+    persistSession(app, title, 'install')
     try {
-      const outcome = await runDependencyChainLoop(chainDeps(), app, title, rows.value)
+      const outcome = await resumeInstallOrchestration(
+        chainDeps(
+          (depApp, confirmation, restart) =>
+            sandpackageApi.installApp({ appName: depApp, confirmation, restart }),
+          (phase) => persistSession(app, title, phase),
+          (queue, index) => persistSession(app, title, 'install', queue, index)
+        ),
+        { app, title }
+      )
       const settled = settle(outcome)
       if (settled.kind === 'installed') failure.value = null
       return settled
@@ -358,10 +372,14 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
       for (const session of pending) {
         if (runningApp.value !== '') break
         runningApp.value = session.app
+        // 整页 reload 也可能落在依赖消解中途（已装依赖仍不满足）：install
+        // 注入仅供 dep 消解发起市场升级/新装；目标自身绝不重发安装请求。
+        planRetryHandler.value = () => resumeChainForRow(session.app, session.title)
         try {
           const outcome = await resumeInstallOrchestration(
             chainDeps(
-              undefined,
+              (depApp, confirmation, restart) =>
+                sandpackageApi.installApp({ appName: depApp, confirmation, restart }),
               (phase) => persistSession(session.app, session.title, phase),
               (queue, index) => persistSession(session.app, session.title, 'install', queue, index)
             ),
