@@ -27,6 +27,26 @@ final class DependencyCommandSupport
     public const OUTPUT_TAIL_BYTES = 16384;
 
     /**
+     * 失败详情中的「安装操作锁冲突」分类记号。flock 非阻塞冲突经
+     * OperationLockException 携带到终端失败详情里，前端编排器按该记号
+     * 判定瞬态并在预算内重试入队，不裸匹配中文错误文案。
+     */
+    public const LOCK_CONFLICT_TOKEN = '【锁冲突】';
+
+    /**
+     * 锁冲突失败详情片段：安装/卸载/恢复事务仍在锁内，解锁后命令即可
+     * 重试。消息体沿用原锁提示，统一带分类记号与重试指引。
+     */
+    public static function lockConflictDetail(string $message): string
+    {
+        $text = trim($message);
+        if ($text === '') {
+            $text = '安装操作仍在执行';
+        }
+        return self::LOCK_CONFLICT_TOKEN . mb_substr($text, 0, 240) . '，请稍后重试';
+    }
+
+    /**
      * 准备依赖命令使用的独立 COMPOSER_HOME 并返回其路径。
      *
      * @param string $homeDir               目标目录（每次重写 config.json）
@@ -151,7 +171,11 @@ final class DependencyCommandSupport
             && preg_match('/ERESOLVE|No matching version|notarget|unable to resolve|404/i', $outputTail) === 1) {
             return '前端依赖版本无法解析，请核对插件声明的依赖版本与仓库可用性';
         }
-        // 4) 网络不可达 / 镜像不可用（curl 6/7/28、域名解析失败、连接被拒、超时等）
+        // 4) Composer secure-http 策略在连接前拒绝 http 协议的仓库/镜像地址
+        if (preg_match('/does not allow connections? to https?:\/\/|secure-http/i', $outputTail) === 1) {
+            return '依赖仓库或镜像使用了 Composer 安全策略不允许的 http 地址，请改用 https 镜像地址后重试，或检查依赖仓库配置';
+        }
+        // 5) 网络不可达 / 镜像不可用（curl 6/7/28、域名解析失败、连接被拒、超时等）
         if (self::isNetworkFailure($outputTail)) {
             if ($githubTouched) {
                 return '网络连接 GitHub 失败、超时或被拒绝，请检查宿主网络与代理设置后重试';
