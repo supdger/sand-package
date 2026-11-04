@@ -3,6 +3,7 @@
 namespace plugin\sandpackage\app\logic;
 
 use Throwable;
+use RuntimeException;
 use Saithink\Saipackage\service\Server;
 use Saithink\Saipackage\service\Filesystem;
 use Saithink\Saipackage\service\Depends;
@@ -2943,8 +2944,17 @@ class InstallLogic
     public function beginDependencyCommand(string $type): string
     {
         if (!in_array($type, ['npm', 'composer'], true)) throw new ApiException('依赖任务类型错误');
-        $this->lock();
         try {
+            $this->lock();
+        } catch (ApiException $error) {
+            // 上次依赖命令异常退出可能留下宿主级守卫记录（进程标记或恢复检查点）。
+            // 仅当恢复检查自身能证明原进程已退出时才自动续跑检查点化恢复，
+            // 让失败后的重试无需人工清理；证明不了的状态仍按原守卫拒绝。
+            if (!$this->resolveStaleDependencyScene()) throw $error;
+            $this->lock();
+        }
+        try {
+            $this->dropStaleDependencyNonce();
             $this->assertOrdinaryState();
             $info = $this->getInfo();
             if ((int) ($info['state'] ?? -1) !== self::DEPENDENT_WAIT_INSTALL || empty($info[$type . '_dependent_wait_install'])) {
@@ -2975,6 +2985,70 @@ class InstallLogic
     public function releaseDependencyCommand(): void
     {
         $this->unlock();
+    }
+
+    /**
+     * 依赖命令的宿主级残留（locks/host-upstream.process.json 进程标记、
+     * host-payload/*.dependency-recovery.json 恢复检查点）会让 lock() 拒绝一切
+     * 常规操作。这里只在恢复检查自身能证明原进程已退出（inspect 通过、动作是
+     * reset-dependency-waiting / finish-dependency-cleanup）时自动续跑既有
+     * 检查点化恢复并确认；任何证明不了、正在恢复其他阶段或需要管理员决定的
+     * 现场都返回 false，由调用方保留原守卫拒绝。
+     */
+    private function resolveStaleDependencyScene(): bool
+    {
+        try {
+            $apps = [];
+            foreach (glob($this->installDir . 'locks/host-*.json') ?: [] as $path) {
+                if (basename($path) !== 'host-upstream.process.json') return false;
+                $raw = is_file($path) ? file_get_contents($path) : false;
+                $record = is_string($raw) ? json_decode($raw, true) : null;
+                $app = is_array($record) ? ($record['app'] ?? null) : null;
+                if (!is_string($app) || preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $app) !== 1) return false;
+                $apps[$app] = $app;
+            }
+            foreach (glob($this->installDir . 'host-payload/*.dependency-recovery.json') ?: [] as $path) {
+                if (preg_match('/^([a-z][a-z0-9-]{1,63})\.dependency-recovery\.json$/D', basename($path), $match) === 1) {
+                    $apps[$match[1]] = $match[1];
+                }
+            }
+            if ($apps === []) return false;
+            foreach ($apps as $app) {
+                $logic = $app === $this->appName ? $this : new self($app);
+                $inspection = $logic->inspectDependencyRecovery();
+                $actions = $inspection['actions'] ?? null;
+                if ($actions !== ['reset-dependency-waiting'] && $actions !== ['finish-dependency-cleanup']) {
+                    return false;
+                }
+                $logic->recoverDependencyCommand('RECOVER DEPENDENCY ' . $app . ' ' . $inspection['fingerprint']);
+            }
+            return true;
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * 依赖命令的 nonce 只有在进程标记写入之后才可能有活进程；拿到宿主锁而
+     * 标记文件不存在，说明上次命令在登记 nonce 之后、进程标记写入之前中断，
+     * 或进程已确认回收但登记清理未完成。此类 nonce 是死残留，按失败收尾清掉，
+     * 不再拦住重试；标记存在时交给 resolveStaleDependencyScene 判定。
+     */
+    private function dropStaleDependencyNonce(): void
+    {
+        $info = $this->getInfo();
+        $nonce = $info['dependency_command_nonce'] ?? null;
+        if (!is_string($nonce) || $nonce === '') return;
+        $marker = $this->installDir . 'locks/host-upstream.process.json';
+        $this->assertSafePath($marker);
+        if (file_exists($marker)) return;
+        unset($info['dependency_command_nonce']);
+        $info['dependency_failed_nonce'] = $nonce;
+        unset($info['dependency_completed_nonce']);
+        if (!array_key_exists('dependency_restart_pending', $info)) {
+            $info['dependency_restart_pending'] = 2;
+        }
+        $this->saveDependencyInfo($info);
     }
 
     private function assertCommandOwner(string $type, ?string $nonce): void
@@ -3082,7 +3156,26 @@ class InstallLogic
         $info['dependency_failed_nonce'] = $nonce;
         unset($info['dependency_completed_nonce']);
         $this->saveDependencyInfo($info);
-        $this->closeReapedDependencyMarker($nonce);
+        try {
+            $this->closeReapedDependencyMarker($nonce);
+        } catch (Throwable) {
+            // 失败登记已持久化；残留的已回收进程标记不得继续拦住重试。
+            // 仅移除与本任务 app+nonce 一致且 phase=reaped 的标记，其他现场保留给恢复检查。
+            try {
+                $path = $this->installDir . 'locks/host-upstream.process.json';
+                $this->assertSafePath($path);
+                if (is_file($path) && filesize($path) <= 4194304) {
+                    $record = json_decode((string) file_get_contents($path), true, 32);
+                    if (is_array($record) && ($record['app'] ?? null) === $this->appName
+                        && ($record['nonce'] ?? null) === $nonce && ($record['phase'] ?? null) === 'reaped'
+                        && !unlink($path)) {
+                        throw new RuntimeException('依赖进程标记未能清理');
+                    }
+                }
+            } catch (Throwable) {
+                // 清理失败保留现场，由依赖恢复检查入口接管，不掩盖原失败登记。
+            }
+        }
         return true;
     }
 

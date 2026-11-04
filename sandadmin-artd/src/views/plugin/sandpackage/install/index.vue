@@ -651,8 +651,14 @@
       </section>
     </ElDrawer>
 
-    <!-- 终端弹窗 -->
-    <TerminalBox ref="terminalRef" @success="getList" />
+    <!-- 终端弹窗：依赖任务失败时才自动弹出，附通俗原因与一键重试 -->
+    <TerminalBox
+      ref="terminalRef"
+      :chain-failure="dependencyChainFailure"
+      :chain-retrying="dependencyChainRunning !== ''"
+      @success="getList"
+      @retry-chain="retryDependencyChain"
+    />
 
     <!-- 异常插件残留清理 -->
     <ElDialog
@@ -1057,6 +1063,14 @@
     open: () => void
     frontInstall: (extend: string) => void
     backendInstall: (extend: string) => void
+    runDependencyTask: (kind: 'composer' | 'npm', extend: string) => Promise<TaskStatus>
+  }
+
+  interface DependencyChainFailure {
+    app: string
+    title: string
+    label: string
+    reason: string
   }
 
   interface RepositoryDocumentTarget {
@@ -1093,6 +1107,8 @@
   const terminalStore = useTerminalStore()
   const localWriteOwner = ref<LocalWriteOwner>('')
   const terminalLaunchPending = ref(false)
+  const dependencyChainRunning = ref('')
+  const dependencyChainFailure = ref<DependencyChainFailure | null>(null)
   const cleanupVisible = ref(false)
   const cleanupTargetApp = ref('')
   const cleanupTargetTitle = ref('')
@@ -1860,8 +1876,13 @@
       const result = await sandpackageApi.installApp({ appName: record.app })
       if (result.state === 1) {
         ElMessage.success('安装成功')
-      } else if (result.state === 4) {
-        ElMessage.info('文件已部署，等待完成依赖安装')
+      } else if (
+        result.state === 4 ||
+        result.composer_dependent_wait_install === 1 ||
+        result.npm_dependent_wait_install === 1
+      ) {
+        const completed = await runDependencyChain(record.app, record.title || record.app)
+        if (completed) ElMessage.success('安装成功')
       } else {
         ElMessage.warning(result.last_error || result.stage_label || '安装未完成，请查看插件状态')
       }
@@ -2314,6 +2335,99 @@
     terminalRef.value?.open()
   }
 
+  // ========== 一键安装依赖链 ==========
+  // 安装完成后自动依次执行后端 composer、前端 npm 依赖任务，无需用户
+  // 手动点“处理依赖”；仅失败时弹出终端面板，给出通俗原因与一键重试。
+
+  const dependencyTaskLabel = (kind: 'composer' | 'npm'): string =>
+    kind === 'composer' ? '后端依赖（composer）' : '前端依赖（npm/pnpm）'
+
+  const dependencyFailureReason = (app: string, kind: 'composer' | 'npm'): string => {
+    const extend = 'module-install:' + app
+    const prefix = kind === 'composer' ? 'composer.' : 'web-install.'
+    const task = [...terminalStore.taskList]
+      .reverse()
+      .find(
+        (item) =>
+          item.extend === extend &&
+          item.command.startsWith(prefix) &&
+          item.status === TaskStatus.FAILED
+      )
+    const messages = (task?.message ?? [])
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+    const hinted = messages.filter((line) => line.includes('【原因】') || line.includes('【详情】'))
+    const last = hinted.length > 0 ? hinted[hinted.length - 1] : messages[messages.length - 1]
+    return last && last !== '' ? last : '请查看终端输出中的具体错误'
+  }
+
+  /**
+   * 依次执行该插件剩余的依赖任务。每步成功后刷新本地状态，由后端登记的
+   * *_dependent_wait_install 标志决定下一步；返回是否全部完成。
+   */
+  const runDependencyChain = async (app: string, title: string): Promise<boolean> => {
+    dependencyChainFailure.value = null
+    dependencyChainRunning.value = app
+    try {
+      for (let step = 0; step < 8; step++) {
+        await getList()
+        const row = installList.value.find((item) => item.app === app)
+        if (!row) {
+          dependencyChainFailure.value = {
+            app,
+            title,
+            label: '依赖',
+            reason: '无法读取插件当前状态，请刷新后重试'
+          }
+          terminalRef.value?.open()
+          return false
+        }
+        const kind: 'composer' | 'npm' | null =
+          row.composer_dependent_wait_install === 1
+            ? 'composer'
+            : row.npm_dependent_wait_install === 1
+              ? 'npm'
+              : null
+        if (kind === null) return true
+        const status =
+          (await terminalRef.value?.runDependencyTask(kind, 'module-install:' + app)) ??
+          TaskStatus.FAILED
+        if (status !== TaskStatus.SUCCESS) {
+          dependencyChainFailure.value = {
+            app,
+            title,
+            label: dependencyTaskLabel(kind),
+            reason: dependencyFailureReason(app, kind)
+          }
+          terminalRef.value?.open()
+          return false
+        }
+      }
+      dependencyChainFailure.value = {
+        app,
+        title,
+        label: '依赖',
+        reason: '依赖任务轮次异常，请到插件管理确认插件状态'
+      }
+      terminalRef.value?.open()
+      return false
+    } finally {
+      dependencyChainRunning.value = ''
+    }
+  }
+
+  const retryDependencyChain = (): void => {
+    const failure = dependencyChainFailure.value
+    if (!failure || dependencyChainRunning.value !== '') return
+    void runDependencyChain(failure.app, failure.title).then(async (completed) => {
+      await Promise.all([getList(), fetchRepositoryCatalog()])
+      if (completed) {
+        dependencyChainFailure.value = null
+        ElMessage.success(`${failure.title || failure.app} 依赖安装完成`)
+      }
+    })
+  }
+
   const columns: ColumnOption[] = [
     { prop: 'app', label: '插件标识', width: 120, useSlot: true },
     { prop: 'title', label: '插件名称', width: 150 },
@@ -2431,7 +2545,8 @@
       localWriteBusy.value ||
       recoveryOperationBusy.value ||
       terminalOperationBusy.value ||
-      cleanupOperationBusy.value
+      cleanupOperationBusy.value ||
+      dependencyChainRunning.value !== ''
   )
   const pluginOperationBusy = computed(() => existingPluginOperationBusy.value || systemUpdateBusy.value)
   const repositoryWritesBlocked = computed(
@@ -2717,6 +2832,22 @@
             : undefined
       })
       await Promise.all([getList(), fetchRepositoryCatalog()])
+
+      // 安装/升级完成后自动执行依赖链（后端 composer → 前端 npm），
+      // 失败时终端面板弹出并给出原因与一键重试，链内已刷新列表。
+      const pendingRow = installList.value.find((row) => row.app === refreshed.plugin.app)
+      if (
+        pendingRow &&
+        (pendingRow.composer_dependent_wait_install === 1 ||
+          pendingRow.npm_dependent_wait_install === 1)
+      ) {
+        const completed = await runDependencyChain(
+          refreshed.plugin.app,
+          refreshed.plugin.title || refreshed.plugin.app
+        )
+        if (!completed) return
+        await Promise.all([getList(), fetchRepositoryCatalog()])
+      }
 
       const installed = installList.value.find((row) => row.app === refreshed.plugin.app)
       const refreshedAfterInstall = findRepositorySelection(

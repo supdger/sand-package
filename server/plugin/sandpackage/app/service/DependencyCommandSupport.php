@@ -1,0 +1,238 @@
+<?php
+
+declare(strict_types=1);
+
+namespace plugin\sandpackage\app\service;
+
+use RuntimeException;
+use Throwable;
+
+/**
+ * 依赖命令的进程环境与失败诊断支撑。
+ *
+ * 后端 composer 依赖步骤此前直接继承宿主环境：Packagist 元数据为 GitHub 托管包
+ * 给出的 dist 地址是 api.github.com/zipball，匿名请求每小时只有 60 次额度，
+ * 依赖包稍多即撞限额失败。这里为依赖命令准备独立的 COMPOSER_HOME：默认把
+ * packagist 指到自带 dist 文件的 Composer 镜像，使依赖解析与下载完全不请求
+ * api.github.com；宿主在项目 composer.json 或全局配置里显式声明过
+ * packagist.org 仓库时尊重其选择、不注入镜像，宿主的私有仓库凭证
+ * （auth.json）与原全局配置（config.json）一并继承，不丢失。
+ */
+final class DependencyCommandSupport
+{
+    /** 默认 Composer 镜像：腾讯云镜像自带 dist 文件，不经 api.github.com。 */
+    public const DEFAULT_PACKAGIST_MIRROR = 'https://mirrors.cloud.tencent.com/composer/';
+
+    /** 失败诊断读取的进程输出尾部大小。 */
+    public const OUTPUT_TAIL_BYTES = 16384;
+
+    /**
+     * 准备依赖命令使用的独立 COMPOSER_HOME 并返回其路径。
+     *
+     * @param string $homeDir               目标目录（每次重写 config.json）
+     * @param string $projectComposerJson   宿主 composer.json 路径（不存在也可）
+     * @param string|null $realComposerHome 宿主真实 COMPOSER_HOME，用于继承配置与凭证
+     * @param string|null $mirror           packagist 镜像地址；空值则不注入镜像
+     */
+    public static function prepareComposerHome(
+        string $homeDir,
+        string $projectComposerJson,
+        ?string $realComposerHome,
+        ?string $mirror
+    ): string {
+        $config = $realComposerHome !== null
+            ? self::readJsonObject($realComposerHome . '/config.json')
+            : [];
+        $authSource = $realComposerHome !== null && is_file($realComposerHome . '/auth.json')
+            ? $realComposerHome . '/auth.json'
+            : null;
+
+        if (!isset($config['config']) || !is_array($config['config'])) {
+            $config['config'] = [];
+        }
+        // dist 压缩包优先；禁用 GitHub API 元数据通道（vcs 场景回落 git 协议）。
+        $config['config']['preferred-install'] = 'dist';
+        $config['config']['use-github-api'] = false;
+        $config['config']['github-protocols'] = ['https'];
+
+        $project = self::readJsonObject($projectComposerJson);
+        $packagistPinned = array_key_exists('packagist.org', self::repositoriesOf($project))
+            || array_key_exists('packagist.org', self::repositoriesOf($config));
+        if (is_string($mirror) && $mirror !== '' && !$packagistPinned) {
+            if (!isset($config['repositories']) || !is_array($config['repositories'])) {
+                $config['repositories'] = [];
+            }
+            $config['repositories']['packagist.org'] = ['type' => 'composer', 'url' => $mirror];
+        }
+
+        if (!is_dir($homeDir) && !mkdir($homeDir, 0700, true) && !is_dir($homeDir)) {
+            throw new RuntimeException('依赖命令的 Composer 工作目录无法创建');
+        }
+        if (!is_dir($homeDir) || is_link($homeDir)) {
+            throw new RuntimeException('依赖命令的 Composer 工作目录不安全');
+        }
+        $body = json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            | JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR) . "\n";
+        self::writeAtomic($homeDir . '/config.json', $body, 0600);
+        if ($authSource !== null) {
+            $auth = file_get_contents($authSource);
+            if (is_string($auth) && $auth !== '') {
+                self::writeAtomic($homeDir . '/auth.json', $auth, 0600);
+            }
+        }
+        return $homeDir;
+    }
+
+    /**
+     * 定位宿主真实的 Composer 主目录，用于继承其全局配置与凭证。
+     *
+     * @param array<string,string> $env 宿主进程环境
+     */
+    public static function realComposerHome(array $env): ?string
+    {
+        $explicit = $env['COMPOSER_HOME'] ?? null;
+        if (is_string($explicit) && $explicit !== '' && is_dir($explicit)) {
+            return $explicit;
+        }
+        $home = $env['HOME'] ?? null;
+        if (!is_string($home) || $home === '') {
+            return null;
+        }
+        foreach ([$home . '/.composer', $home . '/.config/composer'] as $dir) {
+            if (is_dir($dir)) {
+                return $dir;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 依赖进程环境：继承宿主环境并注入隔离的 COMPOSER_HOME 与非交互标记。
+     *
+     * @param array<string,string> $baseEnv
+     * @return array<string,string>
+     */
+    public static function composerEnvironment(array $baseEnv, string $homeDir): array
+    {
+        $env = $baseEnv;
+        $env['COMPOSER_HOME'] = $homeDir;
+        $env['COMPOSER_NO_INTERACTION'] = '1';
+        return $env;
+    }
+
+    /**
+     * 把依赖命令的原始输出尾部翻译成管理员能直接处理的中文提示。
+     * 识别不了时返回 null，由调用方保留通用事件说明。
+     */
+    public static function failureHint(string $type, string $outputTail): ?string
+    {
+        if ($outputTail === '') {
+            return null;
+        }
+        $githubTouched = preg_match('/github\.com/i', $outputTail) === 1;
+        if (preg_match('/rate.?limit|API limit|exceeded/i', $outputTail) === 1 && $githubTouched) {
+            $minutes = self::githubRateLimitResetMinutes();
+            $wait = $minutes === null ? '通常 1 小时内自动恢复' : '约 ' . $minutes . ' 分钟后自动恢复';
+            return 'GitHub 访问次数已用完（未配置令牌时每小时限 60 次），' . $wait
+                . '后可一键重试；也可在宿主 Composer 中配置 GitHub 令牌（composer config -g github-oauth.github.com <令牌>）后重试';
+        }
+        if ($githubTouched
+            && preg_match('/timed? ?out|Failed to connect|Could not resolve|Connection refused|unreachable|reset by peer|403|429|Forbidden|authentication failed/i', $outputTail) === 1) {
+            return '网络连接 GitHub 失败、超时或被拒绝，请检查宿主网络与代理设置后重试';
+        }
+        if ($type === 'composer') {
+            if (preg_match('/timed? ?out|Failed to connect|Could not resolve|Connection refused|unreachable|failed to open stream/i', $outputTail) === 1
+                && preg_match('/packagist|mirror|repo\.|composer/i', $outputTail) === 1) {
+                return '无法连接 Composer 依赖仓库，请检查网络、稍后重试，或为依赖命令配置可用的 Composer 镜像';
+            }
+            if (preg_match('/requires? .* -> |your requirements could not be resolved|not found in|No matching version/i', $outputTail) === 1) {
+                return '插件声明的 PHP 依赖版本无法满足，请核对插件与宿主版本兼容性';
+            }
+            return null;
+        }
+        if (preg_match('/ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|network|timed? ?out/i', $outputTail) === 1) {
+            return '网络连接前端依赖仓库失败或超时，请检查网络或 npm/pnpm 镜像源后重试';
+        }
+        if (preg_match('/EACCES|EPERM/i', $outputTail) === 1) {
+            return '前端依赖目录权限不足，请检查前端目录属主与写权限后重试';
+        }
+        if (preg_match('/ERESOLVE|404|No matching version|notarget/i', $outputTail) === 1) {
+            return '前端依赖版本无法解析，请核对插件声明的依赖版本与仓库可用性';
+        }
+        return null;
+    }
+
+    /**
+     * GitHub 匿名限额的重置剩余分钟数。/rate_limit 端点本身不计入额度，
+     * 仅用于给管理员一个可执行的重试时间；探测失败返回 null。
+     */
+    public static function githubRateLimitResetMinutes(): ?int
+    {
+        if (!function_exists('file_get_contents') || ini_get('allow_url_fopen') === '') {
+            return null;
+        }
+        try {
+            $context = stream_context_create([
+                'http' => [
+                    'method' => 'GET',
+                    'timeout' => 5,
+                    'ignore_errors' => true,
+                    'header' => "User-Agent: SandPackage-dependency\r\nAccept: application/vnd.github+json\r\n",
+                ],
+            ]);
+            $raw = @file_get_contents('https://api.github.com/rate_limit', false, $context);
+            if (!is_string($raw) || $raw === '') {
+                return null;
+            }
+            $data = json_decode($raw, true, 32);
+            $reset = is_array($data) ? ($data['resources']['core']['reset'] ?? null) : null;
+            if (!is_int($reset) || $reset < 1) {
+                return null;
+            }
+            return max(1, (int) ceil(($reset - time()) / 60));
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    /** @return array<string,mixed> */
+    private static function readJsonObject(string $path): array
+    {
+        if ($path === '' || !is_file($path) || is_link($path) || filesize($path) > 8388608) {
+            return [];
+        }
+        $raw = file_get_contents($path);
+        $decoded = is_string($raw) ? json_decode($raw, true, 64) : null;
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /** @return array<string,mixed> */
+    private static function repositoriesOf(array $document): array
+    {
+        $repositories = $document['repositories'] ?? null;
+        return is_array($repositories) ? $repositories : [];
+    }
+
+    private static function writeAtomic(string $path, string $body, int $mode): void
+    {
+        $temporary = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
+        $handle = fopen($temporary, 'xb');
+        if ($handle === false) {
+            throw new RuntimeException('依赖命令配置暂存文件无法创建');
+        }
+        try {
+            if (fwrite($handle, $body) !== strlen($body) || !fflush($handle)) {
+                throw new RuntimeException('依赖命令配置暂存文件未持久化');
+            }
+            if (!chmod($temporary, $mode)) {
+                throw new RuntimeException('依赖命令配置暂存文件权限设置失败');
+            }
+        } finally {
+            fclose($handle);
+        }
+        if (!rename($temporary, $path)) {
+            unlink($temporary);
+            throw new RuntimeException('依赖命令配置无法保存');
+        }
+    }
+}
