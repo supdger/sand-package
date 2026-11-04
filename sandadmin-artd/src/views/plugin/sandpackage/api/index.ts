@@ -285,10 +285,15 @@ export default {
   },
 
   /**
-   * 安装插件
+   * 安装插件。安装含内嵌依赖插件链与宿主重载，远超 axios 默认 15s；
+   * 超时后服务端仍会继续完成登记，页面按服务端状态轮询收敛。
    */
   installApp(data: { appName: string; confirmation?: string }) {
-    return request.post<AppInfo>({ url: '/app/sandpackage/install/install', data })
+    return request.post<AppInfo>({
+      url: '/app/sandpackage/install/install',
+      data,
+      timeout: 300000
+    })
   },
 
   inspectExistingSchemaAttach(data: { appName: string; database: string }) {
