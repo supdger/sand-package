@@ -30,6 +30,8 @@ Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController:
 Route::post('/app/sandpackage/install/replaceFailedUpgradeCandidate', [plugin\sandpackage\app\controller\InstallController::class, 'replaceFailedUpgradeCandidate']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'retryFailedUpgrade']);
 Route::post('/app/sandpackage/install/retryFailedUpgrade', [plugin\sandpackage\app\controller\InstallController::class, 'retryFailedUpgrade']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
+Route::post('/app/sandpackage/install/inspectDependencies', [plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
 
 // Recovery surface of the upstream PostgreSQL lifecycle driver. These share the
 // InstallLogic used by `php webman sandpackage:recover`; the CLI is unchanged.

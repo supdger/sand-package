@@ -23,8 +23,11 @@
 
 export interface DependencyChainRow {
   app: string
+  title?: string
   state?: number
   version?: string
+  update?: number
+  upgrade_from_version?: string
   composer_dependent_wait_install?: number
   npm_dependent_wait_install?: number
   operation_pending?: number
@@ -170,6 +173,11 @@ export interface InstallChainFailure {
   label: string
   /** 终端输出归纳出的通俗原因。 */
   reason: string
+  /**
+   * 计划阶段（依赖消解）失败标记：此类失败不是「依赖任务执行」断点，
+   * 一键重试应重跑整个编排（重新读取依赖计划），而非只续依赖链。
+   */
+  plan?: boolean
 }
 
 /**
@@ -188,16 +196,99 @@ export type InstallOrchestrationOutcome =
 export interface InstallOrchestrationInput {
   app: string
   title: string
-  /** 升级确认串（install 走 UPGRADE 确认时传）。 */
+  /** 升级确认串（install 走 UPGRADE 确认时传，前端自动生成）。 */
   confirmation?: string
+  /**
+   * false 表示安装完成时不要求立即重载服务：依赖插件先于目标执行时传入，
+   * 链尾由目标安装（或其依赖任务收尾）统一重载一次。
+   */
+  restart?: boolean
+}
+
+/**
+ * 依赖计划项：inspectDependencies 只读计划经前端归一后的编排输入。
+ * - install：安装依赖候选（market 为空表示已暂存候选，直接用既有候选装）
+ * - upgrade：升级已安装依赖（market 必带目标版本与校验和）
+ * - resume：依赖安装已登记但依赖任务未完成，只需续跑它的依赖链
+ * - blocked：无法自动处理（仓库无满足版本、状态需人工恢复等），附通俗原因
+ */
+export interface DependencyPlanItem {
+  app: string
+  title: string
+  action: 'install' | 'upgrade' | 'resume' | 'blocked'
+  market: { version: string; sha256: string } | null
+  reason?: string
+}
+
+/** 依赖队列进度（sessionStorage 断点记录中的提示字段）。 */
+export interface DependencyQueueEntry {
+  app: string
+  title: string
+}
+
+/** 依赖消解的深度上限：更深视为循环或异常编排，交给服务端断言兜底。 */
+export const DEPENDENCY_RESOLUTION_DEPTH_LIMIT = 4
+
+/** inspectDependencies 服务端响应形状（页面层只按字段存在性收窄）。 */
+export interface DependencyInspectionEntry {
+  name?: unknown
+  title?: unknown
+  min_version?: unknown
+  action?: unknown
+  reason?: unknown
+  market?: { version?: unknown; sha256?: unknown } | null
+}
+
+export interface DependencyInspectionPlan {
+  dependencies?: DependencyInspectionEntry[]
+}
+
+/**
+ * 服务端只读计划 → 编排队列：
+ * - satisfied / bundled：已满足或由安装流程内嵌处理，不进队列；
+ * - install / upgrade / resume：进队列（market 形状不符时按无候选处理）；
+ * - blocked / unavailable / 未知动作：归为 blocked 并附通俗原因。
+ */
+export const dependencyPlanItemsOf = (
+  plan: DependencyInspectionPlan | null | undefined
+): DependencyPlanItem[] => {
+  const items: DependencyPlanItem[] = []
+  for (const entry of plan?.dependencies ?? []) {
+    if (!entry || typeof entry !== 'object') continue
+    const name = typeof entry.name === 'string' ? entry.name : ''
+    if (name === '') continue
+    const title =
+      typeof entry.title === 'string' && entry.title !== '' ? entry.title : name
+    const reason = typeof entry.reason === 'string' ? entry.reason : ''
+    if (entry.action === 'install' || entry.action === 'upgrade' || entry.action === 'resume') {
+      const market =
+        entry.market !== null &&
+        entry.market !== undefined &&
+        typeof entry.market === 'object' &&
+        typeof entry.market.version === 'string' &&
+        typeof entry.market.sha256 === 'string'
+          ? { version: entry.market.version, sha256: entry.market.sha256 }
+          : null
+      items.push({ app: name, title, action: entry.action, market, reason })
+      continue
+    }
+    if (entry.action === 'satisfied' || entry.action === 'bundled') continue
+    items.push({ app: name, title, action: 'blocked', market: null, reason })
+  }
+  return items
 }
 
 export interface DependencyOrchestratorDeps {
   /**
    * 发起安装请求并返回服务端登记行（AppInfo 形状）。依赖任务重试等
-   * 不需要安装请求的调用方可不提供。
+   * 不需要安装请求的调用方可不提供。restart=false 时不立即重载服务，
+   * 由链尾统一重载（编排器对依赖插件传 false，目标插件默认 true）。
    */
-  install?: (app: string, confirmation?: string) => Promise<DependencyChainRow | null | undefined>
+  install?: (
+    app: string,
+    confirmation?: string,
+    restart?: boolean
+  ) => Promise<DependencyChainRow | null | undefined>
   /**
    * 读取服务端登记行快照。这是编排器的自有读通道：实现不得挂在组件
    * 生命周期的 readsActive/取消令牌上；读失败可保留上次快照返回，链
@@ -219,6 +310,24 @@ export interface DependencyOrchestratorDeps {
    * lockWaitBudgetMs 预算内重试入队同一环节，而非判链失败。
    */
   lockConflict?: (app: string, kind: DependencyKind) => boolean
+  /**
+   * 依赖消解：读取某插件候选的只读依赖计划，返回需要自动处理的依赖项。
+   * 未提供或读取失败时退化为单插件编排——服务端 install() 的依赖断言
+   * 仍是最终防线。
+   */
+  resolveDeps?: (app: string) => Promise<DependencyPlanItem[]>
+  /**
+   * 准备依赖候选：市场下载或复用已暂存候选，返回候选行。
+   * upgrade 动作用行内 upgrade_from_version 生成确认串；
+   * resume 动作不会调用本函数。
+   */
+  prepareDep?: (item: DependencyPlanItem) => Promise<DependencyChainRow>
+  /**
+   * 依赖队列进度回调：计划生成与每个依赖项开始前通知，应用级编排器
+   * 用它更新 sessionStorage 断点记录（仅作进度提示，续跑按计划端点
+   * 重算，不依赖该字段裁决）。
+   */
+  onQueue?: (queue: DependencyQueueEntry[], index: number) => void
   /**
    * 编排阶段迁移回调：安装请求发出后置 'install'，开始入队依赖链前置
    * 'chain'。应用级编排器用它更新 sessionStorage 断点记录，整页 reload
@@ -399,23 +508,133 @@ const settleInstallBySnapshot = async (
   }
 }
 
+const planFailure = (
+  input: InstallOrchestrationInput,
+  label: string,
+  reason: string
+): InstallOrchestrationOutcome => ({
+  kind: 'chain-failed',
+  failure: { app: input.app, title: input.title, label, reason, plan: true }
+})
+
+const dependencyPlanError = (error: unknown, fallback: string): string => {
+  if (error instanceof Error && error.message !== '') return error.message
+  return fallback
+}
+
+const depStageLabel = (item: DependencyPlanItem): string =>
+  item.action === 'upgrade' ? `升级依赖 ${item.title}` : `安装依赖 ${item.title}`
+
 /**
- * 「直接安装/直接升级/继续安装」确认后的完整编排：
- * 安装请求 → 结果未知时按服务端快照轮询 → 依赖等待则跑依赖链 → 收敛。
- * 安装请求的传输类错误（超时、断连、取消）不代表服务端停止安装，交
- * 轮询裁决；业务拒绝原样抛出给调用方（http 层已提示）。
+ * 依赖消解环：安装目标前先把不满足的依赖插件按声明序升级/安装到位。
+ * - visited：祖先集合防依赖环（A→B→A 时靠服务端断言兜底，不重复处理）；
+ * - seen：同层队列去重；深度上限 DEPENDENCY_RESOLUTION_DEPTH_LIMIT；
+ * - blocked 项直接 chain-failed（plan 标记），一键重试会重跑整个编排；
+ * - dep 自身编排未完成时包一层通俗指路（不自动进入破坏性恢复）。
  */
-export const runInstallOrchestration = async (
+const resolveDependencyQueue = async (
   deps: DependencyOrchestratorDeps,
-  input: InstallOrchestrationInput
+  input: InstallOrchestrationInput,
+  ancestors: ReadonlySet<string>,
+  depth: number
+): Promise<InstallOrchestrationOutcome | null> => {
+  if (deps.resolveDeps === undefined || depth >= DEPENDENCY_RESOLUTION_DEPTH_LIMIT) return null
+  let plan: DependencyPlanItem[]
+  try {
+    plan = await deps.resolveDeps(input.app)
+  } catch {
+    // 计划读取失败不阻断：服务端 install() 的依赖断言是最终防线。
+    return null
+  }
+  if (!Array.isArray(plan) || plan.length === 0) return null
+  const nextAncestors = new Set(ancestors)
+  nextAncestors.add(input.app)
+  const seen = new Set<string>()
+  const queue: DependencyQueueEntry[] = plan.map((item) => ({ app: item.app, title: item.title }))
+  for (let index = 0; index < plan.length; index += 1) {
+    const item = plan[index]
+    deps.onQueue?.(queue, index)
+    if (item.action === 'blocked') {
+      return planFailure(
+        input,
+        `准备依赖 ${item.title}`,
+        item.reason !== undefined && item.reason !== ''
+          ? item.reason
+          : `依赖 ${item.title} 暂时无法自动处理，请到插件管理查看`
+      )
+    }
+    if (nextAncestors.has(item.app) || seen.has(item.app)) continue
+    seen.add(item.app)
+    if (item.action === 'resume') {
+      // 依赖的安装已登记但依赖任务未完成：直接续跑它的依赖链。
+      const resumed = await runDependencyChainLoop(deps, item.app, item.title, [])
+      if (resumed.kind === 'installed') continue
+      if (resumed.kind === 'chain-failed') {
+        return { kind: 'chain-failed', failure: { ...resumed.failure, plan: true } }
+      }
+      return planFailure(input, depStageLabel(item), `依赖 ${item.title} 未完成，请到插件管理处理恢复`)
+    }
+    if (deps.prepareDep === undefined) continue
+    let candidate: DependencyChainRow
+    try {
+      candidate = await deps.prepareDep(item)
+    } catch (error: unknown) {
+      return planFailure(
+        input,
+        `准备依赖 ${item.title}`,
+        dependencyPlanError(error, `依赖 ${item.title} 的插件包准备未完成，请稍后重试`)
+      )
+    }
+    const from = typeof candidate.upgrade_from_version === 'string' ? candidate.upgrade_from_version : ''
+    const version =
+      typeof candidate.version === 'string' && candidate.version !== ''
+        ? candidate.version
+        : item.market?.version ?? ''
+    let outcome: InstallOrchestrationOutcome
+    try {
+      outcome = await runInstallOrchestrationInner(deps, {
+        app: item.app,
+        title: item.title,
+        confirmation: item.action === 'upgrade' ? `UPGRADE ${item.app}@${from}->${version}` : undefined,
+        restart: false
+      }, nextAncestors, depth + 1)
+    } catch (error: unknown) {
+      // dep 安装的业务拒绝（含服务端依赖断言兜底）→ 通俗失败，不重发目标安装。
+      return planFailure(
+        input,
+        depStageLabel(item),
+        dependencyPlanError(error, `依赖 ${item.title} 未完成，请到插件管理查看`)
+      )
+    }
+    if (outcome.kind === 'installed') continue
+    if (outcome.kind === 'chain-failed') {
+      return { kind: 'chain-failed', failure: { ...outcome.failure, plan: true } }
+    }
+    return planFailure(
+      input,
+      depStageLabel(item),
+      `依赖 ${item.title} ${item.action === 'upgrade' ? '升级' : '安装'}未完成，请到插件管理处理恢复`
+    )
+  }
+  return null
+}
+
+const runInstallOrchestrationInner = async (
+  deps: DependencyOrchestratorDeps,
+  input: InstallOrchestrationInput,
+  ancestors: ReadonlySet<string>,
+  depth: number
 ): Promise<InstallOrchestrationOutcome> => {
   if (deps.install === undefined) {
     throw new Error('install orchestration requires an install dependency')
   }
+  const blocked = await resolveDependencyQueue(deps, input, ancestors, depth)
+  if (blocked !== null) return blocked
   deps.onPhase?.('install')
   let rows: DependencyChainRow[] = []
   try {
-    const immediate = (await deps.install(input.app, input.confirmation)) ?? null
+    const immediate =
+      (await deps.install(input.app, input.confirmation, input.restart ?? true)) ?? null
     if (immediate !== null) {
       rows = [immediate]
       if (immediate.state === 1 && dependencyKindOf(immediate) === null) {
@@ -430,16 +649,33 @@ export const runInstallOrchestration = async (
 }
 
 /**
+ * 「直接安装/直接升级/继续安装」确认后的完整编排：
+ * 依赖消解（先升/装不满足的依赖插件）→ 安装请求 → 结果未知时按服务端
+ * 快照轮询 → 依赖等待则跑依赖链 → 收敛。
+ * 安装请求的传输类错误（超时、断连、取消）不代表服务端停止安装，交
+ * 轮询裁决；业务拒绝原样抛出给调用方（http 层已提示）。
+ */
+export const runInstallOrchestration = async (
+  deps: DependencyOrchestratorDeps,
+  input: InstallOrchestrationInput
+): Promise<InstallOrchestrationOutcome> => {
+  return runInstallOrchestrationInner(deps, input, new Set(), 0)
+}
+
+/**
  * 断点续跑：整页 reload（vite watcher 对插件载荷目录整页刷新会销毁一切
- * JS 驻留编排）后，按 sessionStorage 记录的服务端行快照裁决当前阶段，
- * 从断点继续——服务端的依赖命令在客户端断连时已被终止回收，等待标志
- * 仍保留，直接重入队即可；安装仍在进行则轮询，已安装/失败/未登记则
- * 按终态收敛，绝不把陈旧编排复活为新安装（不重发 install 请求）。
+ * JS 驻留编排）后，先按计划端点重算并补齐剩余依赖（dep 已装完不再重跑，
+ * 断在依赖等待的 dep 续跑它的依赖链），再按服务端行快照裁决断点续跑
+ * ——服务端的依赖命令在客户端断连时已被终止回收，等待标志仍保留，直接
+ * 重入队即可；安装仍在进行则轮询，已安装/失败/未登记则按终态收敛，
+ * 绝不把陈旧编排复活为新安装（不重发 install 请求）。
  */
 export const resumeInstallOrchestration = async (
   deps: DependencyOrchestratorDeps,
   input: InstallOrchestrationInput
 ): Promise<InstallOrchestrationOutcome> => {
+  const blocked = await resolveDependencyQueue(deps, input, new Set([input.app]), 0)
+  if (blocked !== null) return blocked
   return settleInstallBySnapshot(deps, input, [])
 }
 
@@ -457,6 +693,9 @@ export interface InstallOrchestrationSession {
   phase: InstallOrchestrationPhase
   /** 发起时间（epoch ms），仅作诊断，不参与裁决。 */
   startedAt: number
+  /** 依赖队列进度（仅进度提示；续跑按计划端点重算，不据此裁决）。 */
+  queue?: DependencyQueueEntry[]
+  depIndex?: number
 }
 
 /** 最小 Storage 形状（sessionStorage/localStorage 及测试替身）。 */
@@ -472,11 +711,30 @@ const normalizeSession = (value: unknown): InstallOrchestrationSession | null =>
   if (!value || typeof value !== 'object') return null
   const record = value as Partial<InstallOrchestrationSession>
   if (typeof record.app !== 'string' || record.app === '') return null
+  const queue = Array.isArray(record.queue)
+    ? record.queue
+        .filter(
+          (entry): entry is DependencyQueueEntry =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            typeof (entry as DependencyQueueEntry).app === 'string' &&
+            (entry as DependencyQueueEntry).app !== ''
+        )
+        .map((entry) => ({
+          app: entry.app,
+          title: typeof entry.title === 'string' && entry.title !== '' ? entry.title : entry.app
+        }))
+    : []
   return {
     app: record.app,
     title: typeof record.title === 'string' && record.title !== '' ? record.title : record.app,
     phase: record.phase === 'chain' ? 'chain' : 'install',
-    startedAt: typeof record.startedAt === 'number' && isFinite(record.startedAt) ? record.startedAt : 0
+    startedAt: typeof record.startedAt === 'number' && isFinite(record.startedAt) ? record.startedAt : 0,
+    queue,
+    depIndex:
+      typeof record.depIndex === 'number' && isFinite(record.depIndex) && record.depIndex >= 0
+        ? record.depIndex
+        : 0
   }
 }
 

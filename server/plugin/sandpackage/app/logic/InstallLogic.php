@@ -537,6 +537,220 @@ class InstallLogic
         ];
     }
 
+    /**
+     * Whether a request-supplied restart flag asks for a service reload.
+     * Missing values mean reload, exactly as before; explicit 0/false/'false'
+     * suppress it so an orchestrated dependency chain can defer the single
+     * reload to the end of the chain.
+     */
+    public static function restartRequested(mixed $value): bool
+    {
+        return !($value === false || $value === 0 || $value === '0' || $value === 'false');
+    }
+
+    /**
+     * Read-only dependency plan for the staged candidate: declared plugin
+     * requirements mapped to the local state and the smallest satisfying
+     * repository version. It never acquires locks, writes info.ini or loads
+     * plugin code; install() remains the final authority.
+     *
+     * @param array<int,mixed>|null $catalogPlugins Parsed repository catalog
+     *        plugin entries, or null when the catalog could not be fetched —
+     *        dependencies needing a market version then degrade to
+     *        'unavailable' instead of failing the whole plan.
+     * @param string|null $catalogError Plain-language catalog fetch failure,
+     *        reused as the reason for market-degraded entries.
+     * @return array{app:string,dependencies:array<int,array<string,mixed>>,resolvable:bool,reason:string}
+     */
+    public function inspectDependencies(?array $catalogPlugins, ?string $catalogError = null): array
+    {
+        $path = $this->appDir . 'config.json';
+        $this->assertSafePath($path);
+        if (!is_file($path) || is_link($path) || filesize($path) > 16384) {
+            throw new ApiException('插件依赖配置不可读取');
+        }
+        $config = json_decode((string) file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        if (!is_array($config)) throw new ApiException('插件依赖配置格式错误');
+        try {
+            $requirements = PluginDependencyPolicy::requirements($config, $this->appName);
+        } catch (\InvalidArgumentException $error) {
+            throw new ApiException($error->getMessage(), 400);
+        }
+        $dependencies = [];
+        $resolvable = true;
+        $reason = '';
+        foreach ($requirements as $name => $minimum) {
+            $item = $this->inspectDependencyPlanItem($name, $minimum, $catalogPlugins, $catalogError);
+            if (in_array($item['action'], ['blocked', 'unavailable'], true)) {
+                $resolvable = false;
+                $reason = $reason === '' ? $item['reason'] : $reason;
+            }
+            $dependencies[] = $item;
+        }
+        return [
+            'app' => $this->appName,
+            'dependencies' => $dependencies,
+            'resolvable' => $resolvable,
+            'reason' => $reason,
+        ];
+    }
+
+    /**
+     * One requirement row of the dependency plan. Local inspection failures
+     * degrade that entry to 'blocked' rather than hiding the rest of the plan.
+     *
+     * @param array<int,mixed>|null $catalogPlugins
+     * @return array{name:string,title:string,min_version:string,installed_version:?string,installed_state:?int,action:string,reason:string,market:?array{version:string,tag:string,asset:string,sha256:string}}
+     */
+    private function inspectDependencyPlanItem(
+        string $name,
+        string $minimum,
+        ?array $catalogPlugins,
+        ?string $catalogError,
+    ): array {
+        $item = [
+            'name' => $name,
+            'title' => $name,
+            'min_version' => $minimum,
+            'installed_version' => null,
+            'installed_state' => null,
+            'action' => 'blocked',
+            'reason' => '',
+            'market' => null,
+        ];
+        try {
+            $dependency = new self($name);
+            $state = $dependency->getInstallState();
+            $info = $state === self::UNINSTALLED ? [] : $dependency->getInfo();
+        } catch (Throwable) {
+            $item['reason'] = '依赖插件 ' . $name . ' 的安装登记无法读取，请到插件管理检查后再试';
+            return $item;
+        }
+        $installedVersion = is_string($info['version'] ?? null) ? $info['version'] : null;
+        if (is_string($info['title'] ?? null) && $info['title'] !== '') {
+            $item['title'] = $info['title'];
+        }
+        $item['installed_version'] = $installedVersion;
+        $item['installed_state'] = $state;
+
+        if ($state === self::INSTALLED) {
+            if ($installedVersion !== null && $this->installedDependencyMeetsMinimum($installedVersion, $minimum)) {
+                $item['action'] = 'satisfied';
+                return $item;
+            }
+            // 已安装但版本不足：只能经插件仓库升级（内嵌依赖工件仅供新装使用）。
+            return $this->dependencyMarketPlan($item, 'upgrade', $name, $minimum, $catalogPlugins, $catalogError);
+        }
+        if ($state === self::WAIT_INSTALL) {
+            if ($installedVersion !== null && version_compare($installedVersion, $minimum, '>=')) {
+                // 已有满足最低版本的待安装候选，直接续装，不需要下载；
+                // 升级候选（update=1/upgrade_from_version）需走升级确认串，归 'upgrade'。
+                $item['action'] = !empty($info['update'])
+                    || (is_string($info['upgrade_from_version'] ?? null) && $info['upgrade_from_version'] !== '')
+                    ? 'upgrade'
+                    : 'install';
+                return $item;
+            }
+            $item['reason'] = '依赖插件 ' . $name . ' 已有待安装候选（版本 ' . ($installedVersion ?? '未知')
+                . '），不满足最低版本 ' . $minimum . '，请到插件管理处理后再试';
+            return $item;
+        }
+        if ($state === self::DEPENDENT_WAIT_INSTALL
+            || !empty($info['composer_dependent_wait_install'])
+            || !empty($info['npm_dependent_wait_install'])) {
+            // 安装已登记但依赖任务未完成：前端只需续跑依赖链。
+            $item['action'] = 'resume';
+            return $item;
+        }
+        if ($state === self::UNINSTALLED) {
+            // 声明版本的内嵌依赖工件齐全时由 install() 自带安装流程处理。
+            if ($this->dependencyBundleReady($name, $minimum)) {
+                $item['action'] = 'bundled';
+                return $item;
+            }
+            return $this->dependencyMarketPlan($item, 'install', $name, $minimum, $catalogPlugins, $catalogError);
+        }
+        $item['reason'] = '依赖插件 ' . $name . ' 当前状态需要人工处理，请先到插件管理完成恢复或安装';
+        return $item;
+    }
+
+    /** The embedded dependency artifact is usable only when it exists and matches the declared digest. */
+    private function dependencyBundleReady(string $name, string $version): bool
+    {
+        try {
+            $config = json_decode((string) file_get_contents($this->appDir . 'config.json'), true, 32, JSON_THROW_ON_ERROR);
+            $declared = is_array($config) ? ($config['plugin_dependencies'][$name]['sha256'] ?? null) : null;
+            $bundle = $this->appDir . 'dependencies' . DIRECTORY_SEPARATOR . $name . '-' . $version . '.zip';
+            $this->assertSafePath($bundle);
+            return is_string($declared) && is_file($bundle) && !is_link($bundle)
+                && hash_equals($declared, (string) hash_file('sha256', $bundle));
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    /**
+     * Resolve the smallest repository version satisfying the minimum for a
+     * dependency that must be installed or upgraded from the marketplace.
+     *
+     * @param array{name:string,title:string,min_version:string,installed_version:?string,installed_state:?int,action:string,reason:string,market:?array{version:string,tag:string,asset:string,sha256:string}} $item
+     * @param array<int,mixed>|null $catalogPlugins
+     * @return array{name:string,title:string,min_version:string,installed_version:?string,installed_state:?int,action:string,reason:string,market:?array{version:string,tag:string,asset:string,sha256:string}}
+     */
+    private function dependencyMarketPlan(
+        array $item,
+        string $action,
+        string $name,
+        string $minimum,
+        ?array $catalogPlugins,
+        ?string $catalogError,
+    ): array {
+        if ($catalogPlugins === null) {
+            $item['action'] = 'unavailable';
+            $item['reason'] = $catalogError !== null && $catalogError !== ''
+                ? $catalogError
+                : '插件仓库暂时不可用，无法确认依赖插件 ' . $name . ' 的可用版本，请稍后重试';
+            return $item;
+        }
+        $host = config('plugin.sandadmin.app.version');
+        $selected = null;
+        foreach ($catalogPlugins as $plugin) {
+            if (!is_array($plugin) || ($plugin['app'] ?? null) !== $name) continue;
+            if ($item['title'] === $name && is_string($plugin['title'] ?? null) && $plugin['title'] !== '') {
+                $item['title'] = $plugin['title'];
+            }
+            foreach ((is_array($plugin['versions'] ?? null) ? $plugin['versions'] : []) as $release) {
+                if (!is_array($release)) continue;
+                $version = $release['version'] ?? null;
+                $sha256 = $release['sha256'] ?? null;
+                if (!is_string($version) || version_compare($version, $minimum, '<')
+                    || !is_string($sha256) || preg_match('/^[a-f0-9]{64}$/D', $sha256) !== 1) {
+                    continue;
+                }
+                $hostMin = $release['host_min'] ?? null;
+                if (!is_string($hostMin) || !is_string($host) || version_compare($host, $hostMin, '<')) continue;
+                $hostMax = $release['host_max'] ?? null;
+                if (is_string($hostMax) && version_compare($host, $hostMax, '>')) continue;
+                if ($selected === null || version_compare($version, (string) $selected['version'], '<')) {
+                    $selected = $release;
+                }
+            }
+        }
+        if ($selected === null) {
+            $item['action'] = 'unavailable';
+            $item['reason'] = '依赖插件 ' . $name . ' 需要 ' . $minimum . ' 或更高版本，插件仓库暂无满足条件的版本';
+            return $item;
+        }
+        $item['action'] = $action;
+        $item['market'] = [
+            'version' => (string) $selected['version'],
+            'tag' => is_string($selected['tag'] ?? null) ? $selected['tag'] : '',
+            'asset' => is_string($selected['asset'] ?? null) ? $selected['asset'] : '',
+            'sha256' => (string) $selected['sha256'],
+        ];
+        return $item;
+    }
+
     /** @return array<string,mixed> */
     public function continueExistingSchemaAttach(string $confirmation): array
     {

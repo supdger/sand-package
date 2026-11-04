@@ -27,6 +27,7 @@ import sandpackageApi from '../api/index'
 import { TaskStatus, useTerminalStore } from './terminal'
 import {
   DEPENDENCY_LOCK_CONFLICT_TOKEN,
+  dependencyPlanItemsOf,
   dependencyTaskMatches,
   readOrchestrationSessions,
   removeOrchestrationSession,
@@ -37,6 +38,8 @@ import {
   type DependencyChainRow,
   type DependencyKind,
   type DependencyOrchestratorDeps,
+  type DependencyPlanItem,
+  type DependencyQueueEntry,
   type InstallChainFailure,
   type InstallOrchestrationInput,
   type InstallOrchestrationOutcome,
@@ -74,10 +77,16 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
     }
   }
 
-  const persistSession = (app: string, title: string, phase: InstallOrchestrationPhase): void => {
+  const persistSession = (
+    app: string,
+    title: string,
+    phase: InstallOrchestrationPhase,
+    queue?: DependencyQueueEntry[],
+    depIndex?: number
+  ): void => {
     const storage = sessionStorageOf()
     if (storage === null) return
-    upsertOrchestrationSession(storage, { app, title, phase, startedAt: Date.now() })
+    upsertOrchestrationSession(storage, { app, title, phase, startedAt: Date.now(), queue, depIndex })
   }
 
   const dropSession = (app: string): void => {
@@ -181,17 +190,55 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
     return (task?.message ?? []).some((line) => line.includes(DEPENDENCY_LOCK_CONFLICT_TOKEN))
   }
 
+  /**
+   * 依赖消解：只读计划端点 → 编排队列。计划端点本身失败时抛出，由
+   * 编排核心降级为单插件编排（服务端依赖断言仍是最终防线）。
+   */
+  const resolveDeps = async (app: string): Promise<DependencyPlanItem[]> => {
+    const plan = await sandpackageApi.inspectDependencies({ appName: app })
+    return dependencyPlanItemsOf(plan)
+  }
+
+  /**
+   * 准备依赖候选：market 项经仓库下载暂存（服务端按 state/sha 幂等），
+   * market 为空表示服务端已登记满足版本的候选，直接复用当前快照行。
+   */
+  const prepareDep = async (item: DependencyPlanItem): Promise<DependencyChainRow> => {
+    if (item.market === null) {
+      const snapshot = (await fetchRows()).find((row) => row.app === item.app)
+      if (!snapshot) {
+        throw new Error(`无法读取 ${item.title} 的安装状态，请刷新后重试`)
+      }
+      return snapshot
+    }
+    return await sandpackageApi.downloadRepositoryPlugin({
+      app: item.app,
+      version: item.market.version,
+      sha256: item.market.sha256
+    })
+  }
+
   const chainDeps = (
     install?: DependencyOrchestratorDeps['install'],
-    onPhase?: DependencyOrchestratorDeps['onPhase']
+    onPhase?: DependencyOrchestratorDeps['onPhase'],
+    onQueue?: DependencyOrchestratorDeps['onQueue']
   ): DependencyOrchestratorDeps => ({
     install,
     fetchRows,
     runDependencyTask,
     failureReason,
     lockConflict,
+    resolveDeps,
+    prepareDep,
+    onQueue,
     onPhase
   })
+
+  /**
+   * 计划阶段失败的一键重试输入：依赖消解失败（仓库不可用/依赖被拒/
+   * dep 安装中断）时，重试应重跑整个编排而非只续依赖链。
+   */
+  const planRetryInput = ref<InstallOrchestrationInput | null>(null)
 
   /** 收敛收尾：依赖失败登记 failure 并请求弹出面板；其余 outcome 原样返回。 */
   const settle = (outcome: InstallOrchestrationOutcome): InstallOrchestrationOutcome => {
@@ -216,14 +263,17 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
       }
     }
     failure.value = null
+    planRetryInput.value = input
     runningApp.value = input.app
     // 断点记录先于安装请求写入：整页 reload 发生在安装任何阶段都能续跑。
     persistSession(input.app, input.title, 'install')
     try {
       const outcome = await runInstallOrchestration(
         chainDeps(
-          (app, confirmation) => sandpackageApi.installApp({ appName: app, confirmation }),
-          (phase) => persistSession(input.app, input.title, phase)
+          (app, confirmation, restart) =>
+            sandpackageApi.installApp({ appName: app, confirmation, restart }),
+          (phase) => persistSession(input.app, input.title, phase),
+          (queue, index) => persistSession(input.app, input.title, 'install', queue, index)
         ),
         input
       )
@@ -236,10 +286,16 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
     }
   }
 
-  /** 终端面板「一键重试」：仅续跑依赖链，不重发安装请求。 */
+  /**
+   * 终端面板「一键重试」：依赖任务失败仅续跑依赖链；依赖消解（计划
+   * 阶段）失败重跑整个编排——计划端点幂等只读，已完成的依赖自然跳过。
+   */
   const retryChain = async (): Promise<InstallOrchestrationOutcome | null> => {
     const current = failure.value
     if (!current || runningApp.value !== '') return null
+    if (current.plan === true && planRetryInput.value !== null) {
+      return start(planRetryInput.value)
+    }
     runningApp.value = current.app
     persistSession(current.app, current.title, 'chain')
     try {
@@ -255,6 +311,31 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
     } finally {
       runningApp.value = ''
       dropSession(current.app)
+      void resumeIfPending()
+    }
+  }
+
+  /**
+   * 行级「一键续做」：无需 session 记录，直接把等待依赖安装的行
+   * （composer_dependent_wait_install / npm_dependent_wait_install=1）
+   * 重新入队剩余依赖任务。复用同一 runningApp 单飞与在途任务 attach，
+   * 重复点击与并发触发安全。
+   */
+  const resumeChainForRow = async (
+    app: string,
+    title: string
+  ): Promise<InstallOrchestrationOutcome | null> => {
+    if (runningApp.value !== '') return null
+    runningApp.value = app
+    persistSession(app, title, 'chain')
+    try {
+      const outcome = await runDependencyChainLoop(chainDeps(), app, title, rows.value)
+      const settled = settle(outcome)
+      if (settled.kind === 'installed') failure.value = null
+      return settled
+    } finally {
+      runningApp.value = ''
+      dropSession(app)
       void resumeIfPending()
     }
   }
@@ -279,7 +360,11 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
         runningApp.value = session.app
         try {
           const outcome = await resumeInstallOrchestration(
-            chainDeps(undefined, (phase) => persistSession(session.app, session.title, phase)),
+            chainDeps(
+              undefined,
+              (phase) => persistSession(session.app, session.title, phase),
+              (queue, index) => persistSession(session.app, session.title, 'install', queue, index)
+            ),
             { app: session.app, title: session.title }
           )
           const settled = settle(outcome)
@@ -307,6 +392,7 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
     fetchRows,
     start,
     retryChain,
+    resumeChainForRow,
     resumeIfPending
   }
 })
