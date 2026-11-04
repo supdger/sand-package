@@ -175,23 +175,6 @@
     }
   }
 
-  /**
-   * 供一键安装链调用的依赖任务：只入队并回传最终状态，不弹窗、不提示，
-   * 失败时由父级打开本面板展示原始输出与重试入口。
-   */
-  const runDependencyTask = (
-    kind: 'composer' | 'npm',
-    extend: string
-  ): Promise<TaskStatus> => {
-    return new Promise<TaskStatus>((resolve) => {
-      if (kind === 'composer') {
-        terminal.addTask('composer.update', extend, (status) => resolve(status))
-      } else {
-        terminal.addNodeTask('web-install', extend, (status) => resolve(status))
-      }
-    })
-  }
-
   const open = () => {
     visible.value = true
   }
@@ -200,7 +183,7 @@
     visible.value = false
   }
 
-  defineExpose({ open, close, frontInstall, backendInstall, runDependencyTask })
+  defineExpose({ open, close, frontInstall, backendInstall })
 </script>
 
 <style lang="scss" scoped>

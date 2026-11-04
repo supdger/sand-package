@@ -9,6 +9,7 @@ use Saithink\Saipackage\service\Filesystem;
 use Saithink\Saipackage\service\Depends;
 use plugin\sandadmin\exception\ApiException;
 use plugin\sandadmin\app\cache\UserMenuCache;
+use plugin\sandpackage\app\exception\OperationLockException;
 use plugin\sandpackage\app\service\PostgresLifecycleSqlExecutor;
 use plugin\sandpackage\app\service\FreshInstallRecovery;
 use plugin\sandpackage\app\service\PluginStorage;
@@ -2761,7 +2762,9 @@ class InstallLogic
         $lock = fopen($path, 'c+');
         if ($lock === false || !flock($lock, LOCK_EX | LOCK_NB)) {
             if (is_resource($lock)) fclose($lock);
-            throw new ApiException('已有安装操作正在执行');
+            // 瞬态锁冲突用专用异常类型承载：在途事务解锁后即可重试，
+            // 依赖命令入口据此归类为可重试信号（区别于守卫类业务拒绝）。
+            throw new OperationLockException('已有安装操作正在执行');
         }
         return $lock;
     }

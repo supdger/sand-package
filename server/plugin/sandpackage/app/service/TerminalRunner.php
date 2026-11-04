@@ -3,6 +3,7 @@
 namespace plugin\sandpackage\app\service;
 
 use Generator;
+use plugin\sandpackage\app\exception\OperationLockException;
 use plugin\sandpackage\app\logic\InstallLogic;
 use support\Log;
 use Tinywan\Jwt\JwtToken;
@@ -231,7 +232,11 @@ PHP;
             $incident = $this->recordFailure($error, $stage, $appName, $key, $startedAt);
             $detail = '依赖命令未完成（阶段：' . $stage . '，记录号：' . $incident . '）。请管理员按记录号查看宿主日志并检查安装状态；未声明回滚插件文件或数据库';
             $hint = DependencyCommandSupport::failureHint($this->callback ?? '', $this->outputTail);
-            if ($hint !== null) {
+            if ($error instanceof OperationLockException) {
+                // 锁冲突是瞬态：在途安装/恢复事务解锁后命令即可重试。
+                // 稳定分类记号让前端编排器在预算内重试入队而非判链失败。
+                $detail .= '；' . DependencyCommandSupport::lockConflictDetail($error->getMessage());
+            } elseif ($hint !== null) {
                 $detail .= '；【原因】' . $hint;
             } else {
                 if ($error instanceof \plugin\sandadmin\exception\ApiException) {

@@ -654,8 +654,8 @@
     <!-- 终端弹窗：依赖任务失败时才自动弹出，附通俗原因与一键重试 -->
     <TerminalBox
       ref="terminalRef"
-      :chain-failure="dependencyChainFailure"
-      :chain-retrying="dependencyChainRunning !== ''"
+      :chain-failure="orchestrator.failure"
+      :chain-retrying="orchestrator.busy"
       @success="getList"
       @retry-chain="retryDependencyChain"
     />
@@ -1010,15 +1010,11 @@
     type CleanupResult
   } from '../api/index'
   import { checkVersionCompatibility } from './version-compatibility'
-  import {
-    installOutcomeReason,
-    isUncertainInstallError,
-    pollInstallOutcome
-  } from './dependency-chain'
   import InstallForm from './install-box.vue'
   import TerminalBox from './terminal.vue'
   import SystemUpdate from './system-update.vue'
   import { TaskStatus, useTerminalStore } from '../store/terminal'
+  import { useInstallOrchestratorStore } from '../store/install-orchestrator'
   import {
     FAILED_UPGRADE_BLOCKED_MESSAGE,
     FAILED_UPGRADE_FAILURE_MESSAGE,
@@ -1068,14 +1064,6 @@
     open: () => void
     frontInstall: (extend: string) => void
     backendInstall: (extend: string) => void
-    runDependencyTask: (kind: 'composer' | 'npm', extend: string) => Promise<TaskStatus>
-  }
-
-  interface DependencyChainFailure {
-    app: string
-    title: string
-    label: string
-    reason: string
   }
 
   interface RepositoryDocumentTarget {
@@ -1110,10 +1098,9 @@
   const recoverySessions = reactive<Record<string, FailedUpgradeRecoverySession>>({})
   const recoveryFiles = new Map<string, File>()
   const terminalStore = useTerminalStore()
+  const orchestrator = useInstallOrchestratorStore()
   const localWriteOwner = ref<LocalWriteOwner>('')
   const terminalLaunchPending = ref(false)
-  const dependencyChainRunning = ref('')
-  const dependencyChainFailure = ref<DependencyChainFailure | null>(null)
   const cleanupVisible = ref(false)
   const cleanupTargetApp = ref('')
   const cleanupTargetTitle = ref('')
@@ -1878,34 +1865,20 @@
     if (!acquireLocalWrite('install')) return
 
     try {
-      let installed = false
-      try {
-        const result = await sandpackageApi.installApp({ appName: record.app })
-        installed = result.state === 1
-      } catch (error: unknown) {
-        // 超时/断连不代表服务端停止安装：PHP 会继续完成登记，交给轮询裁决；
-        // 业务拒绝沿用 http 工具已给出的提示，不再轮询。
-        if (!isUncertainInstallError(error)) throw error
-      }
-      if (installed) {
+      // 安装请求、结果轮询与依赖链由应用级编排器持有：视图被 keep-alive
+      // 停用（安装完成触发路由重建）不影响链推进；业务拒绝由 http 层提示。
+      const outcome = await orchestrator.start({
+        app: record.app,
+        title: record.title || record.app
+      })
+      if (outcome.kind === 'installed') {
         ElMessage.success('安装成功')
-      } else {
-        const outcome = await pollInstallOutcome({
-          app: record.app,
-          refreshRows: getList,
-          readRows: () => installList.value
-        })
-        if (outcome.status === 'wait_dependencies') {
-          const completed = await runDependencyChain(record.app, record.title || record.app)
-          if (completed) ElMessage.success('安装成功')
-        } else if (outcome.status === 'installed') {
-          ElMessage.success('安装成功')
-        } else if (outcome.status === 'failed') {
-          ElMessage.warning(installOutcomeReason(outcome.row, '安装未完成，请查看插件状态'))
-        } else {
-          ElMessage.warning('安装请求未及时返回，服务端可能仍在执行；请到插件管理查看进度')
-        }
+      } else if (outcome.kind === 'install-failed') {
+        ElMessage.warning(outcome.reason)
+      } else if (outcome.kind === 'unconfirmed') {
+        ElMessage.warning(outcome.reason)
       }
+      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2358,92 +2331,36 @@
   // ========== 一键安装依赖链 ==========
   // 安装完成后自动依次执行后端 composer、前端 npm 依赖任务，无需用户
   // 手动点“处理依赖”；仅失败时弹出终端面板，给出通俗原因与一键重试。
+  //
+  // 编排在应用级 pinia 编排器（store/install-orchestrator）中运行：安装
+  // 请求、状态轮询与依赖任务入队都不依附本视图生命周期。0.2.18 把这条链
+  // 挂在组件内 readsActive/getList 上，安装完成触发动态路由重建后本页被
+  // keep-alive 停用，轮询在停用窗口静默空转、依赖链从未入队。本视图只
+  // 渲染编排器暴露的状态：panelTick 请求弹面板、failure 供面板展示原因。
+  //
+  // 会话级断点续跑：插件载荷落盘 src/views/plugin/** 时 vite dev watcher
+  // 触发整页 reload，JS 上下文整体销毁——编排器把最小进度记在
+  // sessionStorage（同 tab 整页刷新保留），本视图挂载/重激活时调用
+  // resumeIfPending() 按服务端行快照裁决断点续跑。本页（/#/plugin）既是
+  // 编排发起页也是 reload 落回页；续跑有重入防护与在途任务 attach，
+  // 多触发点并发安全。
 
-  const dependencyTaskLabel = (kind: 'composer' | 'npm'): string =>
-    kind === 'composer' ? '后端依赖（composer）' : '前端依赖（npm/pnpm）'
-
-  const dependencyFailureReason = (app: string, kind: 'composer' | 'npm'): string => {
-    const extend = 'module-install:' + app
-    const prefix = kind === 'composer' ? 'composer.' : 'web-install.'
-    const task = [...terminalStore.taskList]
-      .reverse()
-      .find(
-        (item) =>
-          item.extend === extend &&
-          item.command.startsWith(prefix) &&
-          item.status === TaskStatus.FAILED
-      )
-    const messages = (task?.message ?? [])
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
-    const hinted = messages.filter((line) => line.includes('【原因】') || line.includes('【详情】'))
-    const last = hinted.length > 0 ? hinted[hinted.length - 1] : messages[messages.length - 1]
-    return last && last !== '' ? last : '请查看终端输出中的具体错误'
-  }
-
-  /**
-   * 依次执行该插件剩余的依赖任务。每步成功后刷新本地状态，由后端登记的
-   * *_dependent_wait_install 标志决定下一步；返回是否全部完成。
-   */
-  const runDependencyChain = async (app: string, title: string): Promise<boolean> => {
-    dependencyChainFailure.value = null
-    dependencyChainRunning.value = app
-    try {
-      for (let step = 0; step < 8; step++) {
-        await getList()
-        const row = installList.value.find((item) => item.app === app)
-        if (!row) {
-          dependencyChainFailure.value = {
-            app,
-            title,
-            label: '依赖',
-            reason: '无法读取插件当前状态，请刷新后重试'
-          }
-          terminalRef.value?.open()
-          return false
-        }
-        const kind: 'composer' | 'npm' | null =
-          row.composer_dependent_wait_install === 1
-            ? 'composer'
-            : row.npm_dependent_wait_install === 1
-              ? 'npm'
-              : null
-        if (kind === null) return true
-        const status =
-          (await terminalRef.value?.runDependencyTask(kind, 'module-install:' + app)) ??
-          TaskStatus.FAILED
-        if (status !== TaskStatus.SUCCESS) {
-          dependencyChainFailure.value = {
-            app,
-            title,
-            label: dependencyTaskLabel(kind),
-            reason: dependencyFailureReason(app, kind)
-          }
-          terminalRef.value?.open()
-          return false
-        }
-      }
-      dependencyChainFailure.value = {
-        app,
-        title,
-        label: '依赖',
-        reason: '依赖任务轮次异常，请到插件管理确认插件状态'
-      }
-      terminalRef.value?.open()
-      return false
-    } finally {
-      dependencyChainRunning.value = ''
+  // 依赖链失败 → 请求弹出终端面板。视图停用期间 watcher 暂停，
+  // 由 onActivated 里的 failure 检查补开。
+  watch(
+    () => orchestrator.panelTick,
+    () => {
+      if (orchestrator.failure) terminalRef.value?.open()
     }
-  }
+  )
 
   const retryDependencyChain = (): void => {
-    const failure = dependencyChainFailure.value
-    if (!failure || dependencyChainRunning.value !== '') return
-    void runDependencyChain(failure.app, failure.title).then(async (completed) => {
+    const failed = orchestrator.failure
+    if (!failed || orchestrator.busy) return
+    void orchestrator.retryChain().then(async (outcome) => {
       await Promise.all([getList(), fetchRepositoryCatalog()])
-      if (completed) {
-        dependencyChainFailure.value = null
-        ElMessage.success(`${failure.title || failure.app} 依赖安装完成`)
+      if (outcome?.kind === 'installed') {
+        ElMessage.success(`${failed.title || failed.app} 依赖安装完成`)
       }
     })
   }
@@ -2566,7 +2483,7 @@
       recoveryOperationBusy.value ||
       terminalOperationBusy.value ||
       cleanupOperationBusy.value ||
-      dependencyChainRunning.value !== ''
+      orchestrator.busy
   )
   const pluginOperationBusy = computed(() => existingPluginOperationBusy.value || systemUpdateBusy.value)
   const repositoryWritesBlocked = computed(
@@ -2844,66 +2761,53 @@
         )
       }
 
-      try {
-        await sandpackageApi.installApp({
-          appName: refreshed.plugin.app,
-          confirmation:
-            selectedAction === 'upgrade'
-              ? `UPGRADE ${refreshed.plugin.app}@${fromVersion}->${refreshed.item.version}`
-              : undefined
-        })
-      } catch (error: unknown) {
-        // 超时/断连不代表服务端停止安装：PHP 会继续完成登记。
-        // 业务拒绝照常中止；结果未知的场景交给服务端状态轮询裁决。
-        if (!isUncertainInstallError(error)) throw error
-      }
-
-      // 安装请求可能超时，但服务端仍在后台完成登记；依赖链入队条件只认
-      // 服务端 info.ini 的 *_dependent_wait_install 标志与 state，不依赖
-      // 本次请求的客户端成败或返回时序。
-      const installOutcome = await pollInstallOutcome({
+      // 安装请求、结果轮询与依赖链全部由应用级编排器持有：安装完成引发的
+      // 动态路由重建会把本视图 keep-alive 停用，组件内 readsActive/getList
+      // 轮询在停用窗口静默失效；编排器使用自有的读通道与终端任务队列，
+      // 视图停用/重激活不打断链推进，业务拒绝原样抛给外层 catch。
+      const installOutcome = await orchestrator.start({
         app: refreshed.plugin.app,
-        refreshRows: getList,
-        readRows: () => installList.value
+        title: refreshed.plugin.title || refreshed.plugin.app,
+        confirmation:
+          selectedAction === 'upgrade'
+            ? `UPGRADE ${refreshed.plugin.app}@${fromVersion}->${refreshed.item.version}`
+            : undefined
       })
       await fetchRepositoryCatalog()
 
-      // 安装/升级完成后自动执行依赖链（后端 composer → 前端 npm），
-      // 失败时终端面板弹出并给出原因与一键重试，链内已刷新列表。
-      if (installOutcome.status === 'wait_dependencies') {
-        const completed = await runDependencyChain(
-          refreshed.plugin.app,
-          refreshed.plugin.title || refreshed.plugin.app
-        )
-        if (!completed) return
-        await Promise.all([getList(), fetchRepositoryCatalog()])
-      }
-      if (installOutcome.status === 'failed') {
-        repositoryActionError.value = installOutcomeReason(
-          installOutcome.row,
-          '安装未完成，请到插件管理查看'
-        )
+      // 依赖任务失败：编排器已登记失败并请求弹出终端面板（含一键重试）。
+      if (installOutcome.kind === 'chain-failed') return
+      if (installOutcome.kind === 'install-failed') {
+        repositoryActionError.value = installOutcome.reason
         ElMessage.warning('插件尚未确认安装完成，请到插件管理查看')
         return
       }
-      if (installOutcome.status === 'pending') {
-        repositoryActionError.value =
-          '安装请求未及时返回，服务端可能仍在后台执行；请到插件管理查看进度'
+      if (installOutcome.kind === 'unconfirmed') {
+        repositoryActionError.value = installOutcome.reason
         ElMessage.warning('安装状态未确认，请到插件管理查看')
         return
       }
 
-      const installed = installList.value.find((row) => row.app === refreshed.plugin.app)
+      // installed：编排器快照是链执行期间持续刷新的服务端登记，比视图
+      // 停用期间停滞的 installList 更新；视图激活时两者一致。
+      const installed =
+        orchestrator.rows.find((row) => row.app === refreshed.plugin.app) ??
+        installList.value.find((row) => row.app === refreshed.plugin.app)
       const refreshedAfterInstall = findRepositorySelection(
         refreshed.plugin.app,
         refreshed.item.version
       )
+      // 视图停用期间 fetchRepositoryCatalog 空转、目录仍是停用前快照，
+      // 此时以服务端登记行裁决；激活状态下才要求目录与本地登记双重一致。
+      const catalogConsistent =
+        !readsActive ||
+        (refreshedAfterInstall?.plugin.local.state === 1 &&
+          refreshedAfterInstall.plugin.local.installed_version === refreshed.item.version)
       if (
         installed?.state === 1 &&
         installed.version === refreshed.item.version &&
         installed.ordinary_actions_blocked !== true &&
-        refreshedAfterInstall?.plugin.local.state === 1 &&
-        refreshedAfterInstall.plugin.local.installed_version === refreshed.item.version
+        catalogConsistent
       ) {
         repositoryVersionVisible.value = false
         currentRepositoryPlugin.value = null
@@ -3025,6 +2929,10 @@
     readsDeactivated = false
     readsActive = true
     refreshVisibleRepositoryReads()
+    // 停用期间依赖链失败时 watcher 暂停，这里补开终端面板展示原因与重试。
+    if (orchestrator.failure) terminalRef.value?.open()
+    // 停用再激活也可能发生在整页 reload 之前/之后，幂等补触发断点续跑。
+    void orchestrator.resumeIfPending()
   })
   onUnmounted(() => {
     readsActive = false
@@ -3045,6 +2953,8 @@
   })
 
   onMounted(() => {
+    // 整页 reload 落回本页时先于常规读恢复断点编排（无记录为空操作）。
+    void orchestrator.resumeIfPending()
     getList()
     fetchRepositoryCatalog()
   })
