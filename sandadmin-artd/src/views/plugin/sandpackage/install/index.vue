@@ -110,9 +110,9 @@
                 v-else-if="row.npm_dependent_wait_install === 1"
                 type="primary"
                 :disabled="pluginOperationBusy"
-                @click="handleExecFront(row)"
+                @click="handleResumeChain(row)"
               >
-                <ArtSvgIcon icon="ri:download-line" class="mr-1" />处理依赖
+                <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
               </ElLink>
               <ElTag v-else-if="row.state === 1" type="success">已安装</ElTag>
               <ElTag v-else type="info">-</ElTag>
@@ -125,9 +125,9 @@
                 v-else-if="row.composer_dependent_wait_install === 1"
                 type="primary"
                 :disabled="pluginOperationBusy"
-                @click="handleExecBackend(row)"
+                @click="handleResumeChain(row)"
               >
-                <ArtSvgIcon icon="ri:download-line" class="mr-1" />处理依赖
+                <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
               </ElLink>
               <ElTag v-else-if="row.state === 1" type="success">已安装</ElTag>
               <ElTag v-else type="info">-</ElTag>
@@ -225,19 +225,14 @@
                   >
                     <ArtSvgIcon icon="ri:refresh-line" class="mr-1" />继续数据库重接恢复
                   </ElLink>
-                  <ElPopconfirm
+                  <ElLink
                     v-if="canUninstallLocal(row)"
-                    title="确定要卸载当前插件吗?"
-                    @confirm="handleUninstall(row)"
-                    confirm-button-text="确定"
-                    cancel-button-text="取消"
+                    type="danger"
+                    :disabled="pluginOperationBusy"
+                    @click="handleUninstall(row)"
                   >
-                    <template #reference>
-                      <ElLink type="danger" :disabled="pluginOperationBusy">
-                        <ArtSvgIcon icon="ri:delete-bin-5-line" class="mr-1" />卸载
-                      </ElLink>
-                    </template>
-                  </ElPopconfirm>
+                    <ArtSvgIcon icon="ri:delete-bin-5-line" class="mr-1" />卸载
+                  </ElLink>
                   <ElTag
                     v-if="
                       !canUninstallLocal(row) &&
@@ -684,7 +679,7 @@
           <p>
             {{
               cleanupCompleted.restart_required
-                ? '文件已清理，请重载后端服务使变更生效。'
+                ? '文件已清理，正在自动重载后端服务使变更生效…'
                 : '插件状态已刷新。'
             }}
           </p>
@@ -852,12 +847,12 @@
         <template v-if="cleanupCompleted">
           <ElButton :disabled="cleanupReloading" @click="cleanupVisible = false">关闭</ElButton>
           <ElButton
-            v-if="cleanupCompleted.restart_required"
-            type="warning"
+            v-if="cleanupReloadError"
+            size="small"
             :loading="cleanupReloading"
             @click="reloadCleanupBackend"
           >
-            重载后端服务
+            重试
           </ElButton>
           <ElButton
             type="primary"
@@ -990,11 +985,11 @@
 </template>
 
 <script setup lang="ts">
-  import { ref, reactive, computed, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
+  import { ref, reactive, computed, h, onMounted, onActivated, onDeactivated, onUnmounted, watch } from 'vue'
   import { useUserStore } from '@/store/modules/user'
   import { isRecoverableInitializationError } from '@/utils/http/error'
   import { createRecoverableRead } from './read-recovery'
-  import { ElMessage, ElMessageBox } from 'element-plus'
+  import { ElMessage, ElMessageBox, ElCheckbox } from 'element-plus'
   import type { ColumnOption } from '@/types'
   import type { UploadFile } from 'element-plus'
   import sandpackageApi, {
@@ -1062,8 +1057,6 @@
 
   interface TerminalBoxExpose {
     open: () => void
-    frontInstall: (extend: string) => void
-    backendInstall: (extend: string) => void
   }
 
   interface RepositoryDocumentTarget {
@@ -1100,7 +1093,6 @@
   const terminalStore = useTerminalStore()
   const orchestrator = useInstallOrchestratorStore()
   const localWriteOwner = ref<LocalWriteOwner>('')
-  const terminalLaunchPending = ref(false)
   const cleanupVisible = ref(false)
   const cleanupTargetApp = ref('')
   const cleanupTargetTitle = ref('')
@@ -1787,6 +1779,9 @@
       cleanupCompleted.value = result
       cleanupInspection.value = null
       cleanupConfirmation.value = ''
+      // 文件清理需要后端重载才生效：由编排链自动完成，不再提供手动入口；
+      // 失败时错误提示里保留「重试」。
+      if (result.restart_required) void reloadCleanupBackend()
       await Promise.all([getList(), fetchRepositoryCatalog()])
       if (requestId !== cleanupRequestId || !cleanupVisible.value) return
       ElMessage.success('插件残留已清理，可以重新安装')
@@ -1937,7 +1932,22 @@
         database,
         confirmation: proof.confirmation
       })
-      ElMessage.success('已接管现有数据库并部署插件文件；服务尚未重载')
+      // 重接走 install(false) 不重启且可能登记依赖等待：交给编排器续完
+      // 剩余依赖任务，链完补一次服务重载再报成功；失败由终端面板呈现。
+      const outcome = await orchestrator.resumeChainForRow(record.app, record.title || record.app)
+      if (outcome === null) {
+        ElMessage.warning('已有插件安装或依赖任务进行中，请稍后重试')
+      } else if (outcome.kind === 'installed') {
+        try {
+          await sandpackageApi.reloadBackend()
+          ElMessage.success('已接管现有数据库并部署插件文件，服务已自动生效')
+        } catch {
+          ElMessage.warning('已接管现有数据库并部署插件文件；服务自动生效未完成，请稍后重试')
+        }
+      } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
+        ElMessage.warning(outcome.reason)
+      }
+      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
     } catch {
       // Error already handled by http utility
     } finally {
@@ -1983,9 +1993,61 @@
     }
   }
 
+  /** 卸载确认：醒目警告 + 勾选「了解不可恢复」后才能确认，无输入框。 */
+  const confirmUninstall = async (record: SandpackageInstallRow): Promise<boolean> => {
+    let acknowledged = false
+    try {
+      await ElMessageBox({
+        title: '卸载插件',
+        message: () =>
+          h('div', null, [
+            h(
+              'p',
+              { style: 'margin:0 0 4px;font-weight:600;color:var(--el-color-danger)' },
+              `将卸载 ${record.title || record.app}（v${record.version}）`
+            ),
+            h(
+              'p',
+              { style: 'margin:0 0 12px' },
+              '插件文件与其创建的数据库表都会被删除，此操作不可恢复。'
+            ),
+            h(
+              ElCheckbox,
+              {
+                modelValue: acknowledged,
+                'onUpdate:modelValue': (value: string | number | boolean) => {
+                  acknowledged = value === true
+                }
+              },
+              () => '我已了解该操作不可恢复'
+            )
+          ]),
+        confirmButtonText: '确认卸载',
+        cancelButtonText: '取消',
+        type: 'warning',
+        distinguishCancelAndClose: true,
+        beforeClose: (action, _instance, done) => {
+          if (action !== 'confirm') {
+            done()
+            return
+          }
+          if (!acknowledged) {
+            ElMessage.warning('请先勾选确认提示')
+            return
+          }
+          done()
+        }
+      })
+      return true
+    } catch {
+      return false
+    }
+  }
+
   const handleUninstall = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value || !canUninstallLocal(record)) return
     if (rejectOrdinaryAction(record)) return
+    if (!(await confirmUninstall(record))) return
     if (!acquireLocalWrite('uninstall')) return
     try {
       await sandpackageApi.uninstallApp({ appName: record.app })
@@ -2120,31 +2182,39 @@
       )
       return
     }
-    const expected = `UPGRADE ${record.app}@${record.upgrade_from_version}->${record.version}`
-    let confirmation = ''
+    const title = record.title || record.app
     try {
-      const result = await ElMessageBox.prompt(
-        '系统将仅执行升级脚本 update.sql；不会执行 install.sql。请输入下方确认内容。',
-        '确认升级包',
+      await ElMessageBox.confirm(
+        `将升级 ${title} 到 ${record.version}，并自动升级所需的依赖插件，完成后服务会自动生效。`,
+        '确认升级',
         {
           confirmButtonText: '确认升级',
           cancelButtonText: '取消',
-          inputPlaceholder: expected,
-          inputValidator: (value: string) => value === expected || '确认内容不匹配'
+          type: 'warning'
         }
       )
-      confirmation = result.value
     } catch {
       return
     }
     if (!acquireLocalWrite('upgrade')) return
     try {
-      await sandpackageApi.installApp({ appName: record.app, confirmation })
-      ElMessage.success('升级已提交执行')
+      // 确认串由前端按行字段自动生成传入，服务端仍校验候选身份；
+      // 依赖消解、轮询与依赖链由编排器统一驱动。
+      const outcome = await orchestrator.start({
+        app: record.app,
+        title,
+        confirmation: `UPGRADE ${record.app}@${record.upgrade_from_version}->${record.version}`
+      })
+      if (outcome.kind === 'installed') {
+        ElMessage.success('升级成功')
+      } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
+        ElMessage.warning(outcome.reason)
+      }
+      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
     } catch {
       // Error already handled by http utility
     } finally {
-      await getList()
+      await Promise.all([getList(), fetchRepositoryCatalog()])
       releaseLocalWrite('upgrade')
     }
   }
@@ -2293,34 +2363,15 @@
     return 'info'
   }
 
-  const handleExecFront = (record: SandpackageInstallRow) => {
+  // 「一键续做」：把等待依赖安装的行重新交给编排器续完剩余依赖任务。
+  const handleResumeChain = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value) return
     if (rejectOrdinaryAction(record)) return
-    const extend = 'module-install:' + record.app
-    terminalLaunchPending.value = true
-    terminalRef.value?.open()
-    setTimeout(() => {
-      try {
-        terminalRef.value?.frontInstall(extend)
-      } finally {
-        terminalLaunchPending.value = false
-      }
-    }, 500)
-  }
-
-  const handleExecBackend = (record: SandpackageInstallRow) => {
-    if (pluginOperationBusy.value) return
-    if (rejectOrdinaryAction(record)) return
-    const extend = 'module-install:' + record.app
-    terminalLaunchPending.value = true
-    terminalRef.value?.open()
-    setTimeout(() => {
-      try {
-        terminalRef.value?.backendInstall(extend)
-      } finally {
-        terminalLaunchPending.value = false
-      }
-    }, 500)
+    const outcome = await orchestrator.resumeChainForRow(record.app, record.title || record.app)
+    await getList()
+    if (outcome?.kind === 'installed') {
+      ElMessage.success(`${record.title || record.app} 依赖安装完成`)
+    }
   }
 
   const handleTerminal = () => {
@@ -2460,7 +2511,6 @@
   )
   const terminalOperationBusy = computed(
     () =>
-      terminalLaunchPending.value ||
       terminalStore.taskList.some(
         (task) =>
           task.status === TaskStatus.WAITING ||

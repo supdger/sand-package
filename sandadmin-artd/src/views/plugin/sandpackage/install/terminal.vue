@@ -75,7 +75,7 @@
         </div>
 
         <div class="flex justify-center flex-wrap gap-2">
-          <span class="text-sm text-gray-500">只能从插件的待安装依赖操作启动任务。</span>
+          <span class="text-sm text-gray-500">依赖任务由安装流程自动执行，这里只查看进度与失败原因。</span>
           <ElButton type="danger" @click="terminal.cleanTaskList()">
             <template #icon>
               <ArtSvgIcon icon="ri:delete-bin-line" />
@@ -90,7 +90,6 @@
 
 <script setup lang="ts">
   import { ref } from 'vue'
-  import { ElMessage } from 'element-plus'
   import { useTerminalStore, TaskStatus } from '../store/terminal'
 
   interface DependencyChainFailureInfo {
@@ -116,28 +115,6 @@
 
   const terminal = useTerminalStore()
   const visible = ref(false)
-  const reportInstallResult = (status: TaskStatus, label: string) => {
-    if (status === TaskStatus.SUCCESS) {
-      ElMessage.success(`${label}已完成`)
-    } else {
-      ElMessage.warning(`${label}结果待确认，已刷新插件状态`)
-    }
-    emit('success')
-  }
-
-  const frontInstall = (extend: string) => {
-    if (!extend) return
-    terminal.addNodeTask('web-install', extend, (status) =>
-      reportInstallResult(status, '前端依赖更新')
-    )
-  }
-
-  const backendInstall = (extend: string) => {
-    if (!extend) return
-    terminal.addTask('composer.update', extend, (status) =>
-      reportInstallResult(status, '后端依赖更新')
-    )
-  }
 
   const getTagType = (
     status: TaskStatus
@@ -183,7 +160,7 @@
     visible.value = false
   }
 
-  defineExpose({ open, close, frontInstall, backendInstall })
+  defineExpose({ open, close })
 </script>
 
 <style lang="scss" scoped>

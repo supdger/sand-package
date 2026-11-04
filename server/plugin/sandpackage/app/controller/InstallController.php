@@ -253,9 +253,39 @@ class InstallController extends BaseController
         }
         $install = new InstallLogic($appName);
         $confirmation = (string) $request->post('confirmation', '');
-        $info = $install->install(true, $confirmation);
+        // Optional restart flag: the page-side orchestrator suppresses the
+        // per-plugin reload while upgrading dependencies and lets the chain
+        // tail restart once. Missing values keep the historical reload.
+        $restart = InstallLogic::restartRequested($request->post('restart', null));
+        $info = $install->install($restart, $confirmation);
         UserMenuCache::clearMenuCache();
         return $this->success($info);
+    }
+
+    /**
+     * Read-only dependency plan for a staged candidate: declared requirements
+     * mapped to local state and the smallest satisfying repository version.
+     * Drives the page-side upgrade orchestration; install() re-validates.
+     */
+    public function inspectDependencies(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('依赖检查仅支持 POST 请求', 400);
+        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够检查插件依赖', 403);
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        $logic = new InstallLogic($appName);
+        $repository = $this->repositoryLogic();
+        return $this->repositoryResponse($request, function (callable $complete) use ($logic, $repository): void {
+            $repository->catalog(function (?array $catalog, ?Throwable $error) use ($logic, $complete): void {
+                try {
+                    $plugins = $error === null && is_array($catalog) ? ($catalog['plugins'] ?? null) : null;
+                    $catalogError = $error instanceof ApiException ? $error->getMessage() : null;
+                    $complete($logic->inspectDependencies($plugins, $catalogError), null);
+                } catch (Throwable $planError) {
+                    $complete(null, $planError);
+                }
+            });
+        });
     }
 
     /** Inspect an uploaded candidate against the existing sandai schema. */

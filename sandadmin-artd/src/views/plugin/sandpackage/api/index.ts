@@ -47,6 +47,25 @@ export interface AppInfo {
   existing_schema_attach_pending?: number
 }
 
+/** inspectDependencies 返回的单个依赖项：服务端只读计划，前端据此编排。 */
+export interface DependencyPlanEntry {
+  name: string
+  title?: string
+  min_version: string
+  installed_version: string | null
+  installed_state: number | null
+  action: 'satisfied' | 'install' | 'upgrade' | 'resume' | 'bundled' | 'blocked' | 'unavailable'
+  reason: string
+  market: { version: string; tag: string; asset: string; sha256: string } | null
+}
+
+export interface DependencyPlan {
+  app: string
+  dependencies: DependencyPlanEntry[]
+  resolvable: boolean
+  reason: string
+}
+
 export interface ExistingSchemaAttachProof {
   app: string
   version: string
@@ -287,12 +306,23 @@ export default {
   /**
    * 安装插件。安装含内嵌依赖插件链与宿主重载，远超 axios 默认 15s；
    * 超时后服务端仍会继续完成登记，页面按服务端状态轮询收敛。
+   * restart=false 供依赖链中的依赖插件使用：不在本插件装完时重载服务，
+   * 由链尾统一重载一次。
    */
-  installApp(data: { appName: string; confirmation?: string }) {
+  installApp(data: { appName: string; confirmation?: string; restart?: boolean }) {
     return request.post<AppInfo>({
       url: '/app/sandpackage/install/install',
-      data,
+      data: { ...data, restart: data.restart === false ? 0 : 1 },
       timeout: 300000
+    })
+  },
+
+  /** 只读依赖计划：候选声明的依赖 → 本地状态 + 仓库最小满足版本。 */
+  inspectDependencies(data: { appName: string }) {
+    return request.post<DependencyPlan>({
+      url: '/app/sandpackage/install/inspectDependencies',
+      data,
+      timeout: 65000
     })
   },
 
