@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.17（2026-11-03）
+
+- 一键安装链：插件市场“直接安装/直接升级”及“继续安装”在完成安装登记后自动依次执行后端 composer、前端 npm 依赖任务，无需手动点“处理依赖”或盯终端；终端面板仅在失败时弹出，附带通俗中文原因与“一键重试”。
+- 依赖命令不再请求 api.github.com：composer 步骤改用隔离的 COMPOSER_HOME，packagist 默认指向自带 dist 文件的腾讯云 Composer 镜像（`plugin.sandpackage.terminal.composer_mirror` / 环境变量 `SAND_COMPOSER_MIRROR` 可改可关），并写入 `preferred-install=dist`、`use-github-api=false`、`github-protocols=https`；宿主在项目 composer.json 或全局 Composer 配置中声明过 packagist.org 时尊重其选择不注入镜像，宿主全局 config.json 与 auth.json（私有仓库凭证、GitHub 令牌）原样继承。已用 `composer update -vvv` 验证依赖解析与 dist 下载全程不访问 api.github.com，绕开匿名 60 次/小时限额。
+- 失败诊断：依赖命令输出尾部按类型翻译为中文原因——GitHub 限额（附 `/rate_limit` 探测的剩余等待分钟与配置令牌指引）、GitHub/镜像网络失败、npm/pnpm 网络或权限问题、依赖版本不可解析；识别不了的保留原事件说明。
+- 失败重试不再被残留拦住：依赖命令的宿主级残留（`locks/host-upstream.process.json` 进程标记、`host-payload/*.dependency-recovery.json` 恢复检查点、info.ini 中的 nonce）在重试入口自动判定——仅当恢复检查自身证明原进程已退出时续跑既有检查点化恢复，nonce-only 残留按失败收尾清理；证明不了的现场仍按原守卫拒绝，成功路径记录保持不变。
+- 依赖失败收尾加固：失败登记持久化后，已回收进程标记删除失败时按 app+nonce+phase=reaped 精确兜底清理，不再把可安全重试的现场留给人工恢复。
+
 ## 0.2.16（2026-11-02）
 
 - Composer 发布生命周期加固：安装/更新改为先装后端载荷再发布前端；前端发布的任何失败（Sand Core 前端基线未就绪、文件冲突、写盘失败）降级为 `[sandadmin]` 前缀告警并附 `composer run-script sand:publish` 恢复命令，不再中止 Composer，也不回滚已安装的后端载荷。

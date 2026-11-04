@@ -76,4 +76,9 @@ return [
             ],
         ]
     ],
+    // 依赖命令 composer 步骤的 packagist 镜像：默认腾讯云 Composer 镜像自带
+    // dist 文件，依赖解析与下载不请求 api.github.com（匿名限额 60 次/小时）。
+    // 宿主在 composer.json 或全局 Composer 配置里声明过 packagist.org 仓库时
+    // 不注入镜像；置空字符串可完全停用镜像注入。
+    'composer_mirror' => env('SAND_COMPOSER_MIRROR', 'https://mirrors.cloud.tencent.com/composer/'),
 ];

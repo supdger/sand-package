@@ -48,6 +48,7 @@ PHP;
     private ?InstallLogic $install = null;
     private ?string $callback = null;
     private ?string $nonce = null;
+    private string $outputTail = '';
     private $process = null;
     private bool $compensated = false;
     private bool $terminalCompleted = false;
@@ -97,8 +98,12 @@ PHP;
             $pipes = [];
             // Only inherit the host process environment; request data never
             // supplies environment values for these fixed dependency commands.
+            // The composer task additionally gets an isolated COMPOSER_HOME so
+            // dependency resolution uses a dist-carrying mirror instead of the
+            // anonymous api.github.com zipball endpoints.
             $stage = 'process_spawn';
-            $this->process = @proc_open($this->groupLauncherCommand($command['argv']), [1 => ['pipe', 'w'], 2 => ['pipe', 'w'], 3 => ['pipe', 'r'], 4 => ['pipe', 'w']], $pipes, $command['cwd'], null);
+            $env = $this->dependencyEnvironment($command);
+            $this->process = @proc_open($this->groupLauncherCommand($command['argv']), [1 => ['pipe', 'w'], 2 => ['pipe', 'w'], 3 => ['pipe', 'r'], 4 => ['pipe', 'w']], $pipes, $command['cwd'], $env);
             if (!is_resource($this->process)) {
                 throw new \RuntimeException('dependency process did not start');
             }
@@ -176,6 +181,7 @@ PHP;
                             if ($output === '') {
                                 continue;
                             }
+                            $this->appendTail($output);
                             yield $this->output($output);
                         }
                     }
@@ -223,7 +229,14 @@ PHP;
             yield $this->output('exec-success');
         } catch (Throwable $error) {
             $incident = $this->recordFailure($error, $stage, $appName, $key, $startedAt);
-            yield $this->output('依赖命令未完成（阶段：' . $stage . '，记录号：' . $incident . '）。请管理员按记录号查看宿主日志并检查安装状态；未声明回滚插件文件或数据库');
+            $detail = '依赖命令未完成（阶段：' . $stage . '，记录号：' . $incident . '）。请管理员按记录号查看宿主日志并检查安装状态；未声明回滚插件文件或数据库';
+            $hint = DependencyCommandSupport::failureHint($this->callback ?? '', $this->outputTail);
+            if ($hint !== null) {
+                $detail .= '；【原因】' . $hint;
+            } elseif ($error instanceof \plugin\sandadmin\exception\ApiException) {
+                $detail .= '；【详情】' . mb_substr($error->getMessage(), 0, 240);
+            }
+            yield $this->output($detail);
             yield $this->output('exec-error');
         } finally {
             $reaped = $this->terminateAndReap();
@@ -585,6 +598,52 @@ PHP;
             return self::DEFAULT_MAX_RUNTIME_SECONDS;
         }
         return max(1, min((int) $configured, self::DEFAULT_MAX_RUNTIME_SECONDS));
+    }
+
+    /**
+     * 依赖命令的进程环境。composer 任务使用独立 COMPOSER_HOME：
+     * packagist 默认指向自带 dist 文件的镜像，依赖解析不请求 api.github.com，
+     * 宿主显式声明过 packagist.org 仓库时尊重其选择；npm/pnpm 任务保持原环境。
+     *
+     * @param array{argv:list<string>,cwd:string,callback:'npm'|'composer'} $command
+     * @return array<string,string>|null null 表示完全继承宿主进程环境
+     */
+    private function dependencyEnvironment(array $command): ?array
+    {
+        if ($command['callback'] !== 'composer') {
+            return null;
+        }
+        $base = getenv();
+        if (!is_array($base) || ($base['PATH'] ?? '') === '') {
+            return null;
+        }
+        try {
+            $home = DependencyCommandSupport::prepareComposerHome(
+                runtime_path() . DIRECTORY_SEPARATOR . 'sandpackage-composer-home',
+                $command['cwd'] . DIRECTORY_SEPARATOR . 'composer.json',
+                DependencyCommandSupport::realComposerHome($base),
+                self::composerMirror()
+            );
+        } catch (Throwable) {
+            // 沙箱目录准备失败时退回宿主原环境，不阻断依赖步骤本身。
+            return null;
+        }
+        return DependencyCommandSupport::composerEnvironment($base, $home);
+    }
+
+    private static function composerMirror(): ?string
+    {
+        $configured = config('plugin.sandpackage.terminal.composer_mirror', DependencyCommandSupport::DEFAULT_PACKAGIST_MIRROR);
+        return is_string($configured) && $configured !== '' ? $configured : null;
+    }
+
+    private function appendTail(string $output): void
+    {
+        $this->outputTail .= $output;
+        $excess = strlen($this->outputTail) - DependencyCommandSupport::OUTPUT_TAIL_BYTES;
+        if ($excess > 0) {
+            $this->outputTail = substr($this->outputTail, $excess);
+        }
     }
 
     private function limitOutput(string $output): ?string
