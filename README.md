@@ -58,6 +58,8 @@ HTTP 请求大小与 ZIP 容量分别受限。宿主 HTTP 请求包络需容纳 
 
 已有静态文件只有与当前 `dist` 逐路径、逐摘要一致时才自动建立基线；本地修改、未知文件或进程归属不明会保留现场并给出具体原因，不自动覆盖。
 
+服务动作：`reload`（SIGUSR1）只轮换可重载的 HTTP worker，**不会**重读 `config/process.php`；含自定义进程的安装/升级走 `full_restart`（`php start.php restart` 语义）。旧接口名 `Server::restart()` 实际是 reload，请改用 `Server::reload()` / `Server::fullRestart()`。
+
 运行要求：Linux/macOS 的 PHP CLI 需支持 `proc_open`、`pcntl` 和 `posix`，重载只针对当前 HTTP 服务所属的 Workerman 主进程；Windows 需要 Windows PowerShell 5.1、PHP CLI ≥8.2 与 `proc_open`，使用本地盘符目录，不支持 UNC、设备路径或 reparse point。标准适配无法确认的自定义进程监督器或外部静态托管不会被当作安全可用。
 
 ## 恢复入口
@@ -71,7 +73,7 @@ HTTP 请求大小与 ZIP 容量分别受限。宿主 HTTP 请求包络需容纳 
 | 宿主应用载荷升级在 SQL 开始前因文件冲突失败 | `php webman sandpackage:recover inspect-host-upgrade <插件标识>` | `restore-host-upgrade`，`RESTORE <插件标识> <fingerprint>` |
 | 依赖任务进程中断、失去回执 | `php webman sandpackage:recover inspect-dependency <插件标识>` | `recover-dependency`，`RECOVER DEPENDENCY <插件标识> <fingerprint>`；仅请求重载时另加 `--restart` |
 
-只执行本次 `actions` 中出现的动作。收尾类动作（`finish-journal`、`finish-dependency-cleanup`）只完成已有记录，`restart-only` 只请求重载，`refresh-provider-binding` 只更新已验证提供方的执行绑定；它们都不改变已恢复的状态。
+只执行本次 `actions` 中出现的动作。收尾类动作（`finish-journal`、`finish-dependency-cleanup`）只完成已有记录，`restart-only` 按账本意图请求重载或完整重启（`dependency_service_action` / `process_registration_pending`），`refresh-provider-binding` 只更新已验证提供方的执行绑定；它们都不改变已恢复的状态。
 
 对应的超级管理员 API 为 `POST /app/sandpackage/install/` 下的 `inspectCandidate`、`discardCandidate`、`inspectFreshCandidate`、`discardFreshCandidate`、`inspectHostUpgradeRecovery`、`inspectDependencyRecovery`、`recoverDependency`，均传 `appName`，恢复另传完整 `confirmation`，重载动作另传 `restart=1`。
 

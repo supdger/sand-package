@@ -805,15 +805,14 @@ class InstallController extends BaseController
     }
 
     /**
-     * 重启
-     * @param Request $request
-     * @return Response
+     * HTTP worker 平滑重载（SIGUSR1）。不会重读 process.php，也不能注册新的自定义进程。
+     * 需要 master 重读 process.php 时请走安装/恢复的 full_restart / restart-only。
      */
     public function reload(Request $request): Response
     {
-        Server::restart();
+        Server::reload();
 
-        return $this->success('重载成功');
+        return $this->success('重载成功（SIGUSR1；不等于完整重启）');
     }
 
     // ========== 商店代理接口 ==========

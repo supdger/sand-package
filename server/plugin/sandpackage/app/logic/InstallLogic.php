@@ -29,6 +29,7 @@ use plugin\sandpackage\app\service\PostgresHostCatalogFingerprint;
 use plugin\sandpackage\app\service\ExistingSchemaManifest;
 use plugin\sandpackage\app\service\PluginDependencyPolicy;
 use plugin\sandpackage\app\service\PluginServiceCatalogPolicy;
+use plugin\sandpackage\app\service\PluginProcessFingerprint;
 use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
 use plugin\sandpackage\app\service\DependencyCommandRecovery;
@@ -362,8 +363,14 @@ class InstallLogic
             echo '开始安装[' . $this->appName . ']' . PHP_EOL;
             $recovery = ($isUpdate || $attachExistingSchema) ? null : $this->freshRecovery($hostPayload, $dependencyChange);
             if ($recovery !== null) $recovery->begin($restart);
+            $serviceAction = $this->resolveServiceAction($isUpdate, $restart);
             $info['dependency_restart_pending'] = $restart ? 1 : 0;
-            $pending = ['operation_pending' => 1, 'dependency_restart_pending' => $info['dependency_restart_pending']];
+            $info['dependency_service_action'] = $serviceAction;
+            $pending = [
+                'operation_pending' => 1,
+                'dependency_restart_pending' => $info['dependency_restart_pending'],
+                'dependency_service_action' => $serviceAction,
+            ];
             if ($attachExistingSchema) {
                 $pending['existing_schema_attach_pending'] = 1;
                 $pending['existing_schema_attached'] = 1;
@@ -406,7 +413,9 @@ class InstallLogic
                     [$port, $declaration] = $serviceCatalog;
                     echo '登记插件服务目录' . PHP_EOL;
                     $port->registerServiceActions($declaration['service'], $declaration['actions']);
-                    if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                    if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL) {
+                        $this->finishServiceAction($isUpdate);
+                    }
                 }
                 if ($recovery !== null) $recovery->checkpoint();
                 if ($attachProof !== null && $this->existingSchemaAttachProof($info, $database)['token'] !== $attachProof['token']) {
@@ -415,7 +424,10 @@ class InstallLogic
 
                 $info = $this->getInfo();
                 unset($info['operation_pending'], $info['existing_schema_attach_pending']);
-                if (($info['state'] ?? null) === self::INSTALLED) $info['dependency_restart_pending'] = 0;
+                if (($info['state'] ?? null) === self::INSTALLED
+                    && (int) ($info['process_registration_pending'] ?? 0) !== 1) {
+                    $info['dependency_restart_pending'] = 0;
+                }
                 $this->setInfo([], $info);
                 if ($recovery !== null) $recovery->complete();
                 $hostJournal?->complete();
@@ -1395,7 +1407,13 @@ class InstallLogic
             $flags = $dependency->hasJournal() ? $dependency->apply() : ['composer' => false, 'npm' => false];
             $state = $flags['composer'] || $flags['npm']
                 ? self::DEPENDENT_WAIT_INSTALL : self::INSTALLED;
-            $changes = ['state' => $state, 'operation_pending' => 1, 'dependency_restart_pending' => $restart ? 1 : 0];
+            $serviceAction = $this->resolveServiceAction(true, $restart);
+            $changes = [
+                'state' => $state,
+                'operation_pending' => 1,
+                'dependency_restart_pending' => $restart ? 1 : 0,
+                'dependency_service_action' => $serviceAction,
+            ];
             if ($flags['composer']) $changes['composer_dependent_wait_install'] = 1;
             if ($flags['npm']) $changes['npm_dependent_wait_install'] = 1;
             $this->setInfo($changes);
@@ -1416,10 +1434,15 @@ class InstallLogic
                 throw new ApiException('升级宿主文件尚未完整部署');
             }
             UserMenuCache::clearMenuCache();
-            if ($restart && $state !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
+            if ($restart && $state !== self::DEPENDENT_WAIT_INSTALL) {
+                $this->finishServiceAction(true);
+            }
             $result = $this->getInfo();
             unset($result['operation_pending']);
-            if ($state === self::INSTALLED) $result['dependency_restart_pending'] = 0;
+            if ($state === self::INSTALLED
+                && (int) ($result['process_registration_pending'] ?? 0) !== 1) {
+                $result['dependency_restart_pending'] = 0;
+            }
             $this->setInfo([], $result);
             $this->hostPayloadLifecycleJournal('upgrade', $info)->complete();
             return [
@@ -1644,7 +1667,9 @@ class InstallLogic
                 $host->apply();
                 $removal->applyCandidate();
                 UserMenuCache::clearMenuCache();
-                if ($restart && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                if ($restart) {
+                    $this->finishServiceAction(false);
+                }
                 $removal->complete();
                 $finalization->begin();
             }
@@ -1684,7 +1709,12 @@ class InstallLogic
                         if (!array_key_exists($name, $sourceFiles) || ($sourceFiles[$name] === 'directory') !== ($hash === 'directory')) throw new ApiException('部署目录含有不属于原候选的路径');
                     }
                 }
-                $this->setInfo(['state' => self::WAIT_INSTALL, 'dependency_restart_pending' => $restart ? 1 : 0]);
+                $serviceAction = $this->resolveServiceAction(false, $restart);
+                $this->setInfo([
+                    'state' => self::WAIT_INSTALL,
+                    'dependency_restart_pending' => $restart ? 1 : 0,
+                    'dependency_service_action' => $serviceAction,
+                ]);
                 try {
                     if ($dependencyChange !== null && !$dependencyChange->hasJournal()) {
                         $dependencyChange->begin();
@@ -1698,12 +1728,17 @@ class InstallLogic
                         [$port, $declaration] = $serviceCatalog;
                         echo '登记插件服务目录' . PHP_EOL;
                         $port->registerServiceActions($declaration['service'], $declaration['actions']);
-                        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
+                        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL) {
+                            $this->finishServiceAction(false);
+                        }
                     }
                     $recovery->checkpoint();
                     $info = $this->getInfo();
                     unset($info['operation_pending']);
-                    if (($info['state'] ?? null) === self::INSTALLED) $info['dependency_restart_pending'] = 0;
+                    if (($info['state'] ?? null) === self::INSTALLED
+                        && (int) ($info['process_registration_pending'] ?? 0) !== 1) {
+                        $info['dependency_restart_pending'] = 0;
+                    }
                     $this->setInfo([], $info);
                 } catch (Throwable $error) {
                     $this->setInfo(['state' => self::FAILED, 'operation_pending' => 1]);
@@ -1748,7 +1783,9 @@ class InstallLogic
         $hostChange?->apply();
         if ($dependencyChange === null) $this->dependUpdateHandle();
         UserMenuCache::clearMenuCache();
-        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL && Server::restart() !== true) throw new ApiException('服务重载未完成');
+        if ($restart && ($this->getInfo()['state'] ?? null) !== self::DEPENDENT_WAIT_INSTALL) {
+            $this->finishServiceAction(($this->getInfo()['update'] ?? 0) == 1 || ($this->getInfo()['upgrade_from_version'] ?? null) !== null);
+        }
     }
 
     private function hostPayloadFiles(): ?HostPayloadFreshFiles
@@ -2007,7 +2044,10 @@ class InstallLogic
                 UserMenuCache::clearMenuCache();
 
                 // 重启后端
-                if ($restart && Server::restart() !== true) throw new ApiException('数据库卸载已执行，但服务重载未完成');
+                if ($restart) {
+                    // Removing custom processes also requires master to re-read process.php.
+                    $this->finishServiceAction(false, true);
+                }
                 $removal?->complete();
                 if ($removal !== null) {
                     $finalization = $this->hostPayloadUninstallFinalization();
@@ -3139,22 +3179,186 @@ class InstallLogic
             'owned' => HostPayloadOwnership::read($state, $this->appName), 'transactions' => $transactions, 'dependencies' => $dependencies];
     }
 
+
+
+    /**
+     * Apply the ledger service action (full_restart when process fingerprint requires it).
+     * @param bool $forceFullRestart Prefer full_restart (e.g. uninstall dropping custom processes).
+     */
+    private function finishServiceAction(bool $isUpdate, bool $forceFullRestart = false): void
+    {
+        $info = $this->getInfo();
+        $action = $info['dependency_service_action'] ?? null;
+        if (!in_array($action, ['reload', 'full_restart', 'none'], true)) {
+            $action = $this->resolveServiceAction($isUpdate, true);
+        }
+        if ($forceFullRestart && PluginProcessFingerprint::declaresCustomProcesses($this->installedProcessFile())) {
+            $action = 'full_restart';
+        }
+        if ($action === 'none') {
+            $action = 'reload';
+        }
+        $result = $this->performServiceAction($action, $isUpdate);
+        if ($result['pending']) {
+            // Files/SQL already committed. Detached full-restart worker will clear pending on
+            // success; if it fails, restart-only remains available. Do not claim registration done.
+            $info = $this->getInfo();
+            $info['dependency_restart_pending'] = 1;
+            $info['process_registration_pending'] = 1;
+            $info['dependency_service_action'] = 'full_restart';
+            $info['dependency_restart_status'] = 'signal_requested';
+            $this->setInfo([], $info);
+            echo '完整重启已请求；自定义进程登记待核验（process_registration_pending）' . PHP_EOL;
+        }
+    }
+
+    private function candidateProcessFile(): string
+    {
+        return PluginProcessFingerprint::configPath(
+            $this->appDir . 'plugin' . DIRECTORY_SEPARATOR . $this->appName,
+        );
+    }
+
+    private function installedProcessFile(): string
+    {
+        return PluginProcessFingerprint::configPath(
+            base_path() . DIRECTORY_SEPARATOR . 'plugin' . DIRECTORY_SEPARATOR . $this->appName,
+        );
+    }
+
+    /** @return 'none'|'reload'|'full_restart' */
+    private function resolveServiceAction(bool $isUpdate, bool $restartRequested): string
+    {
+        if (!$restartRequested) {
+            return 'none';
+        }
+        $candidate = $this->candidateProcessFile();
+        // Before deploy the live tree is still the previous install; after deploy both match.
+        $installed = $this->installedProcessFile();
+        $previous = is_file($installed) ? $installed : null;
+        // Fresh packages live under the candidate tree only.
+        if (!is_file($candidate) && is_file($installed)) {
+            $candidate = $installed;
+        }
+        if (PluginProcessFingerprint::requiresFullRestart($isUpdate, $candidate, $previous)) {
+            return 'full_restart';
+        }
+        return 'reload';
+    }
+
+    /**
+     * Execute reload (SIGUSR1) or full_restart (php start.php restart semantics).
+     * On full_restart failure the ledger keeps process_registration_pending and restart-only.
+     *
+     * @return array{action:string,pending:bool}
+     */
+    private function performServiceAction(string $action, bool $isUpdate = false): array
+    {
+        if ($action === 'none') {
+            return ['action' => 'none', 'pending' => false];
+        }
+        $info = $this->getInfo();
+        $info['dependency_service_action'] = $action;
+        if ($action === 'full_restart') {
+            $processFile = is_file($this->installedProcessFile())
+                ? $this->installedProcessFile()
+                : $this->candidateProcessFile();
+            $info['process_fingerprint'] = PluginProcessFingerprint::fingerprint($processFile);
+            $info['process_registration_pending'] = 1;
+            $info['dependency_restart_status'] = 'requesting';
+            $this->setInfo([], $info);
+            $expected = PluginProcessFingerprint::processNames($processFile);
+            $registry = $this->appDir . 'info.ini';
+            try {
+                if (Server::fullRestart($expected, [
+                    'registry' => $registry,
+                    'clear_pending' => true,
+                ]) !== true) {
+                    throw new ApiException(
+                        '服务完整重启未完成；已登记 process_registration_pending，请使用 restart-only 执行完整重启',
+                        400,
+                    );
+                }
+            } catch (ApiException $error) {
+                throw $error;
+            } catch (Throwable $error) {
+                throw new ApiException(
+                    '服务完整重启失败，已登记 process_registration_pending，请使用 restart-only（完整重启）恢复：'
+                    . $error->getMessage(),
+                    400,
+                );
+            }
+            // Detached HTTP path: worker clears pending after verify. Wait briefly; else keep pending.
+            if (\Workerman\Worker::getAllWorkers() !== []) {
+                $deadline = microtime(true) + 8;
+                do {
+                    clearstatcache(true, $registry);
+                    $current = $this->getInfo();
+                    if ((int) ($current['process_registration_pending'] ?? 0) !== 1) {
+                        return ['action' => 'full_restart', 'pending' => false];
+                    }
+                    usleep(200000);
+                } while (microtime(true) < $deadline && \Workerman\Worker::getAllWorkers() !== []);
+                return ['action' => 'full_restart', 'pending' => true];
+            }
+            $info = $this->getInfo();
+            $info['process_registration_pending'] = 0;
+            $info['dependency_restart_status'] = 'completed';
+            $this->setInfo([], $info);
+            return ['action' => 'full_restart', 'pending' => false];
+        }
+        $info['dependency_service_action'] = 'reload';
+        unset($info['process_registration_pending']);
+        $this->setInfo([], $info);
+        try {
+            if (Server::reload() !== true) {
+                throw new ApiException('服务重载未完成');
+            }
+        } catch (ApiException $error) {
+            throw $error;
+        } catch (Throwable $error) {
+            throw new ApiException('服务重载失败：' . $error->getMessage(), 400);
+        }
+        return ['action' => 'reload', 'pending' => false];
+    }
+
     private function requestDependencyRestart(): void
     {
         $info = $this->getInfo();
-        if (($info['state'] ?? null) !== self::INSTALLED || !in_array($info['dependency_restart_pending'] ?? null, [1, 2], true)
+        $pendingRestart = in_array($info['dependency_restart_pending'] ?? null, [1, 2], true);
+        $pendingProcess = (int) ($info['process_registration_pending'] ?? 0) === 1;
+        if (($info['state'] ?? null) !== self::INSTALLED || (!$pendingRestart && !$pendingProcess)
             || !empty($info['dependency_command_nonce']) || !empty($info['composer_dependent_wait_install'])
-            || !empty($info['npm_dependent_wait_install'])) throw new ApiException('依赖未全部完成，不能重载', 400);
+            || !empty($info['npm_dependent_wait_install'])) throw new ApiException('依赖未全部完成，不能重载或完整重启', 400);
+        $action = ($info['dependency_service_action'] ?? null) === 'full_restart' || $pendingProcess
+            ? 'full_restart' : 'reload';
         $info['dependency_restart_attempt'] = bin2hex(random_bytes(16));
         $info['dependency_restart_status'] = 'requesting';
+        $info['dependency_service_action'] = $action;
         $this->saveDependencyInfo($info);
         try {
-            if (Server::restart() !== true) throw new ApiException('依赖已完成，但重载请求未成功；请重新检查依赖任务', 400);
+            $result = $this->performServiceAction($action);
+            $info = $this->getInfo();
+            if ($result['pending']) {
+                // Detached full_restart: keep restart-only / process_registration_pending honest.
+                $info['dependency_restart_pending'] = 1;
+                $info['process_registration_pending'] = 1;
+                $info['dependency_restart_status'] = 'signal_requested';
+                $this->saveDependencyInfo($info);
+                throw new ApiException(
+                    '依赖已完成，完整重启已请求但自定义进程尚未核验；请重新检查并在确认后使用 restart-only',
+                    400,
+                );
+            }
             $info['dependency_restart_pending'] = 0;
-            $info['dependency_restart_status'] = 'signal_requested';
+            $info['process_registration_pending'] = 0;
+            $info['dependency_restart_status'] = $action === 'full_restart' ? 'completed' : 'signal_requested';
             $this->saveDependencyInfo($info);
+        } catch (ApiException $error) {
+            throw $error;
         } catch (Throwable $error) {
-            throw new ApiException('依赖成功登记已保存，重载结果未确认；请重新检查并明确完成重载：' . $error->getMessage(), 400);
+            throw new ApiException('依赖成功登记已保存，服务动作结果未确认；请重新检查并明确完成 '
+                . ($action === 'full_restart' ? '完整重启' : '重载') . '：' . $error->getMessage(), 400);
         }
     }
 

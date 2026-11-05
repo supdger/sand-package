@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.22（2026-11-05）
+
+- 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
+- 新鲜安装含非空 `process.php`，或升级时 process 指纹（进程名 / handler / count / reloadable，无法加载表时回退规范化源码摘要）变化 → 自动 `full_restart`；仅业务 PHP 变更仍可 `reload`。
+- 完整重启在独立进程执行并核验 master PID 轮换与可选进程名；失败或尚未核验时账本登记 `process_registration_pending`，恢复入口提供显式 `restart-only`（完整重启），不得谎报自定义进程已注册。`signal_requested` 仍不能代替实际运行验收。
+- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.22**。
+
 ## 0.2.21（2026-11-04）
 
 - 修复「一键续做」不消解插件依赖：目标插件升级中断在「等待依赖安装」（`state=4` + 依赖等待标志）、且已装依赖仍低于候选要求的真实卡死现场（如 SandAI 0.3.5 要求 SandIAM≥0.8.6 而本机仍是 0.8.4），此前行级续跑只续目标自身的 composer/npm 依赖任务，会把目标置为已安装而依赖插件仍不满足，违反依赖声明。行级「一键续做」现在走完整续跑编排：先按只读依赖计划端点重算并补齐未满足的插件依赖（市场升级/新装依赖插件经页面会话自动发起，不触发服务重载，由链尾统一重载一次），再按服务端登记快照续跑剩余依赖任务；目标自身绝不重发安装请求，依赖已满足时跳过消解直进依赖链。整页 reload 后的会话断点续跑同样注入依赖安装能力（此前 reload 落在依赖消解中途也会因缺安装通道而失败）；依赖计划类失败的「一键重试」按发起入口重跑对应编排，不再误用目标安装重发。现有数据库重接与依赖自身断在依赖等待（计划项 resume 续链）的场景经同一入口自动获得依赖消解。
