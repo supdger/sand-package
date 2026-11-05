@@ -1,11 +1,11 @@
 # Changelog
 
-## 0.2.22（2026-11-05）
+## 0.2.23（2026-11-05）
 
 - 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
 - 新鲜安装含非空 `process.php`，或升级时 process 指纹（进程名 / handler / count / reloadable，无法加载表时回退规范化源码摘要）变化 → 自动 `full_restart`；仅业务 PHP 变更仍可 `reload`。
 - 完整重启在独立进程执行并核验 master PID 轮换与可选进程名；失败或尚未核验时账本登记 `process_registration_pending`，恢复入口提供显式 `restart-only`（完整重启），不得谎报自定义进程已注册。`signal_requested` 仍不能代替实际运行验收。
-- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.22**。
+- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.23**。
 
 ## 0.2.21（2026-11-04）
 
