@@ -82,7 +82,7 @@ assert_true(str_contains($logic, 'dependency_service_action'), 'install ledger r
 assert_true(!str_contains($logic, 'Server::restart('), 'InstallLogic no longer calls ambiguous Server::restart()');
 
 $app = include $root . '/server/plugin/sandpackage/config/app.php';
-assert_true(($app['version'] ?? null) === '0.2.22', 'version bumped to 0.2.22');
+assert_true(($app['version'] ?? null) === '0.2.23', 'version bumped to 0.2.23');
 
 // cleanup
 foreach ([$empty, $ai, $ai2] as $file) {
