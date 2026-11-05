@@ -37,11 +37,17 @@ final class DependencyCommandRecovery
         if ($checkpoint === null) {
             if ($raw === null) {
                 $info = $current['info'];
-                $reload = ($info['state'] ?? null) === 1 && in_array($info['dependency_restart_pending'] ?? 0, [1, 2], true);
-                if (!$reload) throw new RuntimeException('没有可恢复的依赖进程记录或待完成重载意图');
+                $reload = ($info['state'] ?? null) === 1 && (
+                    in_array($info['dependency_restart_pending'] ?? 0, [1, 2], true)
+                    || (int) ($info['process_registration_pending'] ?? 0) === 1
+                );
+                if (!$reload) throw new RuntimeException('没有可恢复的依赖进程记录或待完成重载/完整重启意图');
                 if (!empty($info['dependency_command_nonce']) || !empty($info['composer_dependent_wait_install'])
-                    || !empty($info['npm_dependent_wait_install'])) throw new RuntimeException('依赖尚未全部完成，不能仅重载');
-                return $this->result($current, null, 'reload_pending', ['restart-only'], null);
+                    || !empty($info['npm_dependent_wait_install'])) throw new RuntimeException('依赖尚未全部完成，不能仅重载或完整重启');
+                $phase = ((int) ($info['process_registration_pending'] ?? 0) === 1
+                    || ($info['dependency_service_action'] ?? null) === 'full_restart')
+                    ? 'full_restart_pending' : 'reload_pending';
+                return $this->result($current, null, $phase, ['restart-only'], null);
             }
             $marker = $this->validateMarker($raw);
             if ($this->completedCleanup($current['info'], $marker)) {

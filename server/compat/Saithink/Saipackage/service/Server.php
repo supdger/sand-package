@@ -16,10 +16,21 @@ class Server
 {
 
     /**
-     * 重启webman
+     * Historical name used across installers. This is SIGUSR1 HTTP worker reload,
+     * NOT php start.php restart. Prefer reload() or fullRestart() explicitly.
+     *
      * @return bool
      */
     public static function restart(): bool
+    {
+        return self::reload();
+    }
+
+    /**
+     * Smooth-reload HTTP workers (SIGUSR1). Does not re-read config/process.php
+     * or fork newly declared custom processes.
+     */
+    public static function reload(): bool
     {
         // Console commands have no Workerman worker; their parent owns the
         // command invocation, not the host service.
@@ -35,7 +46,7 @@ class Server
                 if (!is_string($listen)) throw new \RuntimeException('宿主 HTTP 监听配置无效，恢复 CLI 已拒绝重载');
                 $workers = \SandSystemUpdateRuntime::unixHttpWorkers($server, $master, $listen);
                 if ($workers === []) throw new \RuntimeException('当前宿主没有可核对的 HTTP worker，恢复 CLI 已拒绝重载');
-                fwrite(STDERR, "已核对当前宿主主进程；正在重载 HTTP worker。\n");
+                fwrite(STDERR, "已核对当前宿主主进程；正在重载 HTTP worker（SIGUSR1，不会重读 process.php）。\n");
                 \SandSystemUpdateRuntime::reloadUnixHost($server, $pidFile, $master);
                 $deadline = microtime(true) + 15;
                 do {
@@ -54,11 +65,11 @@ class Server
             }
         }
         if (function_exists('posix_kill')) {
-            // 所有子进程重启
+            // SIGUSR1 to the Workerman master — reload only, not full restart.
             try {
                 return posix_kill(posix_getppid(), SIGUSR1);
             } catch (\Throwable $e) {
-                Log::error("平滑启动失败：" . $e->getMessage());
+                Log::error("平滑重载失败：" . $e->getMessage());
                 return false;
             }
         } else {
@@ -68,6 +79,102 @@ class Server
             });
         }
         return true;
+    }
+
+    /**
+     * Official full restart so the master re-reads process.php and forks new custom processes.
+     * Equivalent to `php start.php restart` (or stop+start -d). Never patches workerman/webman.
+     *
+     * @param list<string> $expectedProcessNames Optional process titles that must appear after rotation.
+     * @return bool true when the restart completed and (when names given) processes were observed.
+     */
+    /**
+     * @param list<string> $expectedProcessNames
+     * @param array{registry?:string,clear_pending?:bool} $options
+     */
+    public static function fullRestart(array $expectedProcessNames = [], array $options = []): bool
+    {
+        try {
+            if (PHP_OS_FAMILY === 'Windows') {
+                throw new \RuntimeException('Windows 完整重启请通过宿主监督器 stop/start；安装器不会将 SIGUSR1 重载当作 process 注册成功');
+            }
+            if (!function_exists('posix_kill')) {
+                throw new \RuntimeException('当前平台无法安全执行完整重启；请使用宿主正式服务控制入口执行 php start.php restart');
+            }
+            $pidFile = config('server.pid_file');
+            if (!is_string($pidFile) || $pidFile === '') {
+                throw new \RuntimeException('宿主未配置 Workerman 主进程记录，已拒绝完整重启');
+            }
+            require_once dirname(__DIR__, 4) . '/plugin/sandpackage/tools/system-update-worker.php';
+            $server = base_path();
+            $requestParent = Worker::getAllWorkers() === [] ? null : posix_getppid();
+            $master = \SandSystemUpdateRuntime::unixHostMaster($server, $pidFile, $requestParent);
+
+            if (Worker::getAllWorkers() === []) {
+                fwrite(STDERR, "已核对当前宿主主进程；正在执行完整重启（php start.php restart 语义，会重读 process.php）。\n");
+                $next = \SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master);
+                if ($expectedProcessNames !== []) {
+                    \SandSystemUpdateRuntime::assertUnixCustomProcessesRunning($server, $next, $expectedProcessNames);
+                }
+                fwrite(STDERR, "宿主主进程已轮换" . ($expectedProcessNames !== [] ? '，自定义进程已出现' : '') . "。\n");
+                return true;
+            }
+
+            self::detachFullRestart($server, $pidFile, $master, $expectedProcessNames, $options);
+            return true;
+        } catch (\Throwable $e) {
+            Log::error('服务完整重启失败：' . $e->getMessage());
+            throw $e;
+        }
+    }
+
+    /**
+     * @param list<string> $expectedProcessNames
+     * @param array{registry?:string,clear_pending?:bool} $options
+     */
+    private static function detachFullRestart(string $server, string $pidFile, array $master, array $expectedProcessNames, array $options = []): void
+    {
+        if (!function_exists('proc_open')) {
+            throw new \RuntimeException('无法启动独立完整重启进程（proc_open 不可用）');
+        }
+        $php = PHP_BINARY;
+        $worker = dirname(__DIR__, 4) . '/plugin/sandpackage/tools/full-restart-worker.php';
+        $payload = [
+            'server' => $server,
+            'pid_file' => $pidFile,
+            'master' => $master,
+            'expected' => array_values($expectedProcessNames),
+            'php' => $php,
+            'registry' => is_string($options['registry'] ?? null) ? $options['registry'] : null,
+            'clear_pending' => ($options['clear_pending'] ?? false) === true,
+        ];
+        $dir = $server . '/runtime/sandpackage';
+        if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
+            throw new \RuntimeException('无法准备完整重启任务目录');
+        }
+        $payloadFile = $dir . '/full-restart-' . bin2hex(random_bytes(8)) . '.json';
+        if (file_put_contents($payloadFile, json_encode($payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)) === false) {
+            throw new \RuntimeException('无法写入完整重启任务');
+        }
+        $null = \SandSystemUpdateRuntime::nullDevice();
+        $pipes = [];
+        $process = proc_open(
+            [$php, $worker, $payloadFile],
+            [0 => ['file', $null, 'r'], 1 => ['file', $null, 'a'], 2 => ['file', $null, 'a']],
+            $pipes,
+            $server,
+            null,
+            ['bypass_shell' => true],
+        );
+        if (!is_resource($process)) {
+            @unlink($payloadFile);
+            throw new \RuntimeException('无法启动独立完整重启进程');
+        }
+        // Launcher double-forks and exits 0 quickly; waiting here is safe and confirms spawn.
+        $code = proc_close($process);
+        if ($code !== 0) {
+            throw new \RuntimeException('独立完整重启进程启动失败');
+        }
     }
 
     public static function getInstalledIds(string $dir): array
