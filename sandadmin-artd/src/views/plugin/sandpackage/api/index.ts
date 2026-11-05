@@ -146,6 +146,21 @@ export interface GlobalGuardRecord {
   modified: number | null
 }
 
+/** inspectUninstall 返回的单个已安装依赖方：卸载对话框据此列出警告。 */
+export interface UninstallDependent {
+  app: string
+  title: string
+  version: string | null
+}
+
+export interface UninstallInspection {
+  app: string
+  title: string
+  version: string | null
+  dependents: UninstallDependent[]
+  unverifiable: UninstallDependent[]
+}
+
 export interface GlobalGuardInspection {
   app: string
   operation: 'global-guards'
@@ -414,6 +429,15 @@ export default {
     return request.post<unknown>({
       url: '/app/sandpackage/install/restoreRuntimeFromBackup',
       data
+    })
+  },
+
+  /** 只读检查仍依赖该插件的已安装插件，卸载对话框据此列出警告。 */
+  inspectUninstall(data: { appName: string }, options: RepositoryReadOptions = {}) {
+    return request.post<UninstallInspection>({
+      url: '/app/sandpackage/install/inspectUninstall',
+      data,
+      ...options
     })
   },
 
