@@ -67,15 +67,43 @@ PHP;
     private bool $processJournalStarted = false;
     private int $outputRemaining = self::MAX_OUTPUT_BYTES;
     private int $outputFrames = 0;
+    private bool $cli = false;
 
+    /**
+     * Former HTTP SSE entry. It never reads the request and never starts a process.
+     */
     public function exec(): Generator
     {
+        throw new \RuntimeException('HTTP terminal execution is disabled');
+    }
+
+    /**
+     * Run one allowlisted dependency command in this CLI process.
+     *
+     * Refuses to start when a Webman HTTP request is active, including when the
+     * worker itself was launched with the CLI SAPI.
+     *
+     * @return Generator<int, string>
+     */
+    public function runCli(string $commandKey, string $appName): Generator
+    {
+        self::assertNotHttpRequest();
+        if (preg_match('/^[a-z][a-z0-9-]{1,63}$/D', $appName) !== 1) {
+            throw new \InvalidArgumentException('插件标识无效');
+        }
+        $this->cli = true;
+        yield from $this->runAllowed($commandKey, 'module-install:' . $appName);
+    }
+
+    private function runAllowed(string $key, string $extend): Generator
+    {
+        if (!$this->cli) {
+            throw new \RuntimeException('HTTP terminal execution is disabled');
+        }
         $completed = false;
-        $key = (string) request()->input('command', '');
-        $extend = (string) request()->input('extend', '');
         $command = self::allowedCommand($key);
         $appName = $this->moduleFromExtend($extend);
-        if (!$this->isSuperAdmin() || $command === null || $appName === null) {
+        if ($command === null || $appName === null) {
             yield $this->output('命令不可用、确认信息不完整或无操作权限');
             yield $this->output('exec-error');
             $this->terminalCompleted = true;
@@ -440,8 +468,25 @@ PHP;
 
     private function clientIsConnected(): bool
     {
-        $connection = request()->connection ?? null;
-        return is_object($connection) && (!isset($connection->status) || $connection->status !== 16);
+        if ($this->cli) {
+            return true;
+        }
+        return false;
+    }
+
+    private static function assertNotHttpRequest(): void
+    {
+        if (!function_exists('request')) {
+            return;
+        }
+        try {
+            $current = request();
+        } catch (Throwable) {
+            return;
+        }
+        if (is_object($current)) {
+            throw new \RuntimeException('dependency commands cannot run on an HTTP worker request');
+        }
     }
 
     private function moduleFromExtend(string $extend): ?string

@@ -33,6 +33,9 @@ Route::post('/app/sandpackage/install/retryFailedUpgrade', [plugin\sandpackage\a
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
 Route::post('/app/sandpackage/install/inspectDependencies', [plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
 
+// No HTTP terminal and no dependency-start executor. Those actions are not
+// registered. Dependency installs run as `php webman sandpackage:dependency`.
+
 // Recovery surface of the upstream PostgreSQL lifecycle driver. These share the
 // InstallLogic used by `php webman sandpackage:recover`; the CLI is unchanged.
 foreach ([
