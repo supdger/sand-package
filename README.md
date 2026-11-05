@@ -84,13 +84,26 @@ HTTP 请求大小与 ZIP 容量分别受限。宿主 HTTP 请求包络需容纳 
 - 依赖恢复只在原进程确已结束时归档占用并回到依赖等待状态，不证明原命令成功，不撤销 Composer 的部分效果，不重跑依赖、插件安装或 SQL，也不恢复或改写 Composer 清单、锁文件及已安装依赖。`signal_requested` 只表示已发出重载请求，不代替 worker 轮换和实际运行验收。
 - Unix 进程检查与 CLI 重载需要 POSIX 扩展、`/usr/bin/pgrep` 与 `/bin/ps`；无法证明原进程退出的平台会拒绝恢复，应改用宿主正式服务控制入口。未知进程、活进程、身份可能复用、权限不明、记录损坏及载荷或依赖漂移同样拒绝，不能手动删除标记或更改登记。
 
+## 依赖命令
+
+生产环境不提供 HTTP 在线终端，也不提供浏览器里的依赖安装按钮。`/app/sandpackage/index/terminal` 与 `POST /app/sandpackage/install/inspectDependencyStart` 均未注册，访问结果为 404。页面不再发起这些请求。
+
+依赖安装在宿主 `server/` 目录、由独立 CLI 进程执行。命令键只有 `composer.update`、`web-install.npm`、`web-install.yarn`、`web-install.pnpm`，不能传入任意 shell：
+
+```bash
+php webman sandpackage:dependency run <插件标识> composer
+php webman sandpackage:dependency run <插件标识> npm
+php webman sandpackage:dependency run <插件标识> npm --manager yarn
+php webman sandpackage:dependency inspect composer.update
+```
+
+`npm` 任务默认使用 pnpm。`inspect` 只打印当前 CLI 进程的函数与配置提示，不创建锁、任务或子进程。中断后的现场检查与恢复仍使用上一节的 `php webman sandpackage:recover inspect-dependency` / `recover-dependency`，该恢复命令不重跑 composer 或 npm。
+
 ## 依赖任务诊断
 
-依赖终端报错时，公开反馈包含固定错误阶段和独立记录号。管理员可用记录号在宿主现有 Webman 日志中查找 `SandPackage dependency command failed`；日志只记录阶段、异常类型、包内源码位置、worker 与耗时，不记录异常原文、命令参数、环境、nonce 或带参数的调用栈。记录号不是恢复确认或任务凭据。
+依赖命令报错时，公开反馈包含固定错误阶段和独立记录号。管理员可用记录号在宿主现有 Webman 日志中查找 `SandPackage dependency command failed`；日志只记录阶段、异常类型、包内源码位置、进程与耗时，不记录异常原文、命令参数、环境、nonce 或带参数的调用栈。记录号不是恢复确认或任务凭据。
 
-启动前可在已登录的超级管理员 HTTP 会话调用 `POST /app/sandpackage/install/inspectDependencyStart`，表单 `command` 只接受 `composer.update`、`web-install.npm`、`web-install.yarn`、`web-install.pnpm`。它只返回处理该请求的 HTTP worker 的函数能力、固定命令配置有效性和工作目录读写提示，不创建目录、锁、任务或进程，也不读写恢复记录。`readonly_only=true` 不证明实际锁取得、持久登记写入、子进程能力或启动成功，这些结果明确为 `unknown`；CLI 检查结果不能代替 HTTP worker 的能力。
-
-`provider_identity` 只读比较当前 worker 的 Composer 运行元数据、磁盘锁定/安装记录与宿主要求。`status=unavailable` 或字段为 `null` 表示无法获得可信提示；`identity_matches` 只反映这些身份比较，不证明完整恢复资格、源码字节、候选或锁/写入/启动成功，当前不一致也不能证明过去的异常原因。
+`php webman sandpackage:dependency inspect` 返回的 `provider_identity` 只读比较当前 CLI 进程的 Composer 运行元数据、磁盘锁定/安装记录与宿主要求。`status=unavailable` 或字段为 `null` 表示无法获得可信提示；`identity_matches` 只反映这些身份比较，不证明完整恢复资格、源码字节、候选或锁/写入/启动成功，当前不一致也不能证明过去的异常原因。
 
 ## 逐版本变化与验证范围
 

@@ -4,7 +4,7 @@
  * 应用级宿主（pinia store），不依附安装视图组件生命周期：安装请求、
  * 服务端状态轮询与依赖任务入队全部在这里持有，页面被 keep-alive 停用、
  * 重激活或动态路由重建都不影响链推进。安装视图只渲染这里暴露的状态
- * （busy/failure/rows），并在失败时按 panelTick 弹出终端面板。
+ * （busy/failure/rows），并在依赖命令需要执行时按 panelTick 展示命令行说明。
  *
  * 读通道（fetchRows）刻意不传 AbortSignal、不检查视图 readsActive——
  * 0.2.18 的缺陷正是停用窗口内 getList 静默空转导致轮询失能。安装
@@ -24,11 +24,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import sandpackageApi from '../api/index'
-import { TaskStatus, useTerminalStore } from './terminal'
 import {
-  DEPENDENCY_LOCK_CONFLICT_TOKEN,
   dependencyPlanItemsOf,
-  dependencyTaskMatches,
   readOrchestrationSessions,
   removeOrchestrationSession,
   resumeInstallOrchestration,
@@ -48,8 +45,6 @@ import {
 } from '../install/dependency-chain'
 
 export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrchestrator', () => {
-  const terminalStore = useTerminalStore()
-
   /** 最近一次服务端登记快照；编排器自有读通道的落点，视图可做交叉校验。 */
   const rows = ref<DependencyChainRow[]>([])
   /** 正在编排的插件标识；空串表示空闲。 */
@@ -114,81 +109,18 @@ export const useInstallOrchestratorStore = defineStore('sandpackageInstallOrches
   }
 
   /**
-   * 依赖任务入队并等待终态。终端任务队列与 fetch-SSE 都在
-   * sandpackageTerminal store 内运行，不依附任何组件。
-   *
-   * 幂等：同一插件同一环节已有在途任务（续跑并发触发或人工「处理依赖」
-   * 已入队）时 attach 其回调观察终态，不重复入队。服务端的依赖进程在
-   * 客户端断连时被终止回收，不存在需 attach 的服务端在途任务。
+   * 浏览器不执行依赖命令。登记仍停在等待依赖时，链在这里停下并给出
+   * CLI；命令本身由 `php webman sandpackage:dependency` 在独立进程中运行。
    */
-  const runDependencyTask = (kind: DependencyKind, app: string): Promise<boolean> =>
-    new Promise<boolean>((resolve) => {
-      const extend = 'module-install:' + app
-      const done = (status: TaskStatus): void => {
-        resolve(status === TaskStatus.SUCCESS)
-      }
-      const inflight = terminalStore.taskList.find(
-        (item) =>
-          dependencyTaskMatches(item, kind, app) &&
-          (item.status === TaskStatus.WAITING ||
-            item.status === TaskStatus.CONNECTING ||
-            item.status === TaskStatus.RUNNING)
-      )
-      if (inflight) {
-        const previous = inflight.callback
-        inflight.callback = (status: TaskStatus): void => {
-          if (typeof previous === 'function') previous(status)
-          done(status)
-        }
-        return
-      }
-      if (kind === 'composer') {
-        terminalStore.addTask('composer.update', extend, done)
-      } else {
-        terminalStore.addNodeTask('web-install', extend, done)
-      }
-    })
+  const runDependencyTask = (_kind: DependencyKind, _app: string): Promise<boolean> =>
+    Promise.resolve(false)
 
-  /** 最近一次匹配失败的依赖任务；通俗原因与锁冲突判定共用该查找。 */
-  const dependencyFailureTask = (app: string, kind: DependencyKind) => {
-    const extend = 'module-install:' + app
-    const prefix = kind === 'composer' ? 'composer.' : 'web-install.'
-    return [...terminalStore.taskList]
-      .reverse()
-      .find(
-        (item) =>
-          item.extend === extend &&
-          item.command.startsWith(prefix) &&
-          item.status === TaskStatus.FAILED
-      )
-  }
-
-  /** 依赖任务失败后从终端任务输出里归纳通俗原因（与原视图内实现一致）。 */
   const failureReason = (app: string, kind: DependencyKind): string => {
-    const task = dependencyFailureTask(app, kind)
-    const messages = (task?.message ?? [])
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
-    const hinted = messages.filter(
-      (line) =>
-        line.includes('【原因】') ||
-        line.includes('【详情】') ||
-        line.includes(DEPENDENCY_LOCK_CONFLICT_TOKEN)
-    )
-    const last = hinted.length > 0 ? hinted[hinted.length - 1] : messages[messages.length - 1]
-    return last && last !== '' ? last : '请查看终端输出中的具体错误'
+    const task = kind === 'composer' ? 'composer' : 'npm'
+    return `浏览器不能执行依赖命令。请在宿主 server 目录运行 php webman sandpackage:dependency run ${app} ${task}。中断现场用 php webman sandpackage:recover inspect-dependency ${app}`
   }
 
-  /**
-   * 依赖任务失败是否为「安装操作锁冲突」瞬态：服务端把 flock 冲突
-   * （OperationLockException）映射为失败详情里的【锁冲突】记号，
-   * 这里只按记号判定——行快照看不到的解锁残余窗口或其他插件的
-   * 在途事务都由它兜底，编排器在预算内重试入队而非判链失败。
-   */
-  const lockConflict = (app: string, kind: DependencyKind): boolean => {
-    const task = dependencyFailureTask(app, kind)
-    return (task?.message ?? []).some((line) => line.includes(DEPENDENCY_LOCK_CONFLICT_TOKEN))
-  }
+  const lockConflict = (_app: string, _kind: DependencyKind): boolean => false
 
   /**
    * 依赖消解：只读计划端点 → 编排队列。计划端点本身失败时抛出，由

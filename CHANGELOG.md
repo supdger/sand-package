@@ -2,6 +2,7 @@
 
 ## 0.2.23（2026-11-05）
 
+- 移除 HTTP 在线终端与依赖启动执行面。`/app/sandpackage/index/terminal` 与 `POST /app/sandpackage/install/inspectDependencyStart` 不再注册。依赖安装改为宿主 `server/` 目录的 `php webman sandpackage:dependency run <插件标识> composer|npm`；中断恢复仍是 `php webman sandpackage:recover inspect-dependency` / `recover-dependency`。管理端源码不再提供「依赖安装终端」按钮或指向该 HTTP 地址的客户端，`composer run-script sand:publish` 不会再把该入口发布出去。
 - 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
 - 新鲜安装含非空 `process.php`，或升级时 process 指纹（进程名 / handler / count / reloadable，无法加载表时回退规范化源码摘要）变化 → 自动 `full_restart`；仅业务 PHP 变更仍可 `reload`。
 - 完整重启在独立进程执行并核验 master PID 轮换与可选进程名；失败或尚未核验时账本登记 `process_registration_pending`，恢复入口提供显式 `restart-only`（完整重启），不得谎报自定义进程已注册。`signal_requested` 仍不能代替实际运行验收。

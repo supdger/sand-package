@@ -1,8 +1,8 @@
 /**
  * 一键安装依赖链的纯判定与编排核心（不依附组件生命周期）。
  *
- * 依赖任务只允许经认证管理员会话的 SSE 终端启动（TerminalRunner::isSuperAdmin），
- * 后端没有不经会话的执行器，因此自动依赖链只能由页面触发。这里的判定以服务端
+ * 依赖命令不从浏览器执行。页面只根据服务端登记推进安装与依赖消解；
+ * composer/npm 由独立 CLI `php webman sandpackage:dependency run` 执行。这里的判定以服务端
  * 登记状态（info.ini 的 state、operation_pending 与 *_dependent_wait_install
  * 标志）为唯一依据，不依赖安装请求的客户端成败：axios 超时或连接断开时，
  * 服务端 PHP 仍在后台继续完成安装登记，按服务端状态轮询收敛才不会让链静默缺失。
@@ -296,17 +296,17 @@ export interface DependencyOrchestratorDeps {
    */
   fetchRows: () => Promise<DependencyChainRow[]>
   /**
-   * 入队一个依赖任务并等待其终态；成功返回 true。实现侧走应用级
-   * 终端任务队列（store 持有 fetch-SSE，不依附视图）。
+   * 执行一个依赖任务并等待其终态；成功返回 true。浏览器实现不得发起
+   * HTTP 终端，应返回 false 并给出 CLI 命令。
    */
   runDependencyTask: (kind: DependencyKind, app: string) => Promise<boolean>
-  /** 依赖任务失败后的通俗原因读取（通常为终端输出尾部归纳）。 */
+  /** 依赖任务未执行时的说明，应指向 sandpackage:dependency。 */
   failureReason?: (app: string, kind: DependencyKind) => string
   /**
    * 依赖任务失败是否为「安装操作锁冲突」瞬态：服务端把 flock 冲突
    * （OperationLockException）映射为失败详情中的稳定记号
-   * 【锁冲突】（DependencyCommandSupport::LOCK_CONFLICT_TOKEN），
-   * 实现侧按终端失败任务输出判定。返回 true 时编排器在
+   * 【锁冲突】（DependencyCommandSupport::LOCK_CONFLICT_TOKEN）。
+   * 返回 true 时编排器在
    * lockWaitBudgetMs 预算内重试入队同一环节，而非判链失败。
    */
   lockConflict?: (app: string, kind: DependencyKind) => boolean
@@ -458,7 +458,7 @@ export const runDependencyChainLoop = async (
       app,
       title,
       dependencyTaskLabel(kind),
-      deps.failureReason?.(app, kind) || '请查看终端输出中的具体错误'
+      deps.failureReason?.(app, kind) || '请在宿主 server 目录运行 php webman sandpackage:dependency'
     )
   }
   return chainFailed(app, title, '依赖', '依赖任务轮次异常，请到插件管理确认插件状态')
