@@ -1943,6 +1943,23 @@ class InstallLogic
             if (!empty($this->getInfo()['existing_schema_attached'])) {
                 throw new ApiException('插件接管的是既有数据库结构，普通卸载会删除原有数据；此入口禁止卸载');
             }
+            [$dependents, $unverifiable] = $this->installedDependents();
+            if ($dependents !== []) {
+                $names = array_map(
+                    static fn(array $item): string => $item['title'] . '（' . $item['app'] . '）',
+                    $dependents,
+                );
+                throw new ApiException('插件仍被以下已安装插件依赖：' . implode('、', $names)
+                    . '；直接卸载会使它们无法正常工作。请先卸载依赖它的插件，再卸载本插件', 400);
+            }
+            if ($unverifiable !== []) {
+                $names = array_map(
+                    static fn(array $item): string => $item['title'] . '（' . $item['app'] . '）',
+                    $unverifiable,
+                );
+                throw new ApiException('无法确认以下已安装插件是否依赖本插件：' . implode('、', $names)
+                    . '；请先在插件管理检查这些插件，确认没有依赖后再卸载', 400);
+            }
             $this->hostPayloadUninstallFinalization()->retireCompleted();
             $this->retireRuntimeChangeIfFinished();
             $this->retireDependencyChangeIfFinished();
@@ -2032,6 +2049,84 @@ class InstallLogic
         } finally {
             $this->unlock();
         }
+    }
+
+    /**
+     * Read-only uninstall preview: which installed plugins still declare this
+     * app in their package `plugin_dependencies`. The dialog shows the list as
+     * a plain-language warning; uninstall() re-checks under the write lock and
+     * refuses while any dependent remains installed.
+     *
+     * @return array{app:string,title:string,version:?string,dependents:array<int,array{app:string,title:string,version:?string}>,unverifiable:array<int,array{app:string,title:string,version:?string}>}
+     */
+    public function inspectUninstall(): array
+    {
+        $info = [];
+        try { $info = $this->getInfo(); } catch (Throwable) { $info = []; }
+        [$dependents, $unverifiable] = $this->installedDependents();
+        return [
+            'app' => $this->appName,
+            'title' => is_string($info['title'] ?? null) && $info['title'] !== '' ? $info['title'] : $this->appName,
+            'version' => is_string($info['version'] ?? null) ? $info['version'] : null,
+            'dependents' => $dependents,
+            'unverifiable' => $unverifiable,
+        ];
+    }
+
+    /**
+     * Installed plugins whose staged config.json names this app in
+     * `plugin_dependencies`. Only the presence of the declaration matters, so a
+     * loose key lookup is deliberate: it does not re-validate versions or
+     * digests, and also accepts a bare list form naming this app.
+     *
+     * A declaration that cannot be read or parsed is never skipped silently:
+     * the plugin lands in `unverifiable` and uninstall() refuses it separately,
+     * because an installed neighbour we cannot inspect cannot be proven not to
+     * depend on this app. The 1 MiB ceiling mirrors the ownership-record cap;
+     * real plugin configs are a few KiB.
+     *
+     * @return array{0:array<int,array{app:string,title:string,version:?string}>,1:array<int,array{app:string,title:string,version:?string}>}
+     */
+    private function installedDependents(): array
+    {
+        $dependents = [];
+        $unverifiable = [];
+        foreach ($this->storage->managedRecords() as $app => $record) {
+            if ($app === $this->appName || isset($record['_error'])
+                || !in_array($record['state'] ?? null, [self::INSTALLED, (string) self::INSTALLED], true)) {
+                continue;
+            }
+            $entry = [
+                'app' => $app,
+                'title' => is_string($record['title'] ?? null) && $record['title'] !== '' ? $record['title'] : $app,
+                'version' => is_string($record['version'] ?? null) ? $record['version'] : null,
+            ];
+            $declared = null;
+            $path = is_string($record['_path'] ?? null) ? $record['_path'] : '';
+            $configPath = $path . DIRECTORY_SEPARATOR . 'config.json';
+            if ($path !== '' && is_file($configPath) && !is_link($configPath)) {
+                $size = filesize($configPath);
+                if (is_int($size) && $size <= 1048576) {
+                    try {
+                        $config = json_decode((string) file_get_contents($configPath), true, 32, JSON_THROW_ON_ERROR);
+                        if (is_array($config) && is_array($config['plugin_dependencies'] ?? [])) {
+                            $declared = $config['plugin_dependencies'] ?? [];
+                        }
+                    } catch (Throwable) {
+                        // Cannot prove this installed plugin does not depend on us.
+                    }
+                }
+            }
+            if ($declared === null) {
+                $unverifiable[] = $entry;
+                continue;
+            }
+            if (!array_key_exists($this->appName, $declared) && !in_array($this->appName, $declared, true)) {
+                continue;
+            }
+            $dependents[] = $entry;
+        }
+        return [$dependents, $unverifiable];
     }
 
     /** Inspection and execution share the existing host/app locks, never the ordinary uninstall gate. */
