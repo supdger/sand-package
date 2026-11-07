@@ -27,6 +27,28 @@ if ($payloadFile === '' || !is_file($payloadFile)) {
     exit(2);
 }
 
+// A Workerman HTTP worker spawns this helper; PHP proc_open only redirects the
+// listed descriptors, so the master listen sockets would stay inherited and keep
+// the port bound after the old master exits. PHP cannot close arbitrary fds, so
+// re-exec through a POSIX fd scrub unless the launcher already scrubbed us.
+if (getenv('SAND_FD_SCRUBBED') !== '1') {
+    if (!function_exists('pcntl_exec')) {
+        fwrite(STDERR, "pcntl_exec unavailable; continuing unscrubbed\n");
+    } else {
+        require_once __DIR__ . '/system-update-worker.php';
+        $scrub = SandSystemUpdateRuntime::unixFdScrubCommand([
+            PHP_BINARY,
+            (string) (realpath(__FILE__) ?: __FILE__),
+            (string) (realpath($payloadFile) ?: $payloadFile),
+        ]);
+        $binary = array_shift($scrub);
+        if (!is_string($binary) || @pcntl_exec($binary, $scrub) === false) {
+            fwrite(STDERR, "inherited-fd scrub unavailable; continuing unscrubbed\n");
+        }
+        // Unreachable when exec succeeds: the scrubbed replacement owns this pid.
+    }
+}
+
 $pid = pcntl_fork();
 if ($pid < 0) {
     exit(2);
@@ -61,7 +83,8 @@ try {
     $master = $payload['master'];
     $php = $payload['php'] ?? PHP_BINARY;
     $expected = $payload['expected'] ?? [];
-    $next = SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master, $php);
+    $listeners = is_array($payload['listeners'] ?? null) ? $payload['listeners'] : [];
+    $next = SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master, $php, $listeners);
     if (is_array($expected) && $expected !== []) {
         SandSystemUpdateRuntime::assertUnixCustomProcessesRunning($server, $next, $expected);
     }

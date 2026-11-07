@@ -112,7 +112,7 @@ class Server
 
             if (Worker::getAllWorkers() === []) {
                 fwrite(STDERR, "已核对当前宿主主进程；正在执行完整重启（php start.php restart 语义，会重读 process.php）。\n");
-                $next = \SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master);
+                $next = \SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master, PHP_BINARY, self::hostListeners());
                 if ($expectedProcessNames !== []) {
                     \SandSystemUpdateRuntime::assertUnixCustomProcessesRunning($server, $next, $expectedProcessNames);
                 }
@@ -126,6 +126,31 @@ class Server
             Log::error('服务完整重启失败：' . $e->getMessage());
             throw $e;
         }
+    }
+
+    /**
+     * Listen addresses declared by the host (config/process.php + legacy
+     * config/server.php). Passed to the restart worker so it can wait for the
+     * ports to release and confirm the rotated master accepts connections.
+     *
+     * @return list<string>
+     */
+    private static function hostListeners(): array
+    {
+        $listeners = [];
+        $processes = config('process');
+        if (is_array($processes)) {
+            foreach ($processes as $definition) {
+                if (is_array($definition) && is_string($definition['listen'] ?? null) && $definition['listen'] !== '') {
+                    $listeners[] = $definition['listen'];
+                }
+            }
+        }
+        $server = config('server.listen');
+        if (is_string($server) && $server !== '') {
+            $listeners[] = $server;
+        }
+        return array_values(array_unique($listeners));
     }
 
     /**
@@ -145,6 +170,7 @@ class Server
             'master' => $master,
             'expected' => array_values($expectedProcessNames),
             'php' => $php,
+            'listeners' => self::hostListeners(),
             'registry' => is_string($options['registry'] ?? null) ? $options['registry'] : null,
             'clear_pending' => ($options['clear_pending'] ?? false) === true,
         ];
@@ -158,8 +184,11 @@ class Server
         }
         $null = \SandSystemUpdateRuntime::nullDevice();
         $pipes = [];
+        // This HTTP worker inherited the master listen sockets; proc_open only
+        // redirects the listed descriptors. Spawn through a POSIX fd scrub so the
+        // helper cannot keep the port bound after the old master exits.
         $process = proc_open(
-            [$php, $worker, $payloadFile],
+            \SandSystemUpdateRuntime::unixFdScrubCommand([$php, $worker, $payloadFile]),
             [0 => ['file', $null, 'r'], 1 => ['file', $null, 'a'], 2 => ['file', $null, 'a']],
             $pipes,
             $server,
