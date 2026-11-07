@@ -563,6 +563,88 @@ POWERSHELL;
         if (!posix_kill($master['pid'], SIGUSR1)) throw new RuntimeException('框架无法向当前宿主发送重载信号');
     }
 
+    /**
+     * Official full restart: master exits and starts again so process.php is re-read.
+     * This is NOT SIGUSR1 reload. Prefer php start.php restart; fall back to stop+start -d.
+     */
+    public static function fullRestartUnixHost(string $server, string $pidFile, array $master, string $php = PHP_BINARY): array
+    {
+        if (!is_int($master['pid'] ?? null) || !is_string($master['identity'] ?? null)
+            || self::unixHostMaster($server, $pidFile, $master['pid']) !== $master) {
+            throw new RuntimeException('宿主主进程身份已变化，框架已拒绝完整重启');
+        }
+        $start = self::normalizePath(realpath($server . '/start.php') ?: $server . '/start.php');
+        if (!is_file($start)) throw new RuntimeException('宿主缺少 start.php，无法执行完整重启');
+        if (!is_string($php) || $php === '' || str_contains($php, "\0")) throw new RuntimeException('PHP CLI 路径无效');
+        // Run in an isolated process group so a calling worker can die with the old master
+        // while this CLI completes stop+start.
+        self::command([$php, $start, 'restart', '-d'], $server, static function (string $line): void {}, 90);
+        return self::waitUnixHostMasterRotated($server, $pidFile, $master, 45.0);
+    }
+
+    /** Wait until the pid file names a different verified Workerman master. */
+    public static function waitUnixHostMasterRotated(string $server, string $pidFile, array $previous, float $timeout = 45.0): array
+    {
+        $deadline = microtime(true) + $timeout;
+        $lastError = '宿主主进程未在限定时间内完成轮换';
+        do {
+            usleep(200000);
+            try {
+                $current = self::unixHostMaster($server, $pidFile);
+                if ($current['pid'] !== $previous['pid'] || $current['identity'] !== $previous['identity']) {
+                    return $current;
+                }
+            } catch (Throwable $error) {
+                $lastError = $error->getMessage();
+            }
+        } while (microtime(true) < $deadline);
+        throw new RuntimeException($lastError);
+    }
+
+    /**
+     * Best-effort: list WorkerMan worker process titles under the verified master.
+     * Used to confirm custom process names after full_restart; never patches workerman.
+     *
+     * @return list<string>
+     */
+    public static function unixWorkerProcessTitles(string $server, array $master): array
+    {
+        if (!is_int($master['pid'] ?? null)) throw new RuntimeException('宿主主进程无效，无法核对自定义进程');
+        $children = trim(self::command(['/usr/bin/pgrep', '-P', (string)$master['pid'], '.'], $server, static function (string $line): void {}, 10));
+        $titles = [];
+        foreach (preg_split('/\s+/', $children) as $child) {
+            if (!ctype_digit($child) || (int)$child <= 1) continue;
+            try {
+                $identity = trim(self::command(['/bin/ps', '-p', $child, '-o', 'args='], $server, static function (string $line): void {}, 10));
+            } catch (RuntimeException) {
+                continue;
+            }
+            if (str_contains($identity, 'WorkerMan: worker process ')) {
+                $titles[] = $identity;
+            }
+        }
+        return $titles;
+    }
+
+    /** @param list<string> $expectedNames */
+    public static function assertUnixCustomProcessesRunning(string $server, array $master, array $expectedNames): void
+    {
+        if ($expectedNames === []) return;
+        $titles = self::unixWorkerProcessTitles($server, $master);
+        $missing = [];
+        foreach ($expectedNames as $name) {
+            if (!is_string($name) || $name === '') continue;
+            $found = false;
+            foreach ($titles as $title) {
+                if (str_contains($title, $name)) { $found = true; break; }
+            }
+            if (!$found) $missing[] = $name;
+        }
+        if ($missing !== []) {
+            throw new RuntimeException('完整重启后仍未出现自定义进程：' . implode(', ', $missing));
+        }
+    }
+
     /** Inspect only HTTP workers belonging to the already verified master. */
     public static function unixHttpWorkers(string $server, array $master, string $listen): array
     {

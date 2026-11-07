@@ -272,9 +272,8 @@ class Terminal
             [$type, $value] = explode(':', $this->extend);
             if ($type == 'module-install' && $value) {
                 $install = new InstallLogic($value);
+                // dependentInstallComplete applies ledger reload or full_restart intent.
                 $install->dependentInstallComplete('composer');
-                // 重启后端
-                Server::restart();
             }
         }
         return true;

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.23（2026-11-05）
+
+- 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
+- 新鲜安装含非空 `process.php`，或升级时 process 指纹（进程名 / handler / count / reloadable，无法加载表时回退规范化源码摘要）变化 → 自动 `full_restart`；仅业务 PHP 变更仍可 `reload`。
+- 完整重启在独立进程执行并核验 master PID 轮换与可选进程名；失败或尚未核验时账本登记 `process_registration_pending`，恢复入口提供显式 `restart-only`（完整重启），不得谎报自定义进程已注册。`signal_requested` 仍不能代替实际运行验收。
+- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.23**。
+
 ## 0.2.22（2026-11-05）
 
 - 移除剩余手打确认串：「撤回安装候选」「撤回升级包」「登记现有插件」与失败升级恢复流程的「恢复升级前运行文件」「恢复插件文件」「重新执行升级」全部改为普通确认对话框（通俗说明 + 确认/取消按钮，无输入框、无内部名词）。服务端确认串校验保持不变，由前端按已核验字段或检查端点响应自动生成并随请求提交——与 0.2.20/0.2.21 对安装、升级、卸载的处理方式一致，候选身份绑定的竞态防护语义不变。
