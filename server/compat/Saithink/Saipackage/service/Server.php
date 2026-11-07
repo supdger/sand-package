@@ -302,6 +302,17 @@ class Server
     }
 
     /**
+     * Runtime environment files (`.env`, `.env.<name>`) are operator-owned: an
+     * existing destination file is never overwritten by install/upgrade.
+     * `.env.example` and other templates stay managed payload and update normally.
+     */
+    public static function isRuntimeEnvName(string $basename): bool
+    {
+        return $basename === '.env'
+            || (str_starts_with($basename, '.env.') && !str_ends_with($basename, '.example'));
+    }
+
+    /**
      * installByRelation
      * @param $pathRelation
      * @return void
@@ -313,7 +324,61 @@ class Server
             if (!is_dir($parent_dir)) {
                 mkdir($parent_dir, 0777, true);
             }
-            copy_dir($source, $dest, true);
+            $preserved = self::preserveRuntimeEnvFiles($source, $dest);
+            try {
+                copy_dir($source, $dest, true);
+            } finally {
+                self::restoreRuntimeEnvFiles($preserved);
+            }
+        }
+    }
+
+    /**
+     * Move every destination runtime-env file aside before a wholesale copy so
+     * the package payload cannot overwrite operator ports/credentials. Only
+     * paths the package itself ships are candidates; files that exist solely on
+     * the host are outside copy_dir's reach and need no guard.
+     *
+     * @return array<string,string> destination path => parked path
+     */
+    private static function preserveRuntimeEnvFiles(string $source, string $dest): array
+    {
+        $preserved = [];
+        if (!is_dir($source)) {
+            $relative = basename($source);
+            if (self::isRuntimeEnvName($relative) && is_file($dest)) {
+                $parked = $dest . '.sandkeep-' . bin2hex(random_bytes(6));
+                if (!@rename($dest, $parked)) throw new \RuntimeException('无法保留已有环境文件：' . $dest);
+                $preserved[$dest] = $parked;
+            }
+            return $preserved;
+        }
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY,
+        );
+        foreach ($iterator as $item) {
+            $basename = $item->getBasename();
+            if (!self::isRuntimeEnvName($basename)) continue;
+            $target = $dest . DIRECTORY_SEPARATOR . $iterator->getSubPathName();
+            if (!is_file($target) || is_link($target)) continue;
+            $parked = $target . '.sandkeep-' . bin2hex(random_bytes(6));
+            if (!@rename($target, $parked)) throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            $preserved[$target] = $parked;
+        }
+        return $preserved;
+    }
+
+    /** @param array<string,string> $preserved destination path => parked path */
+    private static function restoreRuntimeEnvFiles(array $preserved): void
+    {
+        foreach ($preserved as $target => $parked) {
+            if (is_file($target) && !@unlink($target)) {
+                throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            }
+            if (!@rename($parked, $target)) {
+                throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            }
         }
     }
 
