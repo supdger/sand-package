@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.24（2026-11-07）
+
+- 修复 `full_restart` 后新宿主 `Address already in use`：`full-restart-worker.php` 由 HTTP worker 经 `proc_open` 拉起时会继承 master 的监听 socket（PHP `proc_open` 只重定向声明的描述符），旧 master 退出后辅助进程继续持有端口，新 master 无法 bind。现在辅助进程经 `/bin/sh` fd 清洗启动（关闭 3+ 号描述符并置 `SAND_FD_SCRUBBED`），且 worker 在未被清洗拉起时会用 `pcntl_exec` 自清洗一次，兼容旧版本宿主调用链。
+- 完整重启改为有界确认流程：`php start.php restart -d` → 等待 master 轮换 → 确认声明监听端口恢复接受连接；尝试间先等有界端口释放（默认 15s），最多 2 次尝试，失败返回朴素中文错误，不再永久挂起或无限重试。
+- 安装/升级保留运营方运行时环境文件：插件载荷部署不再覆盖目标已存在的 `.env` / `.env.<name>` 变体（`.env.example` 等模板仍随版本更新）；legacy 部署清单核对同样不纳入运行时 env。
+- 不修改 workerman/webman 源码与 vendor。
+
 ## 0.2.23（2026-11-05）
 
 - 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
