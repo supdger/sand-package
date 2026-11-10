@@ -1,5 +1,10 @@
 <?php
 
+/**
+ * This file is part of sand-package, derived from saithink/saipackage (MIT License).
+ * Copyright (c) 2024 saithink.
+ */
+
 namespace Saithink\Saipackage\service;
 
 use plugin\sandpackage\app\logic\InstallLogic;
