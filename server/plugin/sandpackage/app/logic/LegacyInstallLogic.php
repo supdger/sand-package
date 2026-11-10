@@ -2404,6 +2404,9 @@ class LegacyInstallLogic
                 $entry['touched'] = true;
                 $entries[] = $entry;
                 $this->copyDirectory($source, $target);
+                if (is_string($entry['backup'])) {
+                    $this->restoreRuntimeEnvFiles($entry['backup'], $target);
+                }
             }
         } catch (Throwable $e) {
             $this->restoreDeployment($entries);
@@ -2598,6 +2601,37 @@ class LegacyInstallLogic
         }
     }
 
+    /**
+     * Operator-owned runtime env (`.env`, `.env.<name>`) survives deploy: files
+     * kept in the pre-deploy backup are copied back over the fresh payload so an
+     * upgrade cannot overwrite configured ports/credentials. `.env.example`
+     * templates stay managed payload; the manifest ignores runtime env.
+     *
+     * @throws Throwable
+     */
+    private function restoreRuntimeEnvFiles(string $backup, string $target): void
+    {
+        if (!is_dir($backup)) {
+            return;
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($backup, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::LEAVES_ONLY
+        );
+        foreach ($iterator as $item) {
+            if ($item->isLink() || !$item->isFile()) continue;
+            if (!\Saithink\Saipackage\service\Server::isRuntimeEnvName($item->getBasename())) continue;
+            $destination = $target . DIRECTORY_SEPARATOR . $iterator->getSubPathName();
+            $parent = dirname($destination);
+            if (!is_dir($parent) && !mkdir($parent, 0755, true) && !is_dir($parent)) {
+                throw new ApiException('无法保留已有环境文件');
+            }
+            if (!copy($item->getPathname(), $destination)) {
+                throw new ApiException('无法保留已有环境文件');
+            }
+        }
+    }
+
     /** @throws Throwable */
     private function verifyDeploymentMatchesPackage(): string
     {
@@ -2627,6 +2661,11 @@ class LegacyInstallLogic
         foreach ($iterator as $item) {
             if ($item->isLink() || !$item->isFile()) {
                 throw new ApiException('插件文件核验条件不足，不能登记');
+            }
+            // Operator-owned runtime env is deliberately outside the package
+            // manifest: deploy preserves an existing .env instead of overwriting.
+            if (\Saithink\Saipackage\service\Server::isRuntimeEnvName($item->getBasename())) {
+                continue;
             }
             $hash = hash_file('sha256', $item->getPathname());
             if (!is_string($hash)) {

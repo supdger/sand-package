@@ -564,10 +564,118 @@ POWERSHELL;
     }
 
     /**
+     * Spawn argv through /bin/sh so every inherited descriptor >= 3 is closed
+     * before the real command runs. PHP proc_open only redirects the listed
+     * descriptors; a Workerman worker would otherwise pass the master listen
+     * sockets to detached helpers and keep the port bound after master exits.
+     * The scrub marks SAND_FD_SCRUBBED so self-aware helpers skip re-scrubbing.
+     *
+     * @param list<string> $argv
+     * @return list<string>
+     */
+    public static function unixFdScrubCommand(array $argv): array
+    {
+        $script = <<<'SH'
+SAND_FD_SCRUBBED=1; export SAND_FD_SCRUBBED
+if command -v lsof >/dev/null 2>&1; then
+    for _fd in $(lsof -p $$ -F f 2>/dev/null | awk '/^f[0-9]+$/ {f=substr($0,2)+0; if (f>2) print f}'); do
+        eval "exec $_fd>&- $_fd<&-" 2>/dev/null
+    done
+else
+    _limit=$(ulimit -n 2>/dev/null || echo 0)
+    case "$_limit" in (''|*[!0-9]*) _limit=4096;; esac
+    [ "$_limit" -gt 65536 ] && _limit=65536
+    _i=3
+    while [ "$_i" -lt "$_limit" ]; do eval "exec $_i>&- $_i<&-" 2>/dev/null; _i=$((_i+1)); done
+fi
+exec "$@"
+SH;
+        return ['/bin/sh', '-c', $script, 'sand-fd-scrub', ...array_values($argv)];
+    }
+
+    /**
+     * Reduce webman listen strings (http://0.0.0.0:8787, tcp://…, udp://…) to
+     * unique probe targets. unix:// and unparseable entries are skipped.
+     *
+     * @return list<array{scheme:string,host:string,port:int,listen:string}>
+     */
+    public static function unixTcpListeners(array $listeners): array
+    {
+        $targets = [];
+        foreach ($listeners as $listen) {
+            if (!is_string($listen) || $listen === '' || strlen($listen) > 255) continue;
+            if (str_starts_with($listen, 'unix://')) continue;
+            $url = parse_url(str_contains($listen, '://') ? $listen : 'tcp://' . $listen);
+            if (!is_array($url) || !isset($url['host'], $url['port'])) continue;
+            $host = (string) $url['host'];
+            $port = (int) $url['port'];
+            if ($host === '' || $port < 1 || $port > 65535) continue;
+            $scheme = in_array(strtolower((string) ($url['scheme'] ?? 'tcp')), ['udp', 'udg'], true) ? 'udp' : 'tcp';
+            $targets[$scheme . '|' . $host . '|' . $port] = ['scheme' => $scheme, 'host' => $host, 'port' => $port, 'listen' => $listen];
+        }
+        return array_values($targets);
+    }
+
+    /**
+     * Wait until every declared listener can be bound again (bounded poll).
+     * A still-held inherited socket keeps the bind failing; never wait forever.
+     */
+    public static function waitUnixListenersReleased(array $listeners, float $timeout = 15.0): void
+    {
+        $targets = self::unixTcpListeners($listeners);
+        if ($targets === []) return;
+        $deadline = microtime(true) + max(1.0, $timeout);
+        $held = [];
+        do {
+            $held = [];
+            foreach ($targets as $target) {
+                $probe = @stream_socket_server($target['scheme'] . '://' . $target['host'] . ':' . $target['port'], $errno, $errstr);
+                if (is_resource($probe)) { fclose($probe); continue; }
+                $held[] = $target['host'] . ':' . $target['port'];
+            }
+            if ($held === []) return;
+            usleep(150000);
+        } while (microtime(true) < $deadline);
+        throw new RuntimeException('监听端口超过 ' . (int) $timeout . ' 秒仍未释放：' . implode('、', $held) . '；可能有残留进程继续持有原监听句柄');
+    }
+
+    /**
+     * After the new master rotated, confirm each tcp listener actually accepts
+     * connections (bounded poll). A bind-only master failure is reported here,
+     * not silently treated as a successful restart.
+     */
+    public static function assertUnixListenersAccepting(array $listeners, float $timeout = 30.0): void
+    {
+        $targets = array_values(array_filter(self::unixTcpListeners($listeners), static fn (array $t): bool => $t['scheme'] === 'tcp'));
+        if ($targets === []) return;
+        $deadline = microtime(true) + max(1.0, $timeout);
+        $down = [];
+        do {
+            $down = [];
+            foreach ($targets as $target) {
+                $host = $target['host'];
+                if (in_array($host, ['0.0.0.0', '::', '[::]', ''], true)) $host = '127.0.0.1';
+                if (str_contains($host, ':') && $host[0] !== '[') $host = '[' . $host . ']';
+                $probe = @stream_socket_client('tcp://' . $host . ':' . $target['port'], $errno, $errstr, 1.0);
+                if (is_resource($probe)) { fclose($probe); continue; }
+                $down[] = $target['host'] . ':' . $target['port'];
+            }
+            if ($down === []) return;
+            usleep(200000);
+        } while (microtime(true) < $deadline);
+        throw new RuntimeException('新宿主未在 ' . (int) $timeout . ' 秒内恢复监听：' . implode('、', $down) . '；请核对 workerman 日志与端口占用');
+    }
+
+    /**
      * Official full restart: master exits and starts again so process.php is re-read.
      * This is NOT SIGUSR1 reload. Prefer php start.php restart; fall back to stop+start -d.
+     * After each failed attempt the declared listeners must actually release
+     * before one bounded retry runs — an inherited listen fd is surfaced as a
+     * plain error instead of hanging or retrying forever.
+     *
+     * @param list<string> $listeners webman listen strings to wait on (optional)
      */
-    public static function fullRestartUnixHost(string $server, string $pidFile, array $master, string $php = PHP_BINARY): array
+    public static function fullRestartUnixHost(string $server, string $pidFile, array $master, string $php = PHP_BINARY, array $listeners = []): array
     {
         if (!is_int($master['pid'] ?? null) || !is_string($master['identity'] ?? null)
             || self::unixHostMaster($server, $pidFile, $master['pid']) !== $master) {
@@ -576,10 +684,28 @@ POWERSHELL;
         $start = self::normalizePath(realpath($server . '/start.php') ?: $server . '/start.php');
         if (!is_file($start)) throw new RuntimeException('宿主缺少 start.php，无法执行完整重启');
         if (!is_string($php) || $php === '' || str_contains($php, "\0")) throw new RuntimeException('PHP CLI 路径无效');
-        // Run in an isolated process group so a calling worker can die with the old master
-        // while this CLI completes stop+start.
-        self::command([$php, $start, 'restart', '-d'], $server, static function (string $line): void {}, 90);
-        return self::waitUnixHostMasterRotated($server, $pidFile, $master, 45.0);
+        $lastError = null;
+        for ($attempt = 1; $attempt <= 2; $attempt++) {
+            try {
+                // Run in an isolated process group so a calling worker can die with
+                // the old master while this CLI completes stop+start.
+                self::command([$php, $start, 'restart', '-d'], $server, static function (string $line): void {}, 90);
+                $next = self::waitUnixHostMasterRotated($server, $pidFile, $master, 45.0);
+                self::assertUnixListenersAccepting($listeners, 30.0);
+                return $next;
+            } catch (Throwable $error) {
+                $lastError = $error;
+                if ($attempt >= 2) break;
+                // Before retrying, the old listeners must be free; a helper that
+                // still holds an inherited socket is reported, not retried blindly.
+                try {
+                    self::waitUnixListenersReleased($listeners, 15.0);
+                } catch (Throwable $released) {
+                    throw new RuntimeException($released->getMessage() . '；重启尝试错误：' . $error->getMessage());
+                }
+            }
+        }
+        throw $lastError instanceof Throwable ? $lastError : new RuntimeException('宿主完整重启失败');
     }
 
     /** Wait until the pid file names a different verified Workerman master. */
