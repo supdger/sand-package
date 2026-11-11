@@ -18,19 +18,13 @@
                 </template>
                 刷新
               </ElButton>
-              <ElButton
-                v-if="!hideGlobalPluginWrites"
-                v-ripple
-                :disabled="pluginOperationBusy"
-                @click="handleTerminal"
-              >
-                <template #icon>
-                  <ArtSvgIcon icon="ri:terminal-box-line" />
-                </template>
-                依赖安装终端
-              </ElButton>
             </ElSpace>
           </div>
+          <ElAlert class="mb-3" type="info" :closable="false" title="依赖命令只在服务器命令行执行">
+            后端依赖：php webman sandpackage:dependency run 插件标识 composer。前端依赖：php webman
+            sandpackage:dependency run 插件标识 npm。中断后的现场检查：php webman sandpackage:recover
+            inspect-dependency 插件标识。
+          </ElAlert>
 
           <ElAlert
             v-if="listError"
@@ -646,14 +640,29 @@
       </section>
     </ElDrawer>
 
-    <!-- 终端弹窗：依赖任务失败时才自动弹出，附通俗原因与一键重试 -->
-    <TerminalBox
-      ref="terminalRef"
-      :chain-failure="orchestrator.failure"
-      :chain-retrying="orchestrator.busy"
-      @success="getList"
-      @retry-chain="retryDependencyChain"
-    />
+    <ElDialog v-model="dependencyNoticeVisible" title="依赖命令需在服务器执行" width="640">
+      <ElAlert
+        v-if="orchestrator.failure"
+        type="warning"
+        :closable="false"
+        :title="`${orchestrator.failure.label}未完成`"
+      >
+        <p>{{ orchestrator.failure.reason }}</p>
+      </ElAlert>
+      <p v-else>请在宿主 server 目录执行 php webman sandpackage:dependency，不要从浏览器启动终端。</p>
+      <template #footer>
+        <ElButton @click="dependencyNoticeVisible = false">关闭</ElButton>
+        <ElButton
+          v-if="orchestrator.failure?.plan === true"
+          type="primary"
+          :loading="orchestrator.busy"
+          @click="retryDependencyChain"
+        >
+          重试依赖计划
+        </ElButton>
+        <ElButton type="primary" @click="getList()">刷新状态</ElButton>
+      </template>
+    </ElDialog>
 
     <!-- 异常插件残留清理 -->
     <ElDialog
@@ -1012,9 +1021,7 @@
     uninstallUnverifiableText
   } from './plain-confirmations'
   import InstallForm from './install-box.vue'
-  import TerminalBox from './terminal.vue'
   import SystemUpdate from './system-update.vue'
-  import { TaskStatus, useTerminalStore } from '../store/terminal'
   import { useInstallOrchestratorStore } from '../store/install-orchestrator'
   import {
     FAILED_UPGRADE_BLOCKED_MESSAGE,
@@ -1061,10 +1068,6 @@
     open: () => void
   }
 
-  interface TerminalBoxExpose {
-    open: () => void
-  }
-
   interface RepositoryDocumentTarget {
     type: 'readme' | 'changelog'
     app: string
@@ -1092,11 +1095,10 @@
   const selectedLocalApp = ref('')
   const localDetailRecoveryExpected = ref(false)
   const installFormRef = ref<InstallFormBox | null>(null)
-  const terminalRef = ref<TerminalBoxExpose | null>(null)
+  const dependencyNoticeVisible = ref(false)
   const installList = ref<SandpackageInstallRow[]>([])
   const recoverySessions = reactive<Record<string, FailedUpgradeRecoverySession>>({})
   const recoveryFiles = new Map<string, File>()
-  const terminalStore = useTerminalStore()
   const orchestrator = useInstallOrchestratorStore()
   const localWriteOwner = ref<LocalWriteOwner>('')
   const cleanupVisible = ref(false)
@@ -1870,7 +1872,7 @@
       } else if (outcome.kind === 'unconfirmed') {
         ElMessage.warning(outcome.reason)
       }
-      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
+      // chain-failed：编排器已登记失败并打开命令行说明。
     } catch {
       // Error already handled by http utility
     } finally {
@@ -1930,7 +1932,7 @@
         confirmation: proof.confirmation
       })
       // 重接走 install(false) 不重启且可能登记依赖等待：交给编排器续完
-      // 剩余依赖任务，链完补一次服务重载再报成功；失败由终端面板呈现。
+      // 剩余依赖任务交给 CLI；失败时打开命令行说明。
       const outcome = await orchestrator.resumeChainForRow(record.app, record.title || record.app)
       if (outcome === null) {
         ElMessage.warning('已有插件安装或依赖任务进行中，请稍后重试')
@@ -1944,7 +1946,7 @@
       } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
         ElMessage.warning(outcome.reason)
       }
-      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
+      // chain-failed：编排器已登记失败并打开命令行说明。
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2237,7 +2239,7 @@
       } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
         ElMessage.warning(outcome.reason)
       }
-      // chain-failed：编排器已登记失败并请求弹出终端面板（含一键重试）。
+      // chain-failed：编排器已登记失败并打开命令行说明。
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2371,14 +2373,9 @@
     }
   }
 
-  const handleTerminal = () => {
-    if (pluginOperationBusy.value) return
-    terminalRef.value?.open()
-  }
-
   // ========== 一键安装依赖链 ==========
-  // 安装完成后自动依次执行后端 composer、前端 npm 依赖任务，无需用户
-  // 手动点“处理依赖”；仅失败时弹出终端面板，给出通俗原因与一键重试。
+  // 安装完成后页面不再启动 HTTP 终端。依赖命令由服务器 CLI 执行：
+  // php webman sandpackage:dependency run <插件标识> composer|npm。
   //
   // 编排在应用级 pinia 编排器（store/install-orchestrator）中运行：安装
   // 请求、状态轮询与依赖任务入队都不依附本视图生命周期。0.2.18 把这条链
@@ -2393,12 +2390,10 @@
   // 编排发起页也是 reload 落回页；续跑有重入防护与在途任务 attach，
   // 多触发点并发安全。
 
-  // 依赖链失败 → 请求弹出终端面板。视图停用期间 watcher 暂停，
-  // 由 onActivated 里的 failure 检查补开。
   watch(
     () => orchestrator.panelTick,
     () => {
-      if (orchestrator.failure) terminalRef.value?.open()
+      if (orchestrator.failure) dependencyNoticeVisible.value = true
     }
   )
 
@@ -2506,15 +2501,6 @@
       (session) => session !== undefined && isRecoveryWriteBusy(session.phase)
     )
   )
-  const terminalOperationBusy = computed(
-    () =>
-      terminalStore.taskList.some(
-        (task) =>
-          task.status === TaskStatus.WAITING ||
-          task.status === TaskStatus.CONNECTING ||
-          task.status === TaskStatus.RUNNING
-      )
-  )
   const cleanupOperationBusy = computed(
     () =>
       cleanupInspecting.value ||
@@ -2528,7 +2514,6 @@
       repositoryDownloading.value ||
       localWriteBusy.value ||
       recoveryOperationBusy.value ||
-      terminalOperationBusy.value ||
       cleanupOperationBusy.value ||
       orchestrator.busy
   )
@@ -2810,7 +2795,7 @@
 
       // 安装请求、结果轮询与依赖链全部由应用级编排器持有：安装完成引发的
       // 动态路由重建会把本视图 keep-alive 停用，组件内 readsActive/getList
-      // 轮询在停用窗口静默失效；编排器使用自有的读通道与终端任务队列，
+      // 轮询在停用窗口静默失效；编排器使用自有的读通道，依赖命令留给 CLI，
       // 视图停用/重激活不打断链推进，业务拒绝原样抛给外层 catch。
       const installOutcome = await orchestrator.start({
         app: refreshed.plugin.app,
@@ -2822,7 +2807,7 @@
       })
       await fetchRepositoryCatalog()
 
-      // 依赖任务失败：编排器已登记失败并请求弹出终端面板（含一键重试）。
+      // 依赖任务未在浏览器执行：编排器已登记失败并打开命令行说明。
       if (installOutcome.kind === 'chain-failed') return
       if (installOutcome.kind === 'install-failed') {
         repositoryActionError.value = installOutcome.reason
@@ -2976,8 +2961,7 @@
     readsDeactivated = false
     readsActive = true
     refreshVisibleRepositoryReads()
-    // 停用期间依赖链失败时 watcher 暂停，这里补开终端面板展示原因与重试。
-    if (orchestrator.failure) terminalRef.value?.open()
+    if (orchestrator.failure) dependencyNoticeVisible.value = true
     // 停用再激活也可能发生在整页 reload 之前/之后，幂等补触发断点续跑。
     void orchestrator.resumeIfPending()
   })

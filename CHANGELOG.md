@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.25（2026-11-10）
+
+- 移除 HTTP 在线终端与依赖启动执行面。`/app/sandpackage/index/terminal` 与 `POST /app/sandpackage/install/inspectDependencyStart` 不再注册。依赖安装改为宿主 `server/` 目录的 `php webman sandpackage:dependency run <插件标识> composer|npm`；中断恢复仍是 `php webman sandpackage:recover inspect-dependency` / `recover-dependency`。管理端源码不再提供「依赖安装终端」按钮或指向该 HTTP 地址的客户端，`composer run-script sand:publish` 不会再把该入口发布出去。
+
 ## 0.2.24（2026-11-07）
 
 - 修复 `full_restart` 后新宿主 `Address already in use`：`full-restart-worker.php` 由 HTTP worker 经 `proc_open` 拉起时会继承 master 的监听 socket（PHP `proc_open` 只重定向声明的描述符），旧 master 退出后辅助进程继续持有端口，新 master 无法 bind。现在辅助进程经 `/bin/sh` fd 清洗启动（关闭 3+ 号描述符并置 `SAND_FD_SCRUBBED`），且 worker 在未被清洗拉起时会用 `pcntl_exec` 自清洗一次，兼容旧版本宿主调用链。
