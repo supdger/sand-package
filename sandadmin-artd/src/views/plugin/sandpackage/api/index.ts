@@ -302,6 +302,14 @@ export default {
     })
   },
 
+  /** 安装失败后接着装。脚本已经执行过时不再重放，避免菜单和数据表插重。 */
+  retryFailedInstall(data: { appName: string }) {
+    return request.post<{ app: string; state: number; replay_sql: boolean }>({
+      url: '/app/sandpackage/install/retryFailedInstall',
+      data
+    })
+  },
+
   /** 删除从未开始的首次安装候选，释放应用名；不执行 SQL，也不动运行文件。 */
   discardFreshCandidate(data: { appName: string; confirmation: string }) {
     return request.post<unknown>({

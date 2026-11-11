@@ -2227,6 +2227,58 @@ class InstallLogic
         return AbnormalPluginCleanup::pending(HostPayloadPlan::directoryPath($this->installDir), $this->appName);
     }
 
+    /**
+     * 安装失败后继续。脚本未提交时回到等待安装并允许重放一次；
+     * 已经提交过则只继续部署文件，不再执行 install.sql。
+     *
+     * @return array<string,mixed>
+     */
+    public function retryFailedInstall(): array
+    {
+        $info = $this->getInfo();
+        $state = (int) $this->getInstallState();
+        $refusal = WaitingInstallWithdrawal::describeRetryRefusal($info, $state);
+        if ($refusal !== null) {
+            throw new ApiException($refusal, 400);
+        }
+        $inspection = $this->inspectFreshInstallRecovery();
+        $phase = is_string($inspection['phase'] ?? null) ? $inspection['phase'] : '';
+        $actions = is_array($inspection['actions'] ?? null) ? $inspection['actions'] : [];
+        if (in_array('continue-fresh', $actions, true) && !WaitingInstallWithdrawal::shouldReplaySql($phase)) {
+            $confirmation = is_string($inspection['confirmation'] ?? null) ? $inspection['confirmation'] : '';
+            $continued = $this->recoverFreshInstall('continue-fresh', $confirmation, null, false);
+            return [
+                'app' => $this->appName,
+                'state' => (int) $this->getInstallState(),
+                'replay_sql' => false,
+                'phase' => is_string($continued['phase'] ?? null) ? $continued['phase'] : $phase,
+            ];
+        }
+        if (!WaitingInstallWithdrawal::shouldReplaySql($phase)) {
+            throw new ApiException('还不能确认安装脚本有没有执行完，请先撤回安装再重新安装', 400);
+        }
+        $this->lock();
+        try {
+            $info = $this->getInfo();
+            $state = (int) $this->getInstallState();
+            $refusal = WaitingInstallWithdrawal::describeRetryRefusal($info, $state);
+            if ($refusal !== null) {
+                throw new ApiException($refusal, 400);
+            }
+            unset($info['operation_pending']);
+            $info['state'] = self::WAIT_INSTALL;
+            $this->setInfo([], $info);
+            return [
+                'app' => $this->appName,
+                'state' => self::WAIT_INSTALL,
+                'replay_sql' => true,
+                'phase' => $phase,
+            ];
+        } finally {
+            $this->unlock();
+        }
+    }
+
     /** @return array<string,mixed> */
     public function withdrawWaitingInstall(): array
     {

@@ -11,7 +11,7 @@
                 v-ripple
                 :loading="loading"
                 :disabled="pluginOperationBusy"
-                @click="getList()"
+                @click="refreshLocalList"
               >
                 <template #icon>
                   <ArtSvgIcon icon="ri:refresh-line" />
@@ -104,6 +104,7 @@
                 }}</ElLink>
               </div>
               <div class="local-app">{{ row.app }}</div>
+              <p v-if="row.about" class="local-about">{{ row.about }}</p>
             </template>
 
             <!-- 框架兼容：白话，不直接显示 >= -->
@@ -168,7 +169,23 @@
 
             <!-- 操作列 -->
             <template #operation="{ row }">
-              <ElSpace class="operation-links" :wrap="false">
+              <ElSpace class="operation-links" wrap>
+                <ElLink
+                  v-if="isInstallInterrupted(row)"
+                  type="primary"
+                  :disabled="pluginOperationBusy"
+                  @click="handleResumeChain(row)"
+                >
+                  <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
+                </ElLink>
+                <ElLink
+                  v-if="canRetryFailedInstall(row) && !isLegacyFailedUpgradeRecovery(row)"
+                  type="primary"
+                  :disabled="pluginOperationBusy"
+                  @click="handleRetryFailed(row)"
+                >
+                  <ArtSvgIcon icon="ri:refresh-line" class="mr-1" />重新安装
+                </ElLink>
                 <ElLink
                   :type="isLegacyFailedUpgradeRecovery(row) ? 'warning' : 'info'"
                   :disabled="pluginOperationBusy"
@@ -468,7 +485,7 @@
             </article>
           </div>
         </ElTabPane>
-        <ElTabPane label="系统更新" name="system" lazy>
+        <ElTabPane label="系统更新" name="system">
           <SystemUpdate :external-busy="existingPluginOperationBusy || hideGlobalPluginWrites" @busy="systemUpdateBusy = $event" />
         </ElTabPane>
       </ElTabs>
@@ -508,10 +525,54 @@
 
         <ElAlert
           class="mt-4"
-          :type="selectedLocalRow.state === 7 ? 'error' : 'info'"
+          :type="selectedLocalRow.state === 7 || selectedLocalRow.state === 8 ? 'error' : 'warning'"
           :closable="false"
-          :title="localDetailReason(selectedLocalRow)"
+          :title="detailBanner(selectedLocalRow)"
         />
+      </template>
+      <template #footer>
+        <div
+          v-if="selectedLocalRow && isInstallInterrupted(selectedLocalRow)"
+          class="detail-actions"
+        >
+          <ElButton
+            type="primary"
+            :disabled="pluginOperationBusy"
+            @click="handleResumeChain(selectedLocalRow)"
+          >
+            一键续做
+          </ElButton>
+          <ElButton
+            type="danger"
+            :disabled="pluginOperationBusy"
+            @click="handleWithdrawInstall(selectedLocalRow)"
+          >
+            撤回安装
+          </ElButton>
+        </div>
+        <div
+          v-else-if="
+            selectedLocalRow &&
+            canRetryFailedInstall(selectedLocalRow) &&
+            !isLegacyFailedUpgradeRecovery(selectedLocalRow)
+          "
+          class="detail-actions"
+        >
+          <ElButton
+            type="primary"
+            :disabled="pluginOperationBusy"
+            @click="handleRetryFailed(selectedLocalRow)"
+          >
+            重新安装
+          </ElButton>
+          <ElButton
+            type="danger"
+            :disabled="pluginOperationBusy"
+            @click="handleWithdrawInstall(selectedLocalRow)"
+          >
+            撤回安装
+          </ElButton>
+        </div>
       </template>
 
       <section v-if="recoveryDetailRow" class="recovery-detail">
@@ -707,7 +768,7 @@
     <!-- 异常插件残留清理 -->
     <ElDialog
       v-model="cleanupVisible"
-      title="清理异常插件残留"
+      :title="cleanupTitle"
       width="min(680px, 94vw)"
       :close-on-click-modal="!cleanupSubmitting && !cleanupPackageLoading && !cleanupReloading"
       :close-on-press-escape="!cleanupSubmitting && !cleanupPackageLoading && !cleanupReloading"
@@ -763,14 +824,11 @@
           </div>
         </ElAlert>
 
-        <details
-          v-if="!cleanupRangeLocked"
-          class="cleanup-section cleanup-package"
-          :open="cleanupInspection === null"
-        >
-          <summary>
+        <details v-if="!cleanupRangeLocked" class="cleanup-section cleanup-package">
+          <summary>展开看详情</summary>
+          <p class="cleanup-package-label">
             {{ cleanupInspection ? '更换清理包（可选）' : '补充清理范围' }}
-          </summary>
+          </p>
           <p class="cleanup-empty">
             可选择同一插件的已发布版本补充识别残留；此操作不会安装插件，也不会执行包内 SQL。
           </p>
@@ -849,7 +907,7 @@
           </section>
 
           <section class="cleanup-section">
-            <h4>现存菜单（{{ cleanupInspection.menus.length }}）</h4>
+            <h4>留下的菜单（{{ cleanupInspection.menus.length }}）</h4>
             <details v-if="cleanupInspection.menus.length" class="cleanup-residue-details">
               <summary>展开查看菜单</summary>
               <div class="cleanup-residue-scroll">
@@ -881,7 +939,9 @@
           </section>
 
           <ElAlert class="mt-3" type="warning" :closable="false" title="确认清理影响">
-            会删掉这个插件留下的数据表和菜单，插件文件会先另存一份；删掉的数据没法恢复。
+            {{
+              describeCleanupImpact(cleanupInspection.tables.length, cleanupInspection.menus.length)
+            }}
           </ElAlert>
 
           <div class="cleanup-confirmation">
@@ -1072,7 +1132,12 @@
   import { formatSupportText } from './support-label'
   import { renderPlainMarkdown } from './safe-markdown'
   import {
+    canRetryFailedInstall,
     canWithdrawInstall,
+    cleanupDialogTitle,
+    describeCleanupImpact,
+    describeFailedDetail,
+    describeInterruptDetail,
     describePluginStatus,
     describeWithdrawEffect,
     isInstallInterrupted,
@@ -1153,7 +1218,36 @@
     | 'upload'
 
   // ========== 基础状态 ==========
-  const activeTab = ref('repository')
+  const TAB_STORAGE_KEY = 'sandpackage-active-tab'
+
+  function readStoredTab(): string {
+    try {
+      const value = sessionStorage.getItem(TAB_STORAGE_KEY)
+      if (value === 'local' || value === 'repository' || value === 'system') return value
+    } catch {
+      // 隐私模式读不到会话存储时，仍打开默认页签。
+    }
+    return 'repository'
+  }
+
+  function rememberTab(name: string): void {
+    try {
+      sessionStorage.setItem(TAB_STORAGE_KEY, name)
+    } catch {
+      // 写不进去时，这次打开仍以页面上的页签为准。
+    }
+  }
+
+  function notifySuccess(text: string): void {
+    ElMessage.closeAll()
+    ElMessage.success({ message: text, duration: 2500, grouping: false })
+  }
+
+  function dismissNotice(): void {
+    ElMessage.closeAll()
+  }
+
+  const activeTab = ref(readStoredTab())
   const version = ref<VersionInfo>({})
   const loading = ref(false)
   const listError = ref('')
@@ -1186,6 +1280,9 @@
   const cleanupError = ref('')
   const cleanupConfirmation = ref('')
   let cleanupRequestId = 0
+  const cleanupTitle = computed(() =>
+    cleanupDialogTitle(cleanupTargetTitle.value || cleanupInspection.value?.app || '插件')
+  )
 
   const isPostgresqlLifecycleRecord = (row: SandpackageInstallRow): boolean =>
     row.lifecycle_driver === 'saipackage-pg-v1'
@@ -1395,7 +1492,7 @@
       refreshedSession.blocked = false
       refreshedSession.phase = result.runtimeDrift ? 'needs_verify' : 'needs_prepare'
       refreshedSession.message = result.message
-      ElMessage.success(result.message)
+      notifySuccess(result.message)
     } catch (error: unknown) {
       current.phase = 'error'
       current.errorMessage = readRecoveryErrorMessage(
@@ -1437,7 +1534,7 @@
         result.fromVersion,
         result.toVersion
       )
-      ElMessage.success(result.message)
+      notifySuccess(result.message)
     } catch (error: unknown) {
       const closed = error instanceof FailedUpgradeRecoveryClosedError ? error : undefined
       if (closed?.kind === 'blocked') {
@@ -1494,7 +1591,7 @@
         message: result.message
       })
       recoveryFiles.delete(expected.app)
-      ElMessage.success(result.message)
+      notifySuccess(result.message)
       await getList(true)
       const refreshed = installList.value.find((row) => row.app === expected.app)
       if (
@@ -1592,7 +1689,7 @@
       current.profileHash = prepared.profileHash
       current.phase = 'needs_gate_a'
       current.message = prepared.message
-      ElMessage.success(prepared.message)
+      notifySuccess(prepared.message)
       await getList(true)
     } catch (error: unknown) {
       current.phase = 'needs_prepare'
@@ -1635,7 +1732,7 @@
         expected
       })
       current.message = message
-      ElMessage.success(message)
+      notifySuccess(message)
       await getList(true)
     } catch (error: unknown) {
       current.phase = 'retry_safe'
@@ -1682,7 +1779,7 @@
       current.phase = 'success'
       current.blocked = false
       current.message = message
-      ElMessage.success(message)
+      notifySuccess(message)
       await getList(true)
     } catch (error: unknown) {
       clearRecoveryWriteState(current, {
@@ -1813,7 +1910,7 @@
       cleanupPackageLoading.value = false
       await inspectCleanup()
       if (cleanupVisible.value && cleanupInspection.value) {
-        ElMessage.success('已使用所选版本重新检查清理范围')
+        notifySuccess('已使用所选版本重新检查清理范围')
       }
     } catch (error: unknown) {
       if (requestId === cleanupRequestId && cleanupVisible.value) {
@@ -1851,7 +1948,7 @@
       if (result.restart_required) void reloadCleanupBackend()
       await Promise.all([getList(), fetchRepositoryCatalog()])
       if (requestId !== cleanupRequestId || !cleanupVisible.value) return
-      ElMessage.success('插件残留已清理，可以重新安装')
+      notifySuccess('插件残留已清理，可以重新安装')
     } catch (error: unknown) {
       if (requestId !== cleanupRequestId || !cleanupVisible.value) return
       cleanupInspection.value = null
@@ -1879,7 +1976,7 @@
     try {
       await sandpackageApi.reloadBackend()
       cleanupCompleted.value = { ...completed, restart_required: false }
-      ElMessage.success('后端服务已重载，现在可重新安装插件')
+      notifySuccess('后端服务已重载，现在可重新安装插件')
     } catch (error: unknown) {
       cleanupReloadError.value = cleanupErrorMessage(error, '后端服务重载失败，请重试')
     } finally {
@@ -1893,6 +1990,16 @@
     if (record.state === 1) return '已安装'
     if (record.state === 0 || canInstallLocal(record)) return '请到插件仓库安装'
     return '请点「查看详情」按说明处理'
+  }
+
+  const detailBanner = (record: SandpackageInstallRow): string => {
+    if (isInstallInterrupted(record)) return describeInterruptDetail()
+    if (record.state === 8 && !isLegacyFailedUpgradeRecovery(record)) {
+      const raw = record.recovery_reason || record.last_error || record.stage_label || ''
+      const reason = stripCodedNotes(raw)
+      return describeFailedDetail(raw.trim() === '' || reason === stripCodedNotes('') ? '' : reason)
+    }
+    return localDetailReason(record)
   }
 
   const localDetailReason = (record: SandpackageInstallRow): string => {
@@ -1932,7 +2039,7 @@
         title: record.title || record.app
       })
       if (outcome.kind === 'installed') {
-        ElMessage.success('安装成功')
+        notifySuccess('安装成功')
       } else if (outcome.kind === 'install-failed') {
         ElMessage.warning(outcome.reason)
       } else if (outcome.kind === 'unconfirmed') {
@@ -2005,7 +2112,7 @@
       } else if (outcome.kind === 'installed') {
         try {
           await sandpackageApi.reloadBackend()
-          ElMessage.success('已接管现有数据库并部署插件文件，服务已自动生效')
+          notifySuccess('已接管现有数据库并部署插件文件，服务已自动生效')
         } catch {
           ElMessage.warning('已接管现有数据库并部署插件文件；服务自动生效未完成，请稍后重试')
         }
@@ -2049,7 +2156,7 @@
         appName: record.app,
         confirmation: inspection.confirmation
       })
-      ElMessage.success('插件文件已恢复；服务尚未重载')
+      notifySuccess('插件文件已恢复；服务尚未重载')
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2146,7 +2253,7 @@
     if (!acquireLocalWrite('uninstall')) return
     try {
       await sandpackageApi.uninstallApp({ appName: record.app })
-      ElMessage.success('卸载成功')
+      notifySuccess('卸载成功')
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2301,7 +2408,7 @@
         confirmation: `UPGRADE ${record.app}@${record.upgrade_from_version}->${record.version}`
       })
       if (outcome.kind === 'installed') {
-        ElMessage.success('升级成功')
+        notifySuccess('升级成功')
       } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
         ElMessage.warning(outcome.reason)
       }
@@ -2331,7 +2438,7 @@
         appName: record.app,
         confirmation
       })
-      ElMessage.success('升级包已撤回，旧插件注册包已恢复；数据库未执行无需回滚')
+      notifySuccess('升级包已撤回，旧插件注册包已恢复；数据库未执行无需回滚')
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2362,7 +2469,7 @@
         appName: record.app,
         confirmation
       })
-      ElMessage.success('安装候选已撤回，可重新上传插件包')
+      notifySuccess('安装候选已撤回，可重新上传插件包')
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2388,7 +2495,7 @@
         appName: record.app,
         confirmation
       })
-      ElMessage.success('插件登记完成')
+      notifySuccess('插件登记完成')
     } catch {
       // Error already handled by http utility
     } finally {
@@ -2414,12 +2521,37 @@
     if (!acquireLocalWrite('discard')) return
     try {
       await sandpackageApi.withdrawWaitingInstall({ appName: record.app })
-      ElMessage.success(withdrawSuccessText(name))
+      notifySuccess(withdrawSuccessText(name))
     } catch {
       // 失败原因由请求层提示，列表仍保留这一行。
     } finally {
       await getList()
       releaseLocalWrite('discard')
+    }
+  }
+
+  const handleRetryFailed = async (record: SandpackageInstallRow): Promise<void> => {
+    if (pluginOperationBusy.value || !canRetryFailedInstall(record)) return
+    if (isLegacyFailedUpgradeRecovery(record)) return
+    const name = record.title || record.app
+    if (!acquireLocalWrite('install')) return
+    try {
+      const result = await sandpackageApi.retryFailedInstall({ appName: record.app })
+      if (result.replay_sql) {
+        const outcome = await orchestrator.start({ app: record.app, title: name })
+        if (outcome.kind === 'installed') notifySuccess(`${name} 已重新安装`)
+        else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
+          ElMessage.warning(outcome.reason)
+        }
+      } else {
+        notifySuccess(`${name} 已重新安装`)
+      }
+      localDetailVisible.value = false
+    } catch {
+      // 失败原因由请求层提示，这一行留在列表里。
+    } finally {
+      await getList()
+      releaseLocalWrite('install')
     }
   }
 
@@ -2459,11 +2591,11 @@
   // 「一键续做」：把等待依赖安装的行重新交给编排器续完剩余依赖任务。
   const handleResumeChain = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value) return
-    if (rejectOrdinaryAction(record)) return
+    if (!isInstallInterrupted(record) && rejectOrdinaryAction(record)) return
     const outcome = await orchestrator.resumeChainForRow(record.app, record.title || record.app)
     await getList()
     if (outcome?.kind === 'installed') {
-      ElMessage.success(`${record.title || record.app} 依赖安装完成`)
+      notifySuccess(`${record.title || record.app} 依赖安装完成`)
     }
   }
 
@@ -2518,7 +2650,7 @@
         document.execCommand('copy')
         textarea.remove()
       }
-      ElMessage.success('复制成功')
+      notifySuccess('复制成功')
     } catch {
       ElMessage.error('复制失败，请手动选择命令复制')
     }
@@ -2554,15 +2686,14 @@
     void orchestrator.retryChain().then(async (outcome) => {
       await Promise.all([getList(), fetchRepositoryCatalog()])
       if (outcome?.kind === 'installed') {
-        ElMessage.success(`${failed.title || failed.app} 依赖安装完成`)
+        notifySuccess(`${failed.title || failed.app} 依赖安装完成`)
       }
     })
   }
 
   const columns: ColumnOption[] = [
-    { prop: 'title', label: '插件名称', width: 108, useSlot: true },
-    { prop: 'about', label: '插件描述', width: 48, showOverflowTooltip: true },
-    { prop: 'author', label: '作者', width: 48 },
+    { prop: 'title', label: '插件名称', minWidth: 220, useSlot: true },
+    { prop: 'author', label: '作者', minWidth: 88 },
     { prop: 'version', label: '版本', width: 58 },
     { prop: 'support', label: '框架兼容', width: 148, useSlot: true },
     { prop: 'state', label: '插件状态', width: 140, useSlot: true },
@@ -2571,7 +2702,7 @@
     {
       prop: 'operation',
       label: '操作',
-      width: 196,
+      minWidth: 280,
       useSlot: true
     }
   ]
@@ -2580,6 +2711,11 @@
   const catalogRead = createRecoverableRead(isRecoverableInitializationError)
   const userStore = useUserStore()
   let readsActive = true
+
+  function refreshLocalList(): void {
+    dismissNotice()
+    void getList()
+  }
 
   async function getList(preserveRecoverySession = false): Promise<void> {
     if (!readsActive || !userStore.isLogin) return
@@ -2998,7 +3134,7 @@
       ) {
         repositoryVersionVisible.value = false
         currentRepositoryPlugin.value = null
-        ElMessage.success(selectedAction === 'upgrade' ? '插件升级成功' : '插件安装成功')
+        notifySuccess(selectedAction === 'upgrade' ? '插件升级成功' : '插件安装成功')
         return
       }
 
@@ -3085,7 +3221,9 @@
   }
 
   // Cancel hidden work; only the repository pane needs the remote catalog.
-  watch(activeTab, () => {
+  watch(activeTab, (name) => {
+    rememberTab(name)
+    dismissNotice()
     cancelRepositoryReads()
     refreshVisibleRepositoryReads()
   }, { flush: 'sync' })
@@ -3160,6 +3298,19 @@
   .sandpackage-page-card :deep(.el-card__body) {
     height: auto;
     overflow: visible;
+  }
+
+  .sandpackage-page-card :deep(.el-tabs--border-card > .el-tabs__header .el-tabs__item.is-active) {
+    font-weight: 600;
+    color: var(--el-color-white);
+    background-color: var(--el-color-primary);
+    border-color: var(--el-color-primary);
+  }
+
+  .sandpackage-page-card :deep(.el-tabs--border-card > .el-tabs__header .el-tabs__item:not(.is-active)) {
+    font-weight: 400;
+    color: var(--el-text-color-regular);
+    background-color: var(--el-fill-color-light);
   }
 
   .local-toolbar {
@@ -3378,7 +3529,23 @@
   }
 
   .operation-links {
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .local-about {
+    margin: 2px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--el-text-color-secondary);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  .detail-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
   }
 
   .operation-links :deep(.el-link) {

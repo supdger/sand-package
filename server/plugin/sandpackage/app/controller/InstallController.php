@@ -451,6 +451,22 @@ class InstallController extends BaseController
         );
     }
 
+    #[Permission(title: '重新安装失败的插件', slug: 'sandpackage:install:retryFailedInstall')]
+    public function retryFailedInstall(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') {
+            throw new ApiException('重新安装仅支持 POST 请求', 400);
+        }
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') {
+            throw new ApiException('请填写插件标识', 400);
+        }
+        return $this->success(
+            (new InstallLogic($appName))->retryFailedInstall(),
+            '可以重新安装',
+        );
+    }
+
     /** Read-only inspection of host-level guard records that block every plugin. */
     #[Permission(title: '检查宿主守卫记录', slug: 'sandpackage:install:inspectGlobalGuards')]
     public function inspectGlobalGuards(Request $request): Response

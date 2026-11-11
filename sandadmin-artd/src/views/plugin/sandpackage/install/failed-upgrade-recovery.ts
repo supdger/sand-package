@@ -60,8 +60,8 @@ export function packageZipMaxBytesValue(): number {
 const PACKAGE_OVERSIZE_PREFIX = '插件包超过大小限制：限制层='
 
 /** 超限只告诉最大体积和是哪一层拦住的，不把原始字节数写到页面上。 */
-export function packageZipOversizeMessage(max: number, layer = '前端校验'): string {
-  return describeOversize(max, layer)
+export function packageZipOversizeMessage(max: number, actual: number): string {
+  return describeOversize(max, actual)
 }
 
 /** 列表页在核验前展示的稳定人话。 */
@@ -409,7 +409,7 @@ export function assertFailedUpgradeZip(file: File): string | null {
   if (!allowedTypes.has(file.type)) return '请选择 ZIP 插件包，不能使用其他格式'
   if (file.size <= 0) return '插件包文件无效'
   if (file.size > packageZipMaxBytes) {
-    return packageZipOversizeMessage(packageZipMaxBytes)
+    return packageZipOversizeMessage(packageZipMaxBytes, file.size)
   }
   return null
 }

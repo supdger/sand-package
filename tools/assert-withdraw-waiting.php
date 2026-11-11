@@ -27,12 +27,28 @@ $ready = [
 ];
 
 $check('等待依赖且无宿主载荷可以撤回', WaitingInstallWithdrawal::describeRefusal($ready, 4, false, false, false), null);
-$check('已安装不能撤回', WaitingInstallWithdrawal::describeRefusal($ready, 1, false, false, false), '只有停在等待依赖安装的插件可以撤回安装');
+$check('已安装不能撤回', WaitingInstallWithdrawal::describeRefusal($ready, 1, false, false, false), '只有停在等待依赖、安装中断或安装失败的插件可以撤回安装');
 $check(
-    '命令还在执行不能撤回',
+    '安装中断仍可撤回',
     WaitingInstallWithdrawal::describeRefusal($ready + ['dependency_command_nonce' => 'abc'], 4, false, false, false),
-    '依赖命令还在执行，先等它结束后再撤回',
+    null,
 );
+$failed = $ready;
+$failed['state'] = 8;
+$check('安装失败可以撤回', WaitingInstallWithdrawal::describeRefusal($failed, 8, false, false, false), null);
+$check('安装失败可以重新安装', WaitingInstallWithdrawal::describeRetryRefusal($failed, 8), null);
+$check('等待依赖不能走重新安装', WaitingInstallWithdrawal::describeRetryRefusal($ready, 4), '只有安装失败的插件可以重新安装');
+$check(
+    '升级失败不从这里重装',
+    WaitingInstallWithdrawal::describeRetryRefusal($failed + ['failed_upgrade' => 1], 8),
+    '这次失败不能从这里重新安装',
+);
+if (WaitingInstallWithdrawal::shouldReplaySql('sql_not_committed') !== true) {
+    $failures[] = '未提交的安装脚本应允许重放';
+}
+if (WaitingInstallWithdrawal::shouldReplaySql('sql_committed_deploy_pending') !== false) {
+    $failures[] = '已提交的安装脚本不应重放';
+}
 $check(
     '升级不能按新装撤回',
     WaitingInstallWithdrawal::describeRefusal($ready + ['upgrade_from_version' => '0.1.0'], 4, false, false, false),
@@ -53,11 +69,34 @@ $route = file_get_contents(dirname(__DIR__) . '/server/plugin/sandpackage/config
 if (!is_string($logic) || !str_contains($logic, 'function withdrawWaitingInstall')) {
     $failures[] = 'InstallLogic 缺少 withdrawWaitingInstall';
 }
+if (!is_string($logic) || !str_contains($logic, 'function retryFailedInstall')) {
+    $failures[] = 'InstallLogic 缺少 retryFailedInstall';
+}
 if (!is_string($controller) || !str_contains($controller, 'function withdrawWaitingInstall')) {
     $failures[] = 'InstallController 缺少 withdrawWaitingInstall';
 }
+if (!is_string($controller) || !str_contains($controller, 'function retryFailedInstall')) {
+    $failures[] = 'InstallController 缺少 retryFailedInstall';
+}
 if (!is_string($route) || !str_contains($route, 'withdrawWaitingInstall')) {
     $failures[] = 'route.php 未注册 withdrawWaitingInstall';
+}
+if (!is_string($route) || !str_contains($route, 'retryFailedInstall')) {
+    $failures[] = 'route.php 未注册 retryFailedInstall';
+}
+$packageRoot = dirname(__DIR__) . '/server/plugin/sandpackage';
+$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($packageRoot));
+foreach ($iterator as $file) {
+    if (!$file->isFile() || !str_ends_with($file->getFilename(), '.php')) {
+        continue;
+    }
+    $text = file_get_contents($file->getPathname());
+    if (!is_string($text) || !str_contains($text, '插件市场')) {
+        continue;
+    }
+    if (preg_match('/INSERT\s+INTO/i', $text) === 1) {
+        $failures[] = '插件安装代码不应插入宿主菜单「插件市场」：' . $file->getFilename();
+    }
 }
 
 if ($failures !== []) {
