@@ -42,7 +42,8 @@
       </details>
       <ElAlert v-if="externalBusy" type="info" :closable="false" title="请先完成插件安装、恢复或依赖处理，再更新系统。" />
       <ElSpace wrap>
-        <ElButton type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <ElButton v-if="hasAvailableUpdates" type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <span v-else>已是最新版</span>
         <span v-if="inspection && !inspection.can_start">本次升级未开始，请查看未通过的检查项。</span>
       </ElSpace>
     </template>
@@ -106,6 +107,7 @@ const recoveryEligible = computed(() => !!task.value?.recovery_available && ['fa
 const finalizeEligible = computed(() => !!task.value?.finalize_available)
 const updateBlocked = computed(() => outcomeUnconfirmed.value || task.value?.state === 'recovery_required')
 const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) as [SystemPackage, string][]).filter(([, version]) => !!version).map(([packageName, version]) => ({ package: packageName, version })))
+const hasAvailableUpdates = computed(() => (status.value?.installed ?? []).some(item => releasesFor(item.package).some(release => release.version !== item.version)))
 const checks = computed(() => inspection.value?.checks ?? status.value?.checks ?? [])
 const selectedReleases = computed(() => status.value?.releases.filter(release => selected.value[release.package] === release.version) ?? [])
 watch(() => busy.value || updateBlocked.value, value => emit('busy', value), { immediate: true })

@@ -14,6 +14,11 @@ export interface SandpackageInstallRow extends AppInfo {
   recovery_mode?: FailedUpgradeRecoveryMode
   recovery_reason?: string
   ordinary_actions_blocked?: boolean
+  /** 依赖命令 nonce 残留：命令已登记但未正常收尾，表示上次依赖命令中断。 */
+  dependency_command_nonce?: string
+  dependency_failed_nonce?: string
+  /** 旧生命周期依赖进程中断标记。 */
+  process_recovery_required?: number
   failed_stage?: string
   candidate_archive_sha256?: string
   candidate_payload_manifest_sha256?: string

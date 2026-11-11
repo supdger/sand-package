@@ -20,10 +20,33 @@
               </ElButton>
             </ElSpace>
           </div>
-          <ElAlert class="mb-3" type="info" :closable="false" title="依赖命令只在服务器命令行执行">
-            后端依赖：php webman sandpackage:dependency run 插件标识 composer。前端依赖：php webman
-            sandpackage:dependency run 插件标识 npm。中断后的现场检查：php webman sandpackage:recover
-            inspect-dependency 插件标识。
+          <ElAlert
+            v-if="dependencyCommandRows.length > 0"
+            class="mb-3"
+            type="info"
+            :closable="false"
+            title="这个插件还要装依赖，请在服务器上运行下面的命令"
+          >
+            <div
+              v-for="row in dependencyCommandRows"
+              :key="row.app"
+              class="dependency-commands"
+            >
+              <div class="dependency-command-plugin">
+                {{ row.title || row.app }}（{{ row.app }}）
+              </div>
+              <div
+                v-for="command in buildDependencyCommands(row)"
+                :key="command.label"
+                class="dependency-command-row"
+              >
+                <span class="dependency-command-label">{{ command.label }}：</span>
+                <code class="dependency-command-text">{{ command.text }}</code>
+                <ElButton size="small" @click="copyDependencyCommand(command.text)">
+                  复制
+                </ElButton>
+              </div>
+            </div>
           </ElAlert>
 
           <ElAlert
@@ -67,14 +90,20 @@
           </ElCollapse>
 
           <ArtTable
+            v-if="loading || installList.length > 0 || listError !== '' || !installListLoaded"
             :loading="loading"
             :data="installList"
             :columns="columns"
             :show-table-header="false"
           >
-            <!-- 插件标识列 -->
-            <template #app="{ row }">
-              <ElLink :href="row.website" target="_blank" type="primary">{{ row.app }}</ElLink>
+            <!-- 名称列：第二行灰色小字插件标识，与插件仓库卡片一致 -->
+            <template #title="{ row }">
+              <div>
+                <ElLink :href="row.website" target="_blank" type="primary">{{
+                  row.title
+                }}</ElLink>
+              </div>
+              <div class="local-app">{{ row.app }}</div>
             </template>
 
             <!-- 状态列 -->
@@ -242,6 +271,10 @@
               </ElSpace>
             </template>
           </ArtTable>
+          <ElEmpty v-else description="还没有装插件">
+            <p class="local-empty-hint">到插件仓库挑一个装上</p>
+            <ElButton type="primary" @click="activeTab = 'repository'">去插件仓库</ElButton>
+          </ElEmpty>
         </ElTabPane>
 
         <!-- 插件仓库 Tab -->
@@ -970,9 +1003,12 @@
       size="min(760px, 92vw)"
       @closed="closeRepositoryDocument"
     >
-      <div v-if="repositoryDocumentLoading" class="repository-state" v-loading="true">
-        正在读取发布包文档
-      </div>
+      <div
+        v-if="repositoryDocumentLoading"
+        class="repository-state"
+        v-loading="true"
+        element-loading-text="正在加载文档"
+      ></div>
       <ElAlert
         v-else-if="repositoryDocumentError"
         type="error"
@@ -1097,6 +1133,8 @@
   const installFormRef = ref<InstallFormBox | null>(null)
   const dependencyNoticeVisible = ref(false)
   const installList = ref<SandpackageInstallRow[]>([])
+  /** 首次列表读取是否已完成；完成前空态不渲染，避免「还没有装插件」闪屏。 */
+  const installListLoaded = ref(false)
   const recoverySessions = reactive<Record<string, FailedUpgradeRecoverySession>>({})
   const recoveryFiles = new Map<string, File>()
   const orchestrator = useInstallOrchestratorStore()
@@ -2373,6 +2411,63 @@
     }
   }
 
+  interface DependencyCommand {
+    label: string
+    text: string
+  }
+
+  /**
+   * 仍需服务器命令行处理的行：登记等依赖任务（*_dependent_wait_install），
+   * 或上次依赖命令中断（nonce 残留、旧驱动进程恢复标记）。
+   */
+  const dependencyCommandRows = computed(() =>
+    installList.value.filter(
+      (row) =>
+        row.composer_dependent_wait_install === 1 ||
+        row.npm_dependent_wait_install === 1 ||
+        (row.dependency_command_nonce ?? '') !== '' ||
+        (row.dependency_failed_nonce ?? '') !== '' ||
+        row.process_recovery_required === 1
+    )
+  )
+
+  /** 提示条按插件逐行给出的三条命令；依赖命令只在服务器命令行执行。 */
+  const buildDependencyCommands = (row: SandpackageInstallRow): DependencyCommand[] => [
+    {
+      label: '装后台依赖',
+      text: `php webman sandpackage:dependency run ${row.app} composer`
+    },
+    {
+      label: '装页面依赖',
+      text: `php webman sandpackage:dependency run ${row.app} npm`
+    },
+    {
+      label: '安装中断后先检查一下',
+      text: `php webman sandpackage:recover inspect-dependency ${row.app}`
+    }
+  ]
+
+  const copyDependencyCommand = async (text: string): Promise<void> => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        // 非安全上下文没有 clipboard API，退回隐藏输入框选择复制。
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        textarea.remove()
+      }
+      ElMessage.success('复制成功')
+    } catch {
+      ElMessage.error('复制失败，请手动选择命令复制')
+    }
+  }
+
   // ========== 一键安装依赖链 ==========
   // 安装完成后页面不再启动 HTTP 终端。依赖命令由服务器 CLI 执行：
   // php webman sandpackage:dependency run <插件标识> composer|npm。
@@ -2409,8 +2504,7 @@
   }
 
   const columns: ColumnOption[] = [
-    { prop: 'app', label: '插件标识', width: 120, useSlot: true },
-    { prop: 'title', label: '插件名称', width: 150 },
+    { prop: 'title', label: '插件名称', width: 160, useSlot: true },
     { prop: 'about', label: '插件描述', showOverflowTooltip: true },
     { prop: 'author', label: '作者', width: 120 },
     { prop: 'version', label: '版本', width: 100 },
@@ -2456,7 +2550,10 @@
       recoveryFiles.clear()
       listError.value = readRecoveryErrorMessage(error, FAILED_UPGRADE_LIST_ERROR_MESSAGE)
     } finally {
-      if (read.isCurrent()) loading.value = false
+      if (read.isCurrent()) {
+        loading.value = false
+        installListLoaded.value = true
+      }
     }
   }
 
@@ -3175,6 +3272,50 @@
     align-items: center;
     justify-content: center;
     min-height: 160px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .dependency-commands {
+    display: grid;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .dependency-commands + .dependency-commands {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--el-border-color-lighter);
+  }
+
+  .dependency-command-plugin {
+    font-weight: 600;
+    color: var(--el-text-color-primary);
+  }
+
+  .dependency-command-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .dependency-command-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .local-app {
+    overflow: hidden;
+    font-size: 12px;
+    line-height: 20px;
+    color: var(--el-text-color-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .local-empty-hint {
+    margin: 0 0 8px;
     color: var(--el-text-color-secondary);
   }
 
