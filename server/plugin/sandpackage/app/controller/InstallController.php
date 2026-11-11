@@ -435,6 +435,22 @@ class InstallController extends BaseController
         );
     }
 
+    #[Permission(title: '撤回等待依赖的安装', slug: 'sandpackage:install:withdrawWaitingInstall')]
+    public function withdrawWaitingInstall(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') {
+            throw new ApiException('撤回安装仅支持 POST 请求', 400);
+        }
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') {
+            throw new ApiException('请填写插件标识', 400);
+        }
+        return $this->success(
+            (new InstallLogic($appName))->withdrawWaitingInstall(),
+            '安装已撤回',
+        );
+    }
+
     /** Read-only inspection of host-level guard records that block every plugin. */
     #[Permission(title: '检查宿主守卫记录', slug: 'sandpackage:install:inspectGlobalGuards')]
     public function inspectGlobalGuards(Request $request): Response

@@ -7,14 +7,17 @@
       </div>
       <ElButton :loading="operation === 'status'" :disabled="busy" @click="loadStatus">检查更新</ElButton>
     </div>
+    <ElAlert v-if="lookupFailed" type="warning" :closable="false" title="暂时查不到有没有新版本，请稍后点「检查更新」再试">
+      <ElButton size="small" :disabled="lookupDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
+    </ElAlert>
     <ElAlert v-if="error" type="error" :closable="false" title="操作未完成">
       <p>{{ error }}</p>
       <ElButton :disabled="operation !== ''" @click="reconnect">重新连接并查询结果</ElButton>
     </ElAlert>
-    <ElAlert v-if="!status && !error" type="info" :closable="false" title="正在读取版本和升级条件" />
+    <ElAlert v-if="!status && !error && !lookupFailed" type="info" :closable="false" title="正在读取版本和升级条件" />
     <template v-if="status">
-      <ElAlert v-if="!status.capabilities.supported" type="warning" :closable="false" title="当前环境尚不能执行系统更新">
-        {{ status.capabilities.reason }}
+      <ElAlert v-if="environmentReason" type="warning" :closable="false" title="当前环境尚不能执行系统更新">
+        {{ environmentReason }}
       </ElAlert>
       <div class="version-list" aria-label="系统组件版本">
         <div v-for="item in status.installed" :key="item.package" class="version-row">
@@ -43,7 +46,7 @@
       <ElAlert v-if="externalBusy" type="info" :closable="false" title="请先完成插件安装、恢复或依赖处理，再更新系统。" />
       <ElSpace wrap>
         <ElButton v-if="hasAvailableUpdates" type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
-        <span v-else>已是最新版</span>
+        <span v-else-if="!lookupFailed">已是最新版</span>
         <span v-if="inspection && !inspection.can_start">本次升级未开始，请查看未通过的检查项。</span>
       </ElSpace>
     </template>
@@ -84,8 +87,9 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemUpdateApi, type SystemPackage, type UpdateInspection, type UpdateStatus, type UpdateTask, type UpdateTarget } from '../api/system-update'
+import { describeRequestFailure, isReleaseReadFailed, readReleaseFailure } from './release-lookup'
 
 const props = defineProps<{ externalBusy: boolean }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -95,6 +99,7 @@ const selected = ref<Partial<Record<SystemPackage, string>>>({})
 const task = ref<UpdateTask | null>(null)
 const operation = ref('')
 const error = ref('')
+const requestFailure = ref('')
 const confirmVisible = ref(false)
 const outcomeUnconfirmed = ref(false)
 let disposed = false
@@ -108,7 +113,14 @@ const finalizeEligible = computed(() => !!task.value?.finalize_available)
 const updateBlocked = computed(() => outcomeUnconfirmed.value || task.value?.state === 'recovery_required')
 const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) as [SystemPackage, string][]).filter(([, version]) => !!version).map(([packageName, version]) => ({ package: packageName, version })))
 const hasAvailableUpdates = computed(() => (status.value?.installed ?? []).some(item => releasesFor(item.package).some(release => release.version !== item.version)))
-const checks = computed(() => inspection.value?.checks ?? status.value?.checks ?? [])
+const lookupFailed = computed(() => isReleaseReadFailed(status.value?.checks ?? null, requestFailure.value))
+const lookupDetail = computed(() => requestFailure.value !== '' ? requestFailure.value : readReleaseFailure(status.value?.checks ?? []))
+const environmentReason = computed(() => (status.value?.checks ?? []).filter(check => check.state === 'fail' && check.code !== 'repository').map(check => check.message).join('；'))
+const checks = computed(() =>
+  (inspection.value?.checks ?? status.value?.checks ?? []).filter(
+    (check) => !(check.code === 'repository' && check.state === 'fail')
+  )
+)
 const selectedReleases = computed(() => status.value?.releases.filter(release => selected.value[release.package] === release.version) ?? [])
 watch(() => busy.value || updateBlocked.value, value => emit('busy', value), { immediate: true })
 function releasesFor(packageName: string) { return status.value?.releases.filter(release => release.package === packageName) ?? [] }
@@ -138,10 +150,12 @@ async function loadStatus() {
   const generation = ++requestGeneration
   operation.value = 'status'
   error.value = ''
+  requestFailure.value = ''
   try {
     const result = await systemUpdateApi.status()
     if (disposed || generation !== requestGeneration) return
     status.value = result
+    requestFailure.value = ''
     outcomeUnconfirmed.value = false
     task.value = result.active_task
     invalidateInspection()
@@ -153,10 +167,30 @@ async function loadStatus() {
       if (choice) choices[installed.package] = choice.version
     }
     selected.value = choices
-  } catch (cause) { if (!disposed && generation === requestGeneration) { status.value = null; invalidateInspection(); error.value = message(cause) } }
+  } catch (cause) {
+    if (!disposed && generation === requestGeneration) {
+      status.value = null
+      invalidateInspection()
+      const statusCode = typeof (cause as { code?: unknown }).code === 'number' ? (cause as { code: number }).code : 0
+      const detail = message(cause)
+      const timedOut =
+        (cause as { transport?: unknown }).transport === 'timeout' || /timeout|超时/i.test(detail)
+      requestFailure.value = describeRequestFailure(detail, statusCode, timedOut)
+    }
+  }
   finally { if (!disposed && generation === requestGeneration) { operation.value = ''; schedulePoll() } }
 }
 async function reconnect() { if (taskRunning.value) await pollTask(); else await loadStatus() }
+async function copyProblemDetail() {
+  const detail = lookupDetail.value
+  if (detail === '') return
+  try {
+    await navigator.clipboard.writeText(detail)
+    ElMessage.success('复制成功')
+  } catch {
+    ElMessage.error('复制失败，请稍后重试')
+  }
+}
 async function inspect() {
   if (busy.value || updateBlocked.value || props.externalBusy) return
   operation.value = 'inspect'; error.value = ''; invalidateInspection()

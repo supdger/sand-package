@@ -11,11 +11,11 @@
     <div class="flex flex-col items-center mb-6">
       <div class="w-[400px]">
         <div class="text-lg text-red-500 font-bold mb-2">
-          请您务必确认模块包文件来自官方渠道或经由官方认证的模块作者，否则系统可能被破坏，因为：
+          请您务必确认插件包来自官方渠道或经由官方认证的插件作者，否则系统可能被破坏，因为：
         </div>
-        <div class="text-red-500">1. 模块可以修改和新增系统文件</div>
-        <div class="text-red-500">2. 模块可以执行sql命令和代码</div>
-        <div class="text-red-500">3. 模块可以安装新的前后端依赖</div>
+        <div class="text-red-500">1. 插件可以修改和新增系统文件</div>
+        <div class="text-red-500">2. 插件可以执行数据库命令和代码</div>
+        <div class="text-red-500">3. 插件可以安装新的前后端依赖</div>
       </div>
 
       <!-- 已上传的应用信息 -->
@@ -47,6 +47,7 @@
               <span class="text-primary ml-2">点击上传</span>
             </div>
             <div class="mt-2 text-sm text-gray-500">{{ uploadHint }}</div>
+            <div v-if="selectedName" class="mt-2 text-sm">已选择 {{ selectedName }}</div>
           </div>
         </ElUpload>
       </div>
@@ -64,6 +65,7 @@
     packageZipOversizeMessage,
     setPackageZipMaxBytes
   } from './failed-upgrade-recovery'
+  import { formatUploadLimit } from './upload-limit'
 
   const props = withDefaults(
     defineProps<{
@@ -85,19 +87,12 @@
 
   const visible = ref(false)
   const loading = ref(false)
+  const selectedName = ref('')
 
-  /** 上限由后端 effectiveLimit 下发，取不到时沿用模块兜底，不在前端定义业务值。 */
+  /** 上限由后端 effectiveLimit 下发，取不到时沿用插件包兜底，不在前端定义业务值。 */
   const uploadSize = ref(packageZipMaxBytesValue())
 
-  const uploadHint = computed(
-    () => `仅支持 ZIP 格式，单个插件包不超过 ${formatBytes(uploadSize.value)}（${uploadSize.value} 字节）`
-  )
-
-  function formatBytes(bytes: number): string {
-    if (bytes >= 1024 * 1024) return `${Math.floor((bytes / (1024 * 1024)) * 10) / 10}MB`
-    if (bytes >= 1024) return `${Math.floor(bytes / 1024)}KB`
-    return `${bytes}B`
-  }
+  const uploadHint = computed(() => `仅支持 ZIP 格式，${formatUploadLimit(uploadSize.value)}`)
 
   const refreshUploadLimit = async (): Promise<void> => {
     try {
@@ -128,7 +123,7 @@
       return '仅支持 ZIP 格式的插件包'
     }
     if (file.size > uploadSize.value) {
-      return packageZipOversizeMessage(file.size, uploadSize.value)
+      return packageZipOversizeMessage(uploadSize.value)
     }
     return undefined
   }
@@ -152,6 +147,7 @@
       throw new Error(message)
     }
 
+    selectedName.value = file.name
     loading.value = true
     emit('busy-change', true)
     try {
@@ -176,6 +172,7 @@
   const open = () => {
     if (props.disabled || loading.value) return
     visible.value = true
+    selectedName.value = ''
     Object.assign(appInfo, initialApp)
     void refreshUploadLimit()
   }

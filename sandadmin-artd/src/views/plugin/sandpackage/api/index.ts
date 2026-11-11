@@ -294,6 +294,14 @@ export default {
     })
   },
 
+  /** 撤回停在等待依赖的全新安装；服务端同时清掉这次写入的数据表和菜单。 */
+  withdrawWaitingInstall(data: { appName: string }) {
+    return request.post<{ app: string; state: number }>({
+      url: '/app/sandpackage/install/withdrawWaitingInstall',
+      data
+    })
+  },
+
   /** 删除从未开始的首次安装候选，释放应用名；不执行 SQL，也不动运行文件。 */
   discardFreshCandidate(data: { appName: string; confirmation: string }) {
     return request.post<unknown>({

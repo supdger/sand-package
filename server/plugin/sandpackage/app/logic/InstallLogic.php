@@ -34,6 +34,7 @@ use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
 use plugin\sandpackage\app\service\DependencyCommandRecovery;
 use plugin\sandpackage\app\service\LifecycleFailureLog;
+use plugin\sandpackage\app\service\WaitingInstallWithdrawal;
 
 /**
  * SaiPackage 6.0.2 / 82043f83 (MIT), with PostgreSQL and host compatibility.
@@ -2224,6 +2225,88 @@ class InstallLogic
     public function cleanupPending(): bool
     {
         return AbnormalPluginCleanup::pending(HostPayloadPlan::directoryPath($this->installDir), $this->appName);
+    }
+
+    /** @return array<string,mixed> */
+    public function withdrawWaitingInstall(): array
+    {
+        $this->lock();
+        try {
+            $info = $this->getInfo();
+            $state = (int) $this->getInstallState();
+            [$dependents, $unverifiable] = $this->installedDependents();
+            $refusal = WaitingInstallWithdrawal::describeRefusal(
+                $info,
+                $state,
+                $dependents !== [],
+                $unverifiable !== [],
+                $this->hostPayloadFiles() !== null,
+            );
+            if ($refusal !== null) {
+                throw new ApiException($refusal, 400);
+            }
+            $cleanup = $this->abnormalCleanup();
+            $inspection = $cleanup->inspect();
+            $dependency = $this->hostPayloadDependencyChange();
+            try {
+                if ($dependency->hasJournal()) {
+                    $dependency->restore();
+                } else {
+                    $this->removeDeclaredHostDepends();
+                }
+            } catch (Throwable $error) {
+                error_log('SandPackage withdraw depends ' . $this->appName . ': ' . $error->getMessage());
+                throw new ApiException('依赖清单恢复失败，安装记录和插件文件都还在，请稍后重试', 400);
+            }
+            $result = $cleanup->cleanup((string) $inspection['fingerprint'], $this->appName);
+            try {
+                if (UserMenuCache::clearMenuCache() === false) {
+                    throw new RuntimeException('菜单缓存未刷新');
+                }
+            } catch (Throwable $error) {
+                error_log('SandPackage withdraw cache ' . $this->appName . ': ' . $error->getMessage());
+                $result['warning'] = '安装已撤回，但菜单缓存刷新失败；请检查缓存服务后重新加载后台';
+            }
+            return $result;
+        } finally {
+            $this->unlock();
+        }
+    }
+
+    /** 只去掉本插件声明加进宿主清单的依赖名，不改其他插件的条目。 */
+    private function removeDeclaredHostDepends(): void
+    {
+        $depends = Server::getDepend($this->appDir);
+        if ($depends === []) {
+            return;
+        }
+        $serverDep = new Depends(base_path() . DIRECTORY_SEPARATOR . 'composer.json', 'composer');
+        $webDep = new Depends(
+            dirname(base_path()) . DIRECTORY_SEPARATOR . env('FRONTEND_DIR', 'sandadmin-artd') . DIRECTORY_SEPARATOR . 'package.json',
+        );
+        foreach ($depends as $key => $item) {
+            if (!is_array($item) || $item === []) {
+                continue;
+            }
+            $names = [];
+            foreach (array_keys($item) as $name) {
+                if (is_string($name) && $name !== '') {
+                    $names[] = $name;
+                }
+            }
+            if ($names === []) {
+                continue;
+            }
+            if ($key === 'require') {
+                $serverDep->removeDepends($names, false);
+            } elseif ($key === 'require-dev') {
+                $serverDep->removeDepends($names, true);
+            } elseif ($key === 'dependencies') {
+                $webDep->removeDepends($names, false);
+            } elseif ($key === 'devDependencies') {
+                $webDep->removeDepends($names, true);
+            }
+        }
     }
 
     private function abnormalCleanup(): AbnormalPluginCleanup

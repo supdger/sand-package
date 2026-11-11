@@ -51,6 +51,7 @@ foreach ([
     'recoverFreshInstall',
     'inspectFreshCandidate',
     'discardFreshCandidate',
+    'withdrawWaitingInstall',
     'inspectGlobalGuards',
     'cleanupGlobalGuards',
 ] as $sandpackageRecoveryAction) {

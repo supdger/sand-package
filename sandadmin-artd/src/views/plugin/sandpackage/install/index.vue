@@ -106,24 +106,34 @@
               <div class="local-app">{{ row.app }}</div>
             </template>
 
-            <!-- 状态列 -->
+            <!-- 框架兼容：白话，不直接显示 >= -->
+            <template #support="{ row }">
+              {{ formatSupportText(String(row.support || '')) }}
+            </template>
+
+            <!-- 状态列：提示放在标签下面，操作列只留按钮 -->
             <template #state="{ row }">
-              <ElTooltip v-if="isLegacyFailedUpgradeRecovery(row)" placement="top">
-                <template #content>
-                  <div>{{ recoveryReason(row) }}</div>
-                </template>
-                <ElTag type="danger">{{ stateText(row) }}</ElTag>
-              </ElTooltip>
-              <ElTooltip
-                v-else-if="row.stage_label || row.last_error || row.recovery_reason"
-                placement="top"
-              >
-                <template #content>
-                  <div>{{ localDetailReason(row) }}</div>
-                </template>
-                <ElTag :type="stateTagType(row)">{{ stateText(row) }}</ElTag>
-              </ElTooltip>
-              <ElTag v-else :type="stateTagType(row)">{{ stateText(row) }}</ElTag>
+              <div class="state-cell">
+                <ElTooltip v-if="isLegacyFailedUpgradeRecovery(row)" placement="top">
+                  <template #content>
+                    <div>{{ recoveryReason(row) }}</div>
+                  </template>
+                  <ElTag type="danger">{{ stateText(row) }}</ElTag>
+                </ElTooltip>
+                <ElTooltip
+                  v-else-if="row.stage_label || row.last_error || row.recovery_reason"
+                  placement="top"
+                >
+                  <template #content>
+                    <div>{{ localDetailReason(row) }}</div>
+                  </template>
+                  <ElTag :type="stateTagType(row)">{{ stateText(row) }}</ElTag>
+                </ElTooltip>
+                <ElTag v-else :type="stateTagType(row)">{{ stateText(row) }}</ElTag>
+                <p v-if="describePluginStatus(row)" class="state-hint">
+                  {{ describePluginStatus(row) }}
+                </p>
+              </div>
             </template>
 
             <!-- 前端依赖列 -->
@@ -158,7 +168,7 @@
 
             <!-- 操作列 -->
             <template #operation="{ row }">
-              <ElSpace wrap>
+              <ElSpace class="operation-links" :wrap="false">
                 <ElLink
                   :type="isLegacyFailedUpgradeRecovery(row) ? 'warning' : 'info'"
                   :disabled="pluginOperationBusy"
@@ -249,6 +259,14 @@
                     <ArtSvgIcon icon="ri:refresh-line" class="mr-1" />继续数据库重接恢复
                   </ElLink>
                   <ElLink
+                    v-if="canWithdrawInstall(row)"
+                    type="danger"
+                    :disabled="pluginOperationBusy"
+                    @click="handleWithdrawInstall(row)"
+                  >
+                    <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回安装
+                  </ElLink>
+                  <ElLink
                     v-if="canUninstallLocal(row)"
                     type="danger"
                     :disabled="pluginOperationBusy"
@@ -256,17 +274,6 @@
                   >
                     <ArtSvgIcon icon="ri:delete-bin-5-line" class="mr-1" />卸载
                   </ElLink>
-                  <ElTag
-                    v-if="
-                      !canUninstallLocal(row) &&
-                      row.registration_candidate !== 1 &&
-                      !isUpgradeCandidateStage(row) &&
-                      row.existing_schema_attach_pending !== 1
-                    "
-                    :type="row.state === 1 ? 'success' : 'warning'"
-                  >
-                    {{ localActionReason(row) }}
-                  </ElTag>
                 </template>
               </ElSpace>
             </template>
@@ -616,7 +623,7 @@
               </ElButton>
               <template #tip>
                 <div class="failed-upgrade-upload-tip">
-                  仅接受 ZIP，且不超过 {{ Math.round(packageZipMaxBytesValue() / 1048576) }}MB
+                  仅接受 ZIP，{{ formatUploadLimit(packageZipMaxBytesValue()) }}
                 </div>
               </template>
             </ElUpload>
@@ -725,7 +732,10 @@
                 : '插件状态已刷新。'
             }}
           </p>
-          <p v-if="cleanupCompleted.archive">文件归档：{{ cleanupCompleted.archive }}</p>
+          <details v-if="cleanupCompleted.archive" class="cleanup-paths">
+            <summary>展开看详情</summary>
+            <p>另存位置：{{ cleanupCompleted.archive }}</p>
+          </details>
           <ElAlert
             v-if="cleanupCompleted.warning"
             class="mt-3"
@@ -826,16 +836,16 @@
           />
 
           <section class="cleanup-section">
-            <h4>现存业务表（{{ cleanupInspection.tables.length }}）</h4>
+            <h4>留下的数据表（{{ cleanupInspection.tables.length }}）</h4>
             <details v-if="cleanupInspection.tables.length" class="cleanup-residue-details">
-              <summary>展开查看业务表</summary>
+              <summary>展开看数据表</summary>
               <div class="cleanup-residue-scroll cleanup-tags">
                 <ElTag v-for="table in cleanupInspection.tables" :key="table" type="danger">
                   {{ table }}
                 </ElTag>
               </div>
             </details>
-            <p v-else class="cleanup-empty">没有发现插件业务表残留。</p>
+            <p v-else class="cleanup-empty">没有发现这个插件留下的数据表。</p>
           </section>
 
           <section class="cleanup-section">
@@ -858,15 +868,20 @@
           </section>
 
           <section class="cleanup-section">
-            <h4>将归档的文件路径</h4>
-            <ul v-if="cleanupInspection.paths.length" class="cleanup-paths">
-              <li v-for="path in cleanupInspection.paths" :key="path">{{ path }}</li>
-            </ul>
-            <p v-else class="cleanup-empty">没有发现需要归档的插件文件。</p>
+            <h4>插件文件</h4>
+            <p v-if="!cleanupInspection.paths.length" class="cleanup-empty">
+              没有发现需要另存的插件文件。
+            </p>
+            <details v-else class="cleanup-residue-details">
+              <summary>展开看详情</summary>
+              <ul class="cleanup-paths">
+                <li v-for="path in cleanupInspection.paths" :key="path">{{ path }}</li>
+              </ul>
+            </details>
           </section>
 
           <ElAlert class="mt-3" type="warning" :closable="false" title="确认清理影响">
-            本次操作会删除上面列出的插件业务表和菜单数据。插件文件及旧包会被归档，但归档不包含数据库备份，无法据此恢复已删除的数据库数据。
+            会删掉这个插件留下的数据表和菜单，插件文件会先另存一份；删掉的数据没法恢复。
           </ElAlert>
 
           <div class="cleanup-confirmation">
@@ -962,8 +977,10 @@
               兼容 SandAdmin {{ item.host_min
               }}{{ item.host_max ? ` 至 ${item.host_max}` : ' 及以上' }}
             </div>
-            <div class="version-remark">{{ item.notes || '该版本尚未提供更新摘要，可查看包内更新日志。' }}</div>
-            <div class="version-action-reason">{{ item.action_reason }}</div>
+            <div class="version-remark">{{ stripCodedNotes(item.notes || '') }}</div>
+            <div v-if="item.action_reason" class="version-action-reason">
+              {{ stripCodedNotes(item.action_reason) }}
+            </div>
           </div>
           <ElSpace wrap>
             <ElButton size="small" @click="openRepositoryDocument(currentRepositoryPlugin, item, 'changelog')">
@@ -1024,7 +1041,8 @@
         v-else-if="repositoryDocumentMarkdown === ''"
         :description="repositoryDocumentTarget?.type === 'changelog' ? '该版本发布包未提供更新日志' : '该版本未提供 README 文档'"
       />
-      <pre v-else class="repository-document">{{ repositoryDocumentMarkdown }}</pre>
+      <!-- eslint-disable-next-line vue/no-v-html -- renderPlainMarkdown 先转义，只输出自己拼的标签 -->
+      <div v-else class="repository-document" v-html="repositoryDocumentHtml"></div>
     </ElDrawer>
   </div>
 </template>
@@ -1050,6 +1068,18 @@
     type CleanupResult
   } from '../api/index'
   import { checkVersionCompatibility } from './version-compatibility'
+  import { stripCodedNotes } from './plain-notes'
+  import { formatSupportText } from './support-label'
+  import { renderPlainMarkdown } from './safe-markdown'
+  import {
+    canWithdrawInstall,
+    describePluginStatus,
+    describeWithdrawEffect,
+    isInstallInterrupted,
+    withdrawConfirmTitle,
+    withdrawSuccessText
+  } from './plugin-status'
+  import { formatUploadLimit } from './upload-limit'
   import {
     discardUpgradeCandidateConfirmation,
     registerExistingConfirmation,
@@ -1858,13 +1888,11 @@
   }
 
   const localActionReason = (record: SandpackageInstallRow): string => {
+    const hint = describePluginStatus(record)
+    if (hint !== '') return hint
     if (record.state === 1) return '已安装'
     if (record.state === 0 || canInstallLocal(record)) return '请到插件仓库安装'
-    if (record.state === 7) return '已找到安装记录，但未找到插件文件。'
-    if (record.state === 5) return '安装目录正被占用，请稍后重试。'
-    if (record.state === 6) return '已找到插件文件，尚未完成登记。'
-    if (record.state === 8) return '上次操作未完成，请查看详情。'
-    return '当前状态需要处理，请查看详情。'
+    return '请点「查看详情」按说明处理'
   }
 
   const localDetailReason = (record: SandpackageInstallRow): string => {
@@ -2369,9 +2397,37 @@
     }
   }
 
+  const handleWithdrawInstall = async (record: SandpackageInstallRow): Promise<void> => {
+    if (pluginOperationBusy.value || !canWithdrawInstall(record)) return
+    const name = record.title || record.app
+    try {
+      await ElMessageBox.confirm(describeWithdrawEffect(), withdrawConfirmTitle(name), {
+        confirmButtonText: '撤回',
+        cancelButtonText: '再想想',
+        confirmButtonClass: 'el-button--danger',
+        type: 'warning'
+      })
+    } catch {
+      return
+    }
+    if (pluginOperationBusy.value || !canWithdrawInstall(record)) return
+    if (!acquireLocalWrite('discard')) return
+    try {
+      await sandpackageApi.withdrawWaitingInstall({ appName: record.app })
+      ElMessage.success(withdrawSuccessText(name))
+    } catch {
+      // 失败原因由请求层提示，列表仍保留这一行。
+    } finally {
+      await getList()
+      releaseLocalWrite('discard')
+    }
+  }
+
   const stateText = (record: SandpackageInstallRow): string => {
     if (record.cleanup_pending === true) return record.state_text || '清理未完成'
     if (isLegacyFailedUpgradeRecovery(record)) return '升级未完成'
+    if (isInstallInterrupted(record)) return '安装中断'
+    if (record.state === 8) return '安装失败'
     if (record.state === 7) return '安装文件缺失'
     if (record.state_text) return record.state_text
     return (
@@ -2504,19 +2560,18 @@
   }
 
   const columns: ColumnOption[] = [
-    { prop: 'title', label: '插件名称', width: 160, useSlot: true },
-    { prop: 'about', label: '插件描述', showOverflowTooltip: true },
-    { prop: 'author', label: '作者', width: 120 },
-    { prop: 'version', label: '版本', width: 100 },
-    { prop: 'support', label: '框架兼容', width: 120, align: 'center' },
-    { prop: 'state', label: '插件状态', width: 100, useSlot: true },
-    { prop: 'npm', label: '前端依赖', width: 100, useSlot: true },
-    { prop: 'composer', label: '后端依赖', width: 100, useSlot: true },
+    { prop: 'title', label: '插件名称', width: 108, useSlot: true },
+    { prop: 'about', label: '插件描述', width: 48, showOverflowTooltip: true },
+    { prop: 'author', label: '作者', width: 48 },
+    { prop: 'version', label: '版本', width: 58 },
+    { prop: 'support', label: '框架兼容', width: 148, useSlot: true },
+    { prop: 'state', label: '插件状态', width: 140, useSlot: true },
+    { prop: 'npm', label: '前端依赖', width: 118, useSlot: true },
+    { prop: 'composer', label: '后端依赖', width: 118, useSlot: true },
     {
       prop: 'operation',
       label: '操作',
-      width: 220,
-      fixed: 'right',
+      width: 196,
       useSlot: true
     }
   ]
@@ -2571,6 +2626,9 @@
   const repositoryDocumentLoading = ref(false)
   const repositoryDocumentError = ref('')
   const repositoryDocumentMarkdown = ref('')
+  const repositoryDocumentHtml = computed(() =>
+    renderPlainMarkdown(repositoryDocumentMarkdown.value)
+  )
   const repositoryDocumentTarget = ref<RepositoryDocumentTarget | null>(null)
   let repositoryDocumentRequestId = 0
 
@@ -3305,6 +3363,29 @@
     overflow-wrap: anywhere;
   }
 
+  .state-cell {
+    display: grid;
+    gap: 6px;
+    justify-items: start;
+  }
+
+  .state-hint {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--el-text-color-secondary);
+    white-space: normal;
+  }
+
+  .operation-links {
+    flex-wrap: nowrap;
+  }
+
+  .operation-links :deep(.el-link) {
+    flex: none;
+    white-space: nowrap;
+  }
+
   .local-app {
     overflow: hidden;
     font-size: 12px;
@@ -3559,10 +3640,38 @@
     line-height: 1.7;
     color: var(--el-text-color-primary);
     overflow-wrap: anywhere;
-    white-space: pre-wrap;
     user-select: text;
     background: var(--el-fill-color-light);
     border: 1px solid var(--el-border-color);
     border-radius: 8px;
+  }
+
+  .repository-document :deep(h1),
+  .repository-document :deep(h2),
+  .repository-document :deep(h3) {
+    margin: 12px 0 8px;
+  }
+
+  .repository-document :deep(table) {
+    width: 100%;
+    margin: 12px 0;
+    border-collapse: collapse;
+  }
+
+  .repository-document :deep(th),
+  .repository-document :deep(td) {
+    padding: 6px 8px;
+    border: 1px solid var(--el-border-color);
+  }
+
+  .repository-document :deep(pre) {
+    padding: 12px;
+    margin: 12px 0;
+    overflow: auto;
+    background: var(--el-fill-color);
+  }
+
+  .repository-document :deep(code) {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
 </style>
