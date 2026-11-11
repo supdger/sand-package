@@ -32,6 +32,8 @@ Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController:
 Route::post('/app/sandpackage/install/retryFailedUpgrade', [plugin\sandpackage\app\controller\InstallController::class, 'retryFailedUpgrade']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
 Route::post('/app/sandpackage/install/inspectDependencies', [plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencies']);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectUninstall']);
+Route::post('/app/sandpackage/install/inspectUninstall', [plugin\sandpackage\app\controller\InstallController::class, 'inspectUninstall']);
 
 // No HTTP terminal and no dependency-start executor. Those actions are not
 // registered. Dependency installs run as `php webman sandpackage:dependency`.

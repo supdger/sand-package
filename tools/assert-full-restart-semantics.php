@@ -75,14 +75,30 @@ $worker = file_get_contents($root . '/server/plugin/sandpackage/tools/system-upd
 assert_true(str_contains($worker, 'function reloadUnixHost'), 'reloadUnixHost kept for SIGUSR1');
 assert_true(str_contains($worker, 'function fullRestartUnixHost'), 'fullRestartUnixHost is separate from reload');
 assert_true(str_contains($worker, "restart', '-d'"), 'full restart invokes php start.php restart -d');
+assert_true(str_contains($worker, 'function unixFdScrubCommand'), 'detached helpers spawn through an fd scrub');
+assert_true(str_contains($worker, 'SAND_FD_SCRUBBED'), 'fd scrub marks scrubbed children');
+assert_true(str_contains($worker, 'function waitUnixListenersReleased'), 'restart waits bounded for port release');
+assert_true(str_contains($worker, 'function assertUnixListenersAccepting'), 'restart confirms listeners accept after rotation');
+
+$restartWorker = file_get_contents($root . '/server/plugin/sandpackage/tools/full-restart-worker.php');
+assert_true(str_contains($restartWorker, 'SAND_FD_SCRUBBED'), 'restart worker re-execs through fd scrub when unscrubbed');
+assert_true(str_contains($restartWorker, "'listeners'"), 'restart worker consumes listeners payload');
 
 $logic = file_get_contents($root . '/server/plugin/sandpackage/app/logic/InstallLogic.php');
 assert_true(str_contains($logic, 'process_registration_pending'), 'install ledger records process_registration_pending');
 assert_true(str_contains($logic, 'dependency_service_action'), 'install ledger records dependency_service_action');
 assert_true(!str_contains($logic, 'Server::restart('), 'InstallLogic no longer calls ambiguous Server::restart()');
 
+$legacy = file_get_contents($root . '/server/plugin/sandpackage/app/logic/LegacyInstallLogic.php');
+assert_true(str_contains($legacy, 'isRuntimeEnvName'), 'legacy deploy keeps runtime env out of manifests');
+
+$serverSource = file_get_contents($root . '/server/compat/Saithink/Saipackage/service/Server.php');
+assert_true(str_contains($serverSource, 'unixFdScrubCommand'), 'detachFullRestart spawns scrubbed worker');
+assert_true(str_contains($serverSource, "'listeners'"), 'detachFullRestart passes listeners payload');
+assert_true(str_contains($serverSource, 'isRuntimeEnvName'), 'installByRelation preserves existing .env');
+
 $app = include $root . '/server/plugin/sandpackage/config/app.php';
-assert_true(($app['version'] ?? null) === '0.2.22', 'version bumped to 0.2.22');
+assert_true(($app['version'] ?? null) === '0.2.24', 'version bumped to 0.2.24');
 
 // cleanup
 foreach ([$empty, $ai, $ai2] as $file) {

@@ -1,5 +1,10 @@
 <?php
 
+/**
+ * This file is part of sand-package, derived from saithink/saipackage (MIT License).
+ * Copyright (c) 2024 saithink.
+ */
+
 namespace Saithink\Saipackage\service;
 
 use Exception;
@@ -112,7 +117,7 @@ class Server
 
             if (Worker::getAllWorkers() === []) {
                 fwrite(STDERR, "已核对当前宿主主进程；正在执行完整重启（php start.php restart 语义，会重读 process.php）。\n");
-                $next = \SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master);
+                $next = \SandSystemUpdateRuntime::fullRestartUnixHost($server, $pidFile, $master, PHP_BINARY, self::hostListeners());
                 if ($expectedProcessNames !== []) {
                     \SandSystemUpdateRuntime::assertUnixCustomProcessesRunning($server, $next, $expectedProcessNames);
                 }
@@ -126,6 +131,31 @@ class Server
             Log::error('服务完整重启失败：' . $e->getMessage());
             throw $e;
         }
+    }
+
+    /**
+     * Listen addresses declared by the host (config/process.php + legacy
+     * config/server.php). Passed to the restart worker so it can wait for the
+     * ports to release and confirm the rotated master accepts connections.
+     *
+     * @return list<string>
+     */
+    private static function hostListeners(): array
+    {
+        $listeners = [];
+        $processes = config('process');
+        if (is_array($processes)) {
+            foreach ($processes as $definition) {
+                if (is_array($definition) && is_string($definition['listen'] ?? null) && $definition['listen'] !== '') {
+                    $listeners[] = $definition['listen'];
+                }
+            }
+        }
+        $server = config('server.listen');
+        if (is_string($server) && $server !== '') {
+            $listeners[] = $server;
+        }
+        return array_values(array_unique($listeners));
     }
 
     /**
@@ -145,6 +175,7 @@ class Server
             'master' => $master,
             'expected' => array_values($expectedProcessNames),
             'php' => $php,
+            'listeners' => self::hostListeners(),
             'registry' => is_string($options['registry'] ?? null) ? $options['registry'] : null,
             'clear_pending' => ($options['clear_pending'] ?? false) === true,
         ];
@@ -158,8 +189,11 @@ class Server
         }
         $null = \SandSystemUpdateRuntime::nullDevice();
         $pipes = [];
+        // This HTTP worker inherited the master listen sockets; proc_open only
+        // redirects the listed descriptors. Spawn through a POSIX fd scrub so the
+        // helper cannot keep the port bound after the old master exits.
         $process = proc_open(
-            [$php, $worker, $payloadFile],
+            \SandSystemUpdateRuntime::unixFdScrubCommand([$php, $worker, $payloadFile]),
             [0 => ['file', $null, 'r'], 1 => ['file', $null, 'a'], 2 => ['file', $null, 'a']],
             $pipes,
             $server,
@@ -273,6 +307,17 @@ class Server
     }
 
     /**
+     * Runtime environment files (`.env`, `.env.<name>`) are operator-owned: an
+     * existing destination file is never overwritten by install/upgrade.
+     * `.env.example` and other templates stay managed payload and update normally.
+     */
+    public static function isRuntimeEnvName(string $basename): bool
+    {
+        return $basename === '.env'
+            || (str_starts_with($basename, '.env.') && !str_ends_with($basename, '.example'));
+    }
+
+    /**
      * installByRelation
      * @param $pathRelation
      * @return void
@@ -284,7 +329,61 @@ class Server
             if (!is_dir($parent_dir)) {
                 mkdir($parent_dir, 0777, true);
             }
-            copy_dir($source, $dest, true);
+            $preserved = self::preserveRuntimeEnvFiles($source, $dest);
+            try {
+                copy_dir($source, $dest, true);
+            } finally {
+                self::restoreRuntimeEnvFiles($preserved);
+            }
+        }
+    }
+
+    /**
+     * Move every destination runtime-env file aside before a wholesale copy so
+     * the package payload cannot overwrite operator ports/credentials. Only
+     * paths the package itself ships are candidates; files that exist solely on
+     * the host are outside copy_dir's reach and need no guard.
+     *
+     * @return array<string,string> destination path => parked path
+     */
+    private static function preserveRuntimeEnvFiles(string $source, string $dest): array
+    {
+        $preserved = [];
+        if (!is_dir($source)) {
+            $relative = basename($source);
+            if (self::isRuntimeEnvName($relative) && is_file($dest)) {
+                $parked = $dest . '.sandkeep-' . bin2hex(random_bytes(6));
+                if (!@rename($dest, $parked)) throw new \RuntimeException('无法保留已有环境文件：' . $dest);
+                $preserved[$dest] = $parked;
+            }
+            return $preserved;
+        }
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator($source, \FilesystemIterator::SKIP_DOTS),
+            \RecursiveIteratorIterator::LEAVES_ONLY,
+        );
+        foreach ($iterator as $item) {
+            $basename = $item->getBasename();
+            if (!self::isRuntimeEnvName($basename)) continue;
+            $target = $dest . DIRECTORY_SEPARATOR . $iterator->getSubPathName();
+            if (!is_file($target) || is_link($target)) continue;
+            $parked = $target . '.sandkeep-' . bin2hex(random_bytes(6));
+            if (!@rename($target, $parked)) throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            $preserved[$target] = $parked;
+        }
+        return $preserved;
+    }
+
+    /** @param array<string,string> $preserved destination path => parked path */
+    private static function restoreRuntimeEnvFiles(array $preserved): void
+    {
+        foreach ($preserved as $target => $parked) {
+            if (is_file($target) && !@unlink($target)) {
+                throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            }
+            if (!@rename($parked, $target)) {
+                throw new \RuntimeException('无法保留已有环境文件：' . $target);
+            }
         }
     }
 

@@ -1014,6 +1014,12 @@
     type CleanupResult
   } from '../api/index'
   import { checkVersionCompatibility } from './version-compatibility'
+  import {
+    discardUpgradeCandidateConfirmation,
+    registerExistingConfirmation,
+    uninstallDependentsText,
+    uninstallUnverifiableText
+  } from './plain-confirmations'
   import InstallForm from './install-box.vue'
   import SystemUpdate from './system-update.vue'
   import { useInstallOrchestratorStore } from '../store/install-orchestrator'
@@ -1275,30 +1281,24 @@
     return true
   }
 
-  const promptConfirmation = async (
+  /**
+   * 普通确认对话框：一句通俗说明 + 主按钮/取消，无输入框。
+   * 服务端确认串由前端按已核验字段自动生成，不再要求手打。
+   */
+  const confirmPlain = async (
     title: string,
     description: string,
-    expected: string,
     confirmButtonText: string
-  ): Promise<string | null> => {
+  ): Promise<boolean> => {
     try {
-      const result: unknown = await ElMessageBox.prompt(description, title, {
+      await ElMessageBox.confirm(description, title, {
         confirmButtonText,
         cancelButtonText: '取消',
-        inputPlaceholder: expected,
-        inputValidator: (value: string) => value === expected || '确认内容不匹配'
+        type: 'warning'
       })
-      if (
-        typeof result === 'object' &&
-        result !== null &&
-        'value' in result &&
-        typeof result.value === 'string'
-      ) {
-        return result.value
-      }
-      return null
+      return true
     } catch {
-      return null
+      return false
     }
   }
 
@@ -1403,20 +1403,19 @@
     if (!canRestoreRuntime(record) || loading.value || listError.value !== '') return
     const expected = readRowVersionTuple(record)
     const confirmation = exactRestoreRuntimeConfirmation(expected.app, expected.fromVersion)
-    const typed = await promptConfirmation(
+    const accepted = await confirmPlain(
       '恢复升级前运行文件',
-      '系统只会隔离当前运行文件并恢复已核验备份，不会修改待升级插件包、备份、登记信息或数据库。请输入下方确认内容。',
-      confirmation,
+      '系统只会隔离当前运行文件并恢复已核验备份，不会修改待升级插件包、备份、登记信息或数据库。',
       '确认恢复'
     )
-    if (typed === null) return
+    if (!accepted) return
     const current = sessionOf(record)
     current.phase = 'restoring_runtime'
     current.errorMessage = ''
     try {
       const result = await restoreRuntimeFromBackup({
         appName: expected.app,
-        confirmation: typed,
+        confirmation,
         expected
       })
       // The prompt does not retain a value, and this clears every staged
@@ -1552,20 +1551,19 @@
       toVersion: current.toVersion
     }
     const confirmation = exactReplaceConfirmation(expected.app, expected.toVersion)
-    const typed = await promptConfirmation(
+    const accepted = await confirmPlain(
       '恢复插件文件',
-      '系统只会恢复本次失败升级使用的插件文件，不会执行安装或卸载。请输入下方确认内容。',
-      confirmation,
+      '系统只会恢复本次失败升级使用的插件文件，不会执行安装或卸载。',
       '确认替换'
     )
-    if (typed === null) return
+    if (!accepted) return
     current.phase = 'replacing'
     current.errorMessage = ''
     try {
       const message = await replaceFailedUpgradeCandidate({
         appName: expected.app,
         replacementId: current.replacementId,
-        confirmation: typed,
+        confirmation,
         expected
       })
       current.message = message
@@ -1599,19 +1597,18 @@
       expected.toVersion
     )
     current.retryConfirmation = confirmation
-    const typed = await promptConfirmation(
+    const accepted = await confirmPlain(
       '重新执行升级',
-      '系统将重新执行升级，不会把它当作全新安装。请输入下方确认内容。',
-      confirmation,
+      '系统将重新执行升级，不会把它当作全新安装。',
       '确认升级'
     )
-    if (typed === null) return
+    if (!accepted) return
     current.phase = 'retrying'
     current.errorMessage = ''
     try {
       const message = await retryFailedUpgrade({
         appName: expected.app,
-        confirmation: typed,
+        confirmation,
         expected
       })
       current.phase = 'success'
@@ -1998,6 +1995,21 @@
   /** 卸载确认：醒目警告 + 勾选「了解不可恢复」后才能确认，无输入框。 */
   const confirmUninstall = async (record: SandpackageInstallRow): Promise<boolean> => {
     let acknowledged = false
+    // 只读预检仍依赖本插件的已安装插件；检查失败时照常打开对话框，
+    // 服务端的卸载前依赖检查仍是最终防线。
+    let dependentsWarning = ''
+    let unverifiableWarning = ''
+    try {
+      const inspection = await sandpackageApi.inspectUninstall(
+        { appName: record.app },
+        { showErrorMessage: false }
+      )
+      dependentsWarning = uninstallDependentsText(inspection.dependents)
+      unverifiableWarning = uninstallUnverifiableText(inspection.unverifiable)
+    } catch {
+      dependentsWarning = ''
+      unverifiableWarning = ''
+    }
     try {
       await ElMessageBox({
         title: '卸载插件',
@@ -2013,6 +2025,20 @@
               { style: 'margin:0 0 12px' },
               '插件文件与其创建的数据库表都会被删除，此操作不可恢复。'
             ),
+            dependentsWarning !== ''
+              ? h(
+                  'p',
+                  { style: 'margin:0 0 12px;font-weight:600;color:var(--el-color-danger)' },
+                  dependentsWarning
+                )
+              : null,
+            unverifiableWarning !== ''
+              ? h(
+                  'p',
+                  { style: 'margin:0 0 12px;font-weight:600;color:var(--el-color-warning)' },
+                  unverifiableWarning
+                )
+              : null,
             h(
               ElCheckbox,
               {
@@ -2026,6 +2052,7 @@
           ]),
         confirmButtonText: '确认卸载',
         cancelButtonText: '取消',
+        showCancelButton: true,
         type: 'warning',
         distinguishCancelAndClose: true,
         beforeClose: (action, _instance, done) => {
@@ -2225,23 +2252,13 @@
     if (pluginOperationBusy.value) return
     if (isPostgresqlLifecycleRecord(record)) return
     if (rejectOrdinaryAction(record)) return
-    const expected = `DISCARD ${record.app}@${record.version}`
-    let confirmation = ''
-    try {
-      const result = await ElMessageBox.prompt(
-        '系统将仅恢复已验证的旧插件注册包并隔离当前升级包；不会执行数据库回滚，因为升级尚未执行。请输入下方确认内容。',
-        '撤回升级包',
-        {
-          confirmButtonText: '撤回升级包',
-          cancelButtonText: '取消',
-          inputPlaceholder: expected,
-          inputValidator: (value: string) => value === expected || '确认内容不匹配'
-        }
-      )
-      confirmation = result.value
-    } catch {
-      return
-    }
+    const confirmation = discardUpgradeCandidateConfirmation(record.app, record.version)
+    const accepted = await confirmPlain(
+      '撤回升级包',
+      `将撤回 ${record.title || record.app}（v${record.version}）这个尚未执行的升级包，恢复原来的插件登记；不会改动数据库。`,
+      '撤回升级包'
+    )
+    if (!accepted) return
     if (!acquireLocalWrite('discard')) return
     try {
       await sandpackageApi.discardCandidate({
@@ -2260,29 +2277,19 @@
   const handleDiscardFreshCandidate = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value) return
     if (rejectOrdinaryAction(record)) return
-    let expected = ''
-    try {
-      const inspection = await sandpackageApi.inspectFreshCandidate({ appName: record.app })
-      expected = inspection.confirmation
-    } catch {
-      return
-    }
     let confirmation = ''
     try {
-      const result = await ElMessageBox.prompt(
-        '系统将删除这个尚未开始安装的候选并释放插件名；不会执行数据库脚本，也不改动运行文件。请输入下方确认内容。',
-        '撤回安装候选',
-        {
-          confirmButtonText: '撤回候选',
-          cancelButtonText: '取消',
-          inputPlaceholder: expected,
-          inputValidator: (value: string) => value === expected || '确认内容不匹配'
-        }
-      )
-      confirmation = result.value
+      const inspection = await sandpackageApi.inspectFreshCandidate({ appName: record.app })
+      confirmation = inspection.confirmation
     } catch {
       return
     }
+    const accepted = await confirmPlain(
+      '撤回安装候选',
+      `将删除 ${record.title || record.app}（v${record.version}）这个尚未开始安装的候选并释放插件名；不会执行安装，也不改动已有文件。`,
+      '撤回候选'
+    )
+    if (!accepted) return
     if (!acquireLocalWrite('discard')) return
     try {
       await sandpackageApi.discardFreshCandidate({
@@ -2301,23 +2308,13 @@
   const handleRegisterExisting = async (record: SandpackageInstallRow) => {
     if (pluginOperationBusy.value) return
     if (rejectOrdinaryAction(record)) return
-    const expected = `REGISTER ${record.app}@${record.version}`
-    let confirmation = ''
-    try {
-      const result = await ElMessageBox.prompt(
-        '系统将核对安装包、运行插件元数据，并逐文件校验后端和前端内容；不会复制文件、执行数据库脚本或运行插件代码。请输入下方确认内容。',
-        '登记现有插件',
-        {
-          confirmButtonText: '核验并登记',
-          cancelButtonText: '取消',
-          inputPlaceholder: expected,
-          inputValidator: (value: string) => value === expected || '确认内容不匹配'
-        }
-      )
-      confirmation = result.value
-    } catch {
-      return
-    }
+    const confirmation = registerExistingConfirmation(record.app, record.version)
+    const accepted = await confirmPlain(
+      '登记现有插件',
+      `将核对 ${record.title || record.app}（v${record.version}）的安装包与已部署文件并逐文件校验；不会复制文件或执行数据库脚本。`,
+      '核验并登记'
+    )
+    if (!accepted) return
 
     if (!acquireLocalWrite('register')) return
     try {

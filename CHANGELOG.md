@@ -1,12 +1,28 @@
 # Changelog
 
-## 0.2.22（2026-11-05）
+## 0.2.25（2026-11-10）
 
 - 移除 HTTP 在线终端与依赖启动执行面。`/app/sandpackage/index/terminal` 与 `POST /app/sandpackage/install/inspectDependencyStart` 不再注册。依赖安装改为宿主 `server/` 目录的 `php webman sandpackage:dependency run <插件标识> composer|npm`；中断恢复仍是 `php webman sandpackage:recover inspect-dependency` / `recover-dependency`。管理端源码不再提供「依赖安装终端」按钮或指向该 HTTP 地址的客户端，`composer run-script sand:publish` 不会再把该入口发布出去。
+
+## 0.2.24（2026-11-07）
+
+- 修复 `full_restart` 后新宿主 `Address already in use`：`full-restart-worker.php` 由 HTTP worker 经 `proc_open` 拉起时会继承 master 的监听 socket（PHP `proc_open` 只重定向声明的描述符），旧 master 退出后辅助进程继续持有端口，新 master 无法 bind。现在辅助进程经 `/bin/sh` fd 清洗启动（关闭 3+ 号描述符并置 `SAND_FD_SCRUBBED`），且 worker 在未被清洗拉起时会用 `pcntl_exec` 自清洗一次，兼容旧版本宿主调用链。
+- 完整重启改为有界确认流程：`php start.php restart -d` → 等待 master 轮换 → 确认声明监听端口恢复接受连接；尝试间先等有界端口释放（默认 15s），最多 2 次尝试，失败返回朴素中文错误，不再永久挂起或无限重试。
+- 安装/升级保留运营方运行时环境文件：插件载荷部署不再覆盖目标已存在的 `.env` / `.env.<name>` 变体（`.env.example` 等模板仍随版本更新）；legacy 部署清单核对同样不纳入运行时 env。
+- 不修改 workerman/webman 源码与 vendor。
+
+## 0.2.23（2026-11-05）
+
 - 安装/升级语义拆分：`reload` = SIGUSR1 HTTP worker 轮换（旧 `Server::restart()` 实际行为）；`full_restart` = 官方 `php start.php restart` 语义，master 重读 `config/process.php` 并注册自定义进程。禁止再用「restart」一词表示 reload。
 - 新鲜安装含非空 `process.php`，或升级时 process 指纹（进程名 / handler / count / reloadable，无法加载表时回退规范化源码摘要）变化 → 自动 `full_restart`；仅业务 PHP 变更仍可 `reload`。
 - 完整重启在独立进程执行并核验 master PID 轮换与可选进程名；失败或尚未核验时账本登记 `process_registration_pending`，恢复入口提供显式 `restart-only`（完整重启），不得谎报自定义进程已注册。`signal_requested` 仍不能代替实际运行验收。
-- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.22**。
+- 不修改 workerman/webman 源码与 vendor。SandAI 等含自定义进程的插件若要「装完即跑」，请声明最低 SandPackage **0.2.23**。
+
+## 0.2.22（2026-11-05）
+
+- 移除剩余手打确认串：「撤回安装候选」「撤回升级包」「登记现有插件」与失败升级恢复流程的「恢复升级前运行文件」「恢复插件文件」「重新执行升级」全部改为普通确认对话框（通俗说明 + 确认/取消按钮，无输入框、无内部名词）。服务端确认串校验保持不变，由前端按已核验字段或检查端点响应自动生成并随请求提交——与 0.2.20/0.2.21 对安装、升级、卸载的处理方式一致，候选身份绑定的竞态防护语义不变。
+- 卸载被依赖插件不再静默生效：卸载前服务端检查是否存在已安装且声明依赖本插件的插件，存在则拒绝卸载并返回列出依赖方的中文错误；依赖声明超限或不可读、不可解析的已安装插件按「不可证明安全」列入 `unverifiable`，同样拒绝卸载并列出待检查项，不静默漏判；卸载对话框同步增加依赖方警告（经只读 `inspectUninstall` 端点预先列出，检查失败时照常打开对话框，服务端检查仍是最终防线）。
+- 卸载确认框补上「取消」按钮，退出破坏性确认不再需要找右上角关闭图标。
 
 ## 0.2.21（2026-11-04）
 

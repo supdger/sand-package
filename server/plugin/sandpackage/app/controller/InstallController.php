@@ -761,6 +761,19 @@ class InstallController extends BaseController
     }
 
     /**
+     * Read-only uninstall preview: installed plugins that still declare this
+     * app as a package dependency. The dialog warns with the list; uninstall()
+     * refuses under the write lock while dependents remain.
+     */
+    public function inspectUninstall(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') throw new ApiException('卸载检查仅支持 POST 请求', 400);
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') throw new ApiException('请填写插件标识', 400);
+        return $this->success((new InstallLogic($appName))->inspectUninstall(), '卸载依赖检查完成');
+    }
+
+    /**
      * 卸载插件
      * @param Request $request
      * @return Response
