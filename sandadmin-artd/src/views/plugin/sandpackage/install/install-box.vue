@@ -8,62 +8,98 @@
     :show-close="!loading"
     :before-close="beforeClose"
   >
-    <div class="flex flex-col items-center mb-6">
-      <div class="w-[400px]">
-        <div class="text-lg text-red-500 font-bold mb-2">
-          请您务必确认模块包文件来自官方渠道或经由官方认证的模块作者，否则系统可能被破坏，因为：
-        </div>
-        <div class="text-red-500">1. 模块可以修改和新增系统文件</div>
-        <div class="text-red-500">2. 模块可以执行sql命令和代码</div>
-        <div class="text-red-500">3. 模块可以安装新的前后端依赖</div>
-      </div>
+    <div class="upload-dialog">
+      <ElAlert
+        type="warning"
+        :closable="false"
+        title="只装你信得过的插件包。插件能改系统文件、改数据库、装新的依赖，来路不明的包可能把系统弄坏。"
+      />
 
-      <!-- 已上传的应用信息 -->
-      <div v-if="appInfo && appInfo.app" class="mt-10 w-[600px]">
+      <div v-if="uploaded && appInfo.app" class="upload-result">
+        <ElAlert type="success" :closable="false" title="上传完成" />
         <ElDescriptions :column="1" border>
-          <ElDescriptionsItem label="应用标识">{{ appInfo?.app }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="应用名称">{{ appInfo?.title }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="应用描述">{{ appInfo?.about }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="作者">{{ appInfo?.author }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="版本">{{ appInfo?.version }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件标识">{{ appInfo.app }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件名称">{{ appInfo.title }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件说明">{{ appInfo.about }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="作者">{{ appInfo.author }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="版本">{{ appInfo.version }}</ElDescriptionsItem>
         </ElDescriptions>
+        <div class="upload-result-actions">
+          <ElButton @click="visible = false">完成</ElButton>
+          <ElButton type="primary" :disabled="disabled || installStarting" @click="installUploaded">
+            去安装
+          </ElButton>
+        </div>
       </div>
 
-      <!-- 上传区域 -->
-      <div v-else class="mt-10 w-[600px]">
+      <template v-else>
         <ElUpload
           drag
-          :http-request="uploadFileHandler"
-          :before-upload="beforeUpload"
+          :auto-upload="false"
           :show-file-list="false"
           :disabled="disabled || loading"
           accept=".zip"
-          class="w-full"
+          class="upload-drop"
+          :on-change="onFileChange"
         >
-          <div class="flex flex-col items-center justify-center py-8">
-            <ArtSvgIcon icon="ri:upload-cloud-line" class="text-4xl text-gray-400 mb-2" />
-            <div class="text-gray-500">
+          <div class="upload-drop-inner">
+            <ArtSvgIcon icon="ri:upload-cloud-line" class="upload-icon" />
+            <div class="upload-hint-line">
               将插件包文件拖到此处，或
-              <span class="text-primary ml-2">点击上传</span>
+              <span class="upload-pick">点击选择</span>
             </div>
-            <div class="mt-2 text-sm text-gray-500">{{ uploadHint }}</div>
+            <div class="upload-limit">{{ uploadHint }}</div>
           </div>
         </ElUpload>
-      </div>
+        <input
+          ref="filePicker"
+          type="file"
+          accept=".zip"
+          class="upload-picker"
+          @change="onPickerChange"
+        />
+
+        <p v-if="selectedName" class="selected-file">已选择 {{ selectedName }}</p>
+        <ElProgress v-if="loading" :percentage="uploadPercent" :stroke-width="8" />
+        <p v-if="loading" class="upload-status">正在上传</p>
+        <ElAlert v-if="oversizeText" type="warning" :closable="false" :title="oversizeText" />
+        <ElAlert v-if="uploadError" type="error" :closable="false" :title="uploadError" />
+        <div v-if="uploadError" class="upload-error-actions">
+          <ElButton size="small" @click="copyUploadError">复制问题信息</ElButton>
+        </div>
+
+        <div v-if="selectedName" class="upload-actions">
+          <ElButton v-if="uploadError" type="primary" @click="reselectFile">重新选择</ElButton>
+          <ElButton
+            v-else
+            type="primary"
+            :loading="loading"
+            :disabled="!selectedFile"
+            @click="startUpload"
+          >
+            开始上传
+          </ElButton>
+          <ElButton :disabled="loading" @click="clearSelection">取消</ElButton>
+        </div>
+      </template>
     </div>
   </ElDialog>
 </template>
 
 <script setup lang="ts">
   import { ref, reactive, computed } from 'vue'
-  import { ElMessage } from 'element-plus'
-  import type { UploadProps, UploadRequestOptions } from 'element-plus'
+  import { ElMessage, ElMessageBox } from 'element-plus'
+  import type { UploadFile } from 'element-plus'
   import sandpackageApi, { type AppInfo } from '../api/index'
+  import { useInstallOrchestratorStore } from '../store/install-orchestrator'
+  import type { InstallOrchestrationInput } from './dependency-chain'
   import {
     packageZipMaxBytesValue,
     packageZipOversizeMessage,
     setPackageZipMaxBytes
   } from './failed-upgrade-recovery'
+  import { formatUploadLimit } from './upload-limit'
+  import { describeUploadFailure } from './upload-result'
 
   const props = withDefaults(
     defineProps<{
@@ -85,19 +121,22 @@
 
   const visible = ref(false)
   const loading = ref(false)
+  const uploaded = ref(false)
+  const uploadPercent = ref(0)
+  const selectedName = ref('')
+  const selectedFile = ref<File | null>(null)
+  const oversizeText = ref('')
+  const uploadError = ref('')
+  /** 「复制问题信息」的原始后端细节；页面上只展示 uploadError 白话。 */
+  const uploadErrorDetail = ref('')
+  const filePicker = ref<HTMLInputElement | null>(null)
+  const installStarting = ref(false)
+  const orchestrator = useInstallOrchestratorStore()
 
-  /** 上限由后端 effectiveLimit 下发，取不到时沿用模块兜底，不在前端定义业务值。 */
+  /** 上限由后端 effectiveLimit 下发，取不到时沿用插件包兜底，不在前端定义业务值。 */
   const uploadSize = ref(packageZipMaxBytesValue())
 
-  const uploadHint = computed(
-    () => `仅支持 ZIP 格式，单个插件包不超过 ${formatBytes(uploadSize.value)}（${uploadSize.value} 字节）`
-  )
-
-  function formatBytes(bytes: number): string {
-    if (bytes >= 1024 * 1024) return `${Math.floor((bytes / (1024 * 1024)) * 10) / 10}MB`
-    if (bytes >= 1024) return `${Math.floor(bytes / 1024)}KB`
-    return `${bytes}B`
-  }
+  const uploadHint = computed(() => `仅支持 ZIP 格式，${formatUploadLimit(uploadSize.value)}`)
 
   const refreshUploadLimit = async (): Promise<void> => {
     try {
@@ -107,7 +146,6 @@
         ElMessage.warning(limits.self_check.notes)
       }
     } catch {
-      // 读取不到后端口径时保留当前兜底上限，上传仍由后端做最终判定。
       uploadSize.value = packageZipMaxBytesValue()
     }
   }
@@ -128,54 +166,162 @@
       return '仅支持 ZIP 格式的插件包'
     }
     if (file.size > uploadSize.value) {
-      return packageZipOversizeMessage(file.size, uploadSize.value)
+      return packageZipOversizeMessage(uploadSize.value, file.size)
     }
     return undefined
   }
 
-  const beforeUpload: UploadProps['beforeUpload'] = (file) => {
-    if (props.disabled || loading.value) return false
-    const message = uploadValidationMessage(file)
-    if (!message) return true
-
-    ElMessage.warning(message)
-    return false
+  const clearUploadResult = (): void => {
+    ElMessage.closeAll()
+    uploaded.value = false
+    uploadError.value = ''
+    uploadErrorDetail.value = ''
+    oversizeText.value = ''
+    uploadPercent.value = 0
   }
 
-  const uploadFileHandler = async (options: UploadRequestOptions): Promise<unknown> => {
-    if (props.disabled || loading.value || !props.canStartWrite()) {
-      throw new Error('当前有插件操作正在进行，请稍后重试')
-    }
-    const file = options.file
+  const selectFile = (file: File): void => {
+    clearUploadResult()
+    selectedName.value = file.name
+    const message = uploadValidationMessage(file)
+    selectedFile.value = message ? null : file
+    if (message) oversizeText.value = message
+  }
+
+  const onFileChange = (upload: UploadFile): void => {
+    if (props.disabled || loading.value) return
+    const file = upload.raw
+    if (!file) return
+    selectFile(file)
+  }
+
+  const onPickerChange = (event: Event): void => {
+    const input = event.target as HTMLInputElement
+    const file = input.files?.item(0)
+    input.value = ''
+    if (props.disabled || loading.value || !file) return
+    selectFile(file)
+  }
+
+  const reselectFile = (): void => {
+    if (loading.value) return
+    filePicker.value?.click()
+  }
+
+  const clearSelection = (): void => {
+    if (loading.value) return
+    selectedFile.value = null
+    selectedName.value = ''
+    clearUploadResult()
+  }
+
+  const startUpload = async (): Promise<void> => {
+    const file = selectedFile.value
+    if (!file || props.disabled || loading.value || !props.canStartWrite()) return
     const message = uploadValidationMessage(file)
     if (message) {
-      throw new Error(message)
+      oversizeText.value = message
+      return
     }
-
+    clearUploadResult()
     loading.value = true
+    uploadPercent.value = 35
     emit('busy-change', true)
     try {
       const dataForm = new FormData()
       dataForm.append('file', file)
-
       const res = await sandpackageApi.uploadApp(dataForm)
-      if (res) {
-        Object.assign(appInfo, res)
-        visible.value = false
-        ElMessage.success('上传成功')
-        await props.afterUpload()
-        emit('success')
+      if (!res) {
+        uploadError.value = '上传没有完成，请再试一次'
+        uploadErrorDetail.value = uploadError.value
+        return
       }
-      return res
+      uploadPercent.value = 100
+      Object.assign(appInfo, res)
+      uploaded.value = true
+      // 响应已落地就放行关闭入口：列表刷新期间右上角关闭与底部按钮可用。
+      loading.value = false
+      emit('busy-change', false)
+      ElMessage.closeAll()
+      ElMessage.success('上传成功')
+      await props.afterUpload()
+      emit('success')
+    } catch (error: unknown) {
+      const failure = describeUploadFailure(error)
+      uploadError.value = failure.title
+      uploadErrorDetail.value = failure.detail
     } finally {
       loading.value = false
       emit('busy-change', false)
     }
   }
 
-  const open = () => {
+  const copyUploadError = async (): Promise<void> => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(uploadErrorDetail.value)
+      } else {
+        // 非安全上下文没有 clipboard API，退回隐藏输入框选择复制。
+        const textarea = document.createElement('textarea')
+        textarea.value = uploadErrorDetail.value
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        textarea.remove()
+      }
+      ElMessage.success('复制成功')
+    } catch {
+      ElMessage.error('复制失败，请手动复制问题信息')
+    }
+  }
+
+  /** 「去安装」直接接进页面级安装编排，与列表里「继续安装」同一条链。 */
+  const installUploaded = async (): Promise<void> => {
+    if (props.disabled || installStarting.value || !props.canStartWrite()) return
+    const upgrade = appInfo.update === 1
+    if (upgrade) {
+      try {
+        await ElMessageBox.confirm(
+          `将升级 ${appInfo.title || appInfo.app} 到 ${appInfo.version}，并自动升级所需的依赖插件，完成后服务会自动生效。`,
+          '确认升级',
+          { confirmButtonText: '确认升级', cancelButtonText: '取消', type: 'warning' }
+        )
+      } catch {
+        return
+      }
+    }
+    installStarting.value = true
+    // 先关弹窗，安装进度与依赖链提示由页面上的编排器状态呈现。
+    visible.value = false
+    try {
+      const input: InstallOrchestrationInput = {
+        app: appInfo.app,
+        title: appInfo.title || appInfo.app
+      }
+      if (upgrade) {
+        input.confirmation = `UPGRADE ${appInfo.app}@${appInfo.upgrade_from_version ?? ''}->${appInfo.version}`
+      }
+      const outcome = await orchestrator.start(input)
+      if (outcome.kind === 'installed') {
+        ElMessage.success('安装成功')
+      } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
+        ElMessage.warning(outcome.reason)
+      }
+      // chain-failed：编排器已登记失败并打开命令行说明。
+    } catch {
+      // Error already handled by http utility
+    } finally {
+      installStarting.value = false
+      await props.afterUpload()
+    }
+  }
+
+  const open = (): void => {
     if (props.disabled || loading.value) return
     visible.value = true
+    clearSelection()
     Object.assign(appInfo, initialApp)
     void refreshUploadLimit()
   }
@@ -186,3 +332,72 @@
 
   defineExpose({ open })
 </script>
+
+<style scoped>
+  .upload-dialog {
+    display: grid;
+    gap: 16px;
+  }
+
+  .upload-drop {
+    width: 100%;
+  }
+
+  .upload-drop-inner {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 0;
+  }
+
+  .upload-icon {
+    margin-bottom: 8px;
+    font-size: 36px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .upload-hint-line,
+  .upload-limit,
+  .selected-file,
+  .upload-status {
+    color: var(--el-text-color-secondary);
+  }
+
+  .upload-pick {
+    margin-left: 8px;
+    color: var(--el-color-primary);
+  }
+
+  .upload-limit,
+  .selected-file,
+  .upload-status {
+    margin: 8px 0 0;
+    font-size: 13px;
+  }
+
+  .upload-actions {
+    display: flex;
+    gap: 12px;
+  }
+
+  .upload-picker {
+    display: none;
+  }
+
+  .upload-error-actions {
+    display: flex;
+    justify-content: flex-start;
+  }
+
+  .upload-result {
+    display: grid;
+    gap: 12px;
+  }
+
+  .upload-result-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 12px;
+  }
+</style>

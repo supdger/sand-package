@@ -283,7 +283,11 @@ export default {
    * 上传插件包
    */
   uploadApp(data: FormData) {
-    return request.post<AppInfo>({ url: '/app/sandpackage/install/upload', data })
+    return request.post<AppInfo>({
+      url: '/app/sandpackage/install/upload',
+      data,
+      showErrorMessage: false
+    })
   },
 
   /** 只读检查从未开始的首次安装候选能否撤回。 */
@@ -291,6 +295,38 @@ export default {
     return request.post<FreshCandidateWithdrawal>({
       url: '/app/sandpackage/install/inspectFreshCandidate',
       data
+    })
+  },
+
+  /** 撤回停在等待依赖的全新安装；服务端同时清掉这次写入的数据表和菜单。 */
+  withdrawWaitingInstall(data: { appName: string }) {
+    return request.post<{ app: string; state: number }>({
+      url: '/app/sandpackage/install/withdrawWaitingInstall',
+      data
+    })
+  },
+
+  /** 安装失败后接着装。脚本已经执行过时不再重放，避免菜单和数据表插重。 */
+  retryFailedInstall(data: { appName: string }) {
+    return request.post<{ app: string; state: number; replay_sql: boolean }>({
+      url: '/app/sandpackage/install/retryFailedInstall',
+      data,
+      showErrorMessage: false
+    })
+  },
+
+  /** 依赖已经齐就装完；没齐就返回还缺的包和要复制的命令。 */
+  continueWaitingInstall(data: { appName: string }) {
+    return request.post<{
+      ready: boolean
+      state: number
+      app: string
+      message: string
+      commands: { label: string; text: string }[]
+    }>({
+      url: '/app/sandpackage/install/continueWaitingInstall',
+      data,
+      showErrorMessage: false
     })
   },
 

@@ -3,25 +3,28 @@
     <div class="update-toolbar">
       <div>
         <h3>系统更新</h3>
-        <p>选择版本后点击升级，系统会自动准备环境并检查兼容性。</p>
+        <p>查看系统和插件管理器的版本。</p>
       </div>
       <ElButton :loading="operation === 'status'" :disabled="busy" @click="loadStatus">检查更新</ElButton>
     </div>
+    <ElAlert v-if="lookupFailed && !environmentUnsupported" type="warning" :closable="false" title="暂时查不到有没有新版本，请稍后点「检查更新」再试">
+      <ElButton size="small" :disabled="problemDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
+    </ElAlert>
     <ElAlert v-if="error" type="error" :closable="false" title="操作未完成">
       <p>{{ error }}</p>
       <ElButton :disabled="operation !== ''" @click="reconnect">重新连接并查询结果</ElButton>
     </ElAlert>
-    <ElAlert v-if="!status && !error" type="info" :closable="false" title="正在读取版本和升级条件" />
+    <ElAlert v-if="!status && !error && !lookupFailed" type="info" :closable="false" title="正在读取版本和升级条件" />
     <template v-if="status">
-      <ElAlert v-if="!status.capabilities.supported" type="warning" :closable="false" title="当前环境尚不能执行系统更新">
-        {{ status.capabilities.reason }}
+      <ElAlert v-if="environmentUnsupported" type="warning" :closable="false" :title="unsupportedMessage">
+        <ElButton size="small" :disabled="problemDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
       </ElAlert>
       <div class="version-list" aria-label="系统组件版本">
         <div v-for="item in status.installed" :key="item.package" class="version-row">
           <div><strong>{{ item.name }}</strong><p>已安装版本：{{ item.version }}</p></div>
           <label class="version-select">
             <span>目标版本</span>
-            <ElSelect v-model="selected[item.package]" :disabled="busy || externalBusy" placeholder="暂无可用更新" clearable @change="invalidateInspection">
+            <ElSelect v-model="selected[item.package]" :disabled="busy || externalBusy" :placeholder="describeTargetPlaceholder(releasesFor(item.package).length > 0)" clearable @change="invalidateInspection">
               <ElOption v-for="release in releasesFor(item.package)" :key="release.version" :label="release.version" :value="release.version" />
             </ElSelect>
           </label>
@@ -31,7 +34,7 @@
         <strong>{{ release.name }} {{ release.version }} · 更新说明</strong>
         <p>{{ release.notes || '此版本未提供更新说明。' }}</p>
       </div>
-      <details v-if="checks.length" class="check-details" :open="checks.some(check => check.state !== 'ok')">
+      <details v-if="isCheckDetailsVisible(environmentUnsupported, checks.length)" class="check-details" :open="checks.some(check => check.state !== 'ok')">
         <summary>升级检查详情</summary>
         <ul class="check-list" aria-label="升级检查结果">
         <li v-for="check in checks" :key="check.code">
@@ -42,7 +45,8 @@
       </details>
       <ElAlert v-if="externalBusy" type="info" :closable="false" title="请先完成插件安装、恢复或依赖处理，再更新系统。" />
       <ElSpace wrap>
-        <ElButton type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <ElButton v-if="hasAvailableUpdates && !environmentUnsupported" type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <span v-else-if="!lookupFailed && !environmentUnsupported">已是最新版</span>
         <span v-if="inspection && !inspection.can_start">本次升级未开始，请查看未通过的检查项。</span>
       </ElSpace>
     </template>
@@ -83,8 +87,10 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemUpdateApi, type SystemPackage, type UpdateInspection, type UpdateStatus, type UpdateTask, type UpdateTarget } from '../api/system-update'
+import { describeRequestFailure, describeTargetPlaceholder, isReleaseReadFailed } from './release-lookup'
+import { describeEnvironmentUnsupported, describeUpdateProblem, isCheckDetailsVisible, isEnvironmentUnsupported } from './update-environment'
 
 const props = defineProps<{ externalBusy: boolean }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -94,6 +100,7 @@ const selected = ref<Partial<Record<SystemPackage, string>>>({})
 const task = ref<UpdateTask | null>(null)
 const operation = ref('')
 const error = ref('')
+const requestFailure = ref('')
 const confirmVisible = ref(false)
 const outcomeUnconfirmed = ref(false)
 let disposed = false
@@ -106,7 +113,21 @@ const recoveryEligible = computed(() => !!task.value?.recovery_available && ['fa
 const finalizeEligible = computed(() => !!task.value?.finalize_available)
 const updateBlocked = computed(() => outcomeUnconfirmed.value || task.value?.state === 'recovery_required')
 const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) as [SystemPackage, string][]).filter(([, version]) => !!version).map(([packageName, version]) => ({ package: packageName, version })))
-const checks = computed(() => inspection.value?.checks ?? status.value?.checks ?? [])
+const hasAvailableUpdates = computed(() => (status.value?.installed ?? []).some(item => releasesFor(item.package).some(release => release.version !== item.version)))
+const lookupFailed = computed(() => isReleaseReadFailed(status.value?.checks ?? null, requestFailure.value))
+const environmentUnsupported = computed(() => isEnvironmentUnsupported(status.value?.checks ?? null))
+const latestVersions = computed<string[]>(() =>
+  (status.value?.installed ?? [])
+    .map(item => releasesFor(item.package).find(release => release.version !== item.version)?.version)
+    .filter((version): version is string => version !== undefined)
+)
+const unsupportedMessage = computed(() => describeEnvironmentUnsupported(latestVersions.value))
+const problemDetail = computed(() => describeUpdateProblem(status.value?.checks ?? null, requestFailure.value))
+const checks = computed(() =>
+  (inspection.value?.checks ?? status.value?.checks ?? []).filter(
+    (check) => !(check.code === 'repository' && check.state === 'fail')
+  )
+)
 const selectedReleases = computed(() => status.value?.releases.filter(release => selected.value[release.package] === release.version) ?? [])
 watch(() => busy.value || updateBlocked.value, value => emit('busy', value), { immediate: true })
 function releasesFor(packageName: string) { return status.value?.releases.filter(release => release.package === packageName) ?? [] }
@@ -136,10 +157,12 @@ async function loadStatus() {
   const generation = ++requestGeneration
   operation.value = 'status'
   error.value = ''
+  requestFailure.value = ''
   try {
     const result = await systemUpdateApi.status()
     if (disposed || generation !== requestGeneration) return
     status.value = result
+    requestFailure.value = ''
     outcomeUnconfirmed.value = false
     task.value = result.active_task
     invalidateInspection()
@@ -151,10 +174,30 @@ async function loadStatus() {
       if (choice) choices[installed.package] = choice.version
     }
     selected.value = choices
-  } catch (cause) { if (!disposed && generation === requestGeneration) { status.value = null; invalidateInspection(); error.value = message(cause) } }
+  } catch (cause) {
+    if (!disposed && generation === requestGeneration) {
+      status.value = null
+      invalidateInspection()
+      const statusCode = typeof (cause as { code?: unknown }).code === 'number' ? (cause as { code: number }).code : 0
+      const detail = message(cause)
+      const timedOut =
+        (cause as { transport?: unknown }).transport === 'timeout' || /timeout|超时/i.test(detail)
+      requestFailure.value = describeRequestFailure(detail, statusCode, timedOut)
+    }
+  }
   finally { if (!disposed && generation === requestGeneration) { operation.value = ''; schedulePoll() } }
 }
 async function reconnect() { if (taskRunning.value) await pollTask(); else await loadStatus() }
+async function copyProblemDetail() {
+  const detail = problemDetail.value
+  if (detail === '') return
+  try {
+    await navigator.clipboard.writeText(detail)
+    ElMessage.success('复制成功')
+  } catch {
+    ElMessage.error('复制失败，请稍后重试')
+  }
+}
 async function inspect() {
   if (busy.value || updateBlocked.value || props.externalBusy) return
   operation.value = 'inspect'; error.value = ''; invalidateInspection()

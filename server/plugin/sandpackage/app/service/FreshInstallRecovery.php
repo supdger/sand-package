@@ -101,7 +101,7 @@ final class FreshInstallRecovery
         $binding = $this->binding();
         if ($record !== null) $this->assertIdentity($record, $binding);
         $phase = $record['phase'] ?? 'sql_commit_unknown';
-        $bound = $record !== null && ($record['binding'] === $binding || $this->startWindow($record, $binding) || $this->completionWindow($record, $binding));
+        $bound = $record !== null && (($record['binding'] ?? null) === $binding || $this->startWindow($record, $binding) || $this->completionWindow($record, $binding));
         if (!$bound || !in_array($phase, ['sql_not_committed', 'sql_committed_deploy_pending'], true)) {
             $phase = 'sql_commit_unknown';
         }
@@ -258,7 +258,7 @@ final class FreshInstallRecovery
 
     private function assertIdentity(array $record, array $binding): void
     {
-        if (($record['candidate_identity'] ?? $record['binding']['candidate']) !== $binding['candidate']
+        if (($record['candidate_identity'] ?? $record['binding']['candidate'] ?? null) !== $binding['candidate']
             || ($record['binding']['database']['identity'] ?? null) !== $binding['database']['identity']) {
             throw new ApiException('原候选或数据库身份已变化，禁止恢复');
         }

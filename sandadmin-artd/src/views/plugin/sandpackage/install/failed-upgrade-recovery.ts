@@ -5,6 +5,7 @@
  * 确认文本必须等于本地精确串，动态文案只走稳定码 allowlist。
  */
 import sandpackageApi, { type AppInfo } from '../api/index'
+import { describeOversize } from './upload-limit'
 
 /** 列表行在本页需要的候选/恢复展示字段；不改共享 API 文件。 */
 export interface SandpackageInstallRow extends AppInfo {
@@ -14,6 +15,11 @@ export interface SandpackageInstallRow extends AppInfo {
   recovery_mode?: FailedUpgradeRecoveryMode
   recovery_reason?: string
   ordinary_actions_blocked?: boolean
+  /** 依赖命令 nonce 残留：命令已登记但未正常收尾，表示上次依赖命令中断。 */
+  dependency_command_nonce?: string
+  dependency_failed_nonce?: string
+  /** 旧生命周期依赖进程中断标记。 */
+  process_recovery_required?: number
   failed_stage?: string
   candidate_archive_sha256?: string
   candidate_payload_manifest_sha256?: string
@@ -53,9 +59,9 @@ export function packageZipMaxBytesValue(): number {
 
 const PACKAGE_OVERSIZE_PREFIX = '插件包超过大小限制：限制层='
 
-/** 超限文案统一带限制层、实际字节数与上限。 */
-export function packageZipOversizeMessage(actual: number, max: number, layer = '前端校验'): string {
-  return `${PACKAGE_OVERSIZE_PREFIX}${layer}，实际 ${actual} 字节，上限 ${max} 字节`
+/** 超限只告诉最大体积和是哪一层拦住的，不把原始字节数写到页面上。 */
+export function packageZipOversizeMessage(max: number, actual: number): string {
+  return describeOversize(max, actual)
 }
 
 /** 列表页在核验前展示的稳定人话。 */
@@ -403,7 +409,7 @@ export function assertFailedUpgradeZip(file: File): string | null {
   if (!allowedTypes.has(file.type)) return '请选择 ZIP 插件包，不能使用其他格式'
   if (file.size <= 0) return '插件包文件无效'
   if (file.size > packageZipMaxBytes) {
-    return packageZipOversizeMessage(file.size, packageZipMaxBytes)
+    return packageZipOversizeMessage(packageZipMaxBytes, file.size)
   }
   return null
 }
