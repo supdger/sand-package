@@ -5,8 +5,16 @@ export interface EnvironmentCheck {
   message: string
 }
 
-/** 环境不支持时页面只展示这一句白话，「符号链接」这类细节只进复制内容。 */
-export const ENVIRONMENT_UNSUPPORTED_MESSAGE = '这台服务器的安装方式不支持在网页里升级，请让技术人员按升级说明手动升级。'
+/**
+ * 环境不支持时黄条展示的白话：没有新版本时说明不用做什么，
+ * 有新版本时带接口返回的真实版本号；「符号链接」这类细节只进复制内容。
+ */
+export function describeEnvironmentUnsupported(latestVersions: string[]): string {
+  if (latestVersions.length === 0) {
+    return '这台服务器不支持在网页里升级。现在已经是最新版，不用做什么；以后有新版本时，请让技术人员按升级说明手动升级。'
+  }
+  return `有新版本 ${latestVersions.join('、')}。这台服务器不支持在网页里升级，请让技术人员按升级说明手动升级。`
+}
 
 /** 环境类检查失败的技术原因合集；官方发行读取失败属于可重试路径，不算环境不支持。 */
 export function readEnvironmentFailure(checks: EnvironmentCheck[]): string {

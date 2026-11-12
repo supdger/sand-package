@@ -3,7 +3,7 @@
     <div class="update-toolbar">
       <div>
         <h3>系统更新</h3>
-        <p>选择版本后点击升级，系统会自动准备环境并检查兼容性。</p>
+        <p>查看系统和插件管理器的版本。</p>
       </div>
       <ElButton :loading="operation === 'status'" :disabled="busy" @click="loadStatus">检查更新</ElButton>
     </div>
@@ -16,7 +16,7 @@
     </ElAlert>
     <ElAlert v-if="!status && !error && !lookupFailed" type="info" :closable="false" title="正在读取版本和升级条件" />
     <template v-if="status">
-      <ElAlert v-if="environmentUnsupported" type="warning" :closable="false" :title="ENVIRONMENT_UNSUPPORTED_MESSAGE">
+      <ElAlert v-if="environmentUnsupported" type="warning" :closable="false" :title="unsupportedMessage">
         <ElButton size="small" :disabled="problemDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
       </ElAlert>
       <div class="version-list" aria-label="系统组件版本">
@@ -38,7 +38,7 @@
         <summary>升级检查详情</summary>
         <template v-if="environmentUnsupported">
           <p>升级前检查：没通过</p>
-          <p>{{ ENVIRONMENT_UNSUPPORTED_MESSAGE }}</p>
+          <p>{{ unsupportedMessage }}</p>
         </template>
         <ul v-else class="check-list" aria-label="升级检查结果">
         <li v-for="check in checks" :key="check.code">
@@ -49,8 +49,8 @@
       </details>
       <ElAlert v-if="externalBusy" type="info" :closable="false" title="请先完成插件安装、恢复或依赖处理，再更新系统。" />
       <ElSpace wrap>
-        <ElButton v-if="hasAvailableUpdates" type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
-        <span v-else-if="!lookupFailed">已是最新版</span>
+        <ElButton v-if="hasAvailableUpdates && !environmentUnsupported" type="primary" :loading="operation === 'inspect'" :disabled="busy || updateBlocked || externalBusy || !targets.length || !status.capabilities.supported" @click="inspect">{{ operation === 'inspect' ? '正在准备升级' : '升级所选版本' }}</ElButton>
+        <span v-else-if="!lookupFailed && !environmentUnsupported">已是最新版</span>
         <span v-if="inspection && !inspection.can_start">本次升级未开始，请查看未通过的检查项。</span>
       </ElSpace>
     </template>
@@ -94,7 +94,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemUpdateApi, type SystemPackage, type UpdateInspection, type UpdateStatus, type UpdateTask, type UpdateTarget } from '../api/system-update'
 import { describeRequestFailure, isReleaseReadFailed } from './release-lookup'
-import { ENVIRONMENT_UNSUPPORTED_MESSAGE, describeUpdateProblem, isEnvironmentUnsupported } from './update-environment'
+import { describeEnvironmentUnsupported, describeUpdateProblem, isEnvironmentUnsupported } from './update-environment'
 
 const props = defineProps<{ externalBusy: boolean }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -120,6 +120,12 @@ const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) a
 const hasAvailableUpdates = computed(() => (status.value?.installed ?? []).some(item => releasesFor(item.package).some(release => release.version !== item.version)))
 const lookupFailed = computed(() => isReleaseReadFailed(status.value?.checks ?? null, requestFailure.value))
 const environmentUnsupported = computed(() => isEnvironmentUnsupported(status.value?.checks ?? null))
+const latestVersions = computed<string[]>(() =>
+  (status.value?.installed ?? [])
+    .map(item => releasesFor(item.package).find(release => release.version !== item.version)?.version)
+    .filter((version): version is string => version !== undefined)
+)
+const unsupportedMessage = computed(() => describeEnvironmentUnsupported(latestVersions.value))
 const problemDetail = computed(() => describeUpdateProblem(status.value?.checks ?? null, requestFailure.value))
 const checks = computed(() =>
   (inspection.value?.checks ?? status.value?.checks ?? []).filter(
