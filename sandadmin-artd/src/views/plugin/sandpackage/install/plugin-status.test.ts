@@ -11,6 +11,7 @@ import {
   describeWaitingDetail,
   packRowActions,
   describeFailedDetail,
+  describeFailedReason,
   describeInterruptDetail,
   describePluginStatus,
   describeWithdrawEffect,
@@ -48,10 +49,20 @@ describe('等待依赖安装的撤回', () => {
     assert.equal(canWithdrawInstall({ state: 8 }), true)
     assert.equal(canRetryFailedInstall({ state: 8 }), true)
     assert.equal(canRetryFailedInstall({ state: 8, cleanup_pending: true }), false)
-    const detail = describeFailedDetail('依赖没有装完')
-    assert.match(detail, /安装没有完成：依赖没有装完/)
-    assert.match(detail, /重新安装/)
-    assert.match(detail, /撤回安装/)
+    const detail = describeFailedDetail()
+    assert.equal(
+      detail,
+      '安装没有完成。可以点「重新安装」再试，或者点「撤回安装」把装了一半的东西清掉。'
+    )
+  })
+
+  it('失败原因去掉把人指回本页的旧说法', () => {
+    assert.equal(
+      describeFailedReason('插件上次安装操作失败，请从已安装插件管理页恢复。'),
+      '插件上次安装操作失败'
+    )
+    assert.equal(describeFailedReason('请从已安装插件管理页继续。'), '没有写出具体原因')
+    assert.equal(describeFailedReason(''), '没有写出具体原因')
   })
 
   it('撤回说明拆成两句，清理说明按数量写', () => {

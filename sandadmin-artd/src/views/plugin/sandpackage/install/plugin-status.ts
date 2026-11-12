@@ -63,12 +63,22 @@ export function describeInterruptDetail(): string {
 }
 
 export function describeWaitingDetail(): string {
-  return '还差依赖没装完。点「一键续做」；如果依赖还没齐，页面会写出还差哪个，并给出要复制的命令。装好后点「刷新」。'
+  return '还有依赖没装好。点「一键续做」，缺什么页面会告诉你，并给出要复制的命令；装好后点「刷新」。'
 }
 
-export function describeFailedDetail(reason: string): string {
-  const plain = reason.trim() === '' ? '没有写出具体原因' : reason.trim()
-  return `安装没有完成：${plain}。可以点「重新安装」再试，或者点「撤回安装」把装了一半的东西清掉。`
+export function describeFailedDetail(): string {
+  return '安装没有完成。可以点「重新安装」再试，或者点「撤回安装」把装了一半的东西清掉。'
+}
+
+/** 后端原因里把人指回本页的旧说法；人已经在这一页，展示时去掉。 */
+const stalePagePointer = /[，,、；;]?\s*请从已安装插件管理页[^。；;]*[。；;]?/g
+
+export function describeFailedReason(raw: string): string {
+  const plain = raw
+    .replace(stalePagePointer, '')
+    .replace(/^[，,、；;\s]+|[，,、；;。\s]+$/g, '')
+    .trim()
+  return plain === '' ? '没有写出具体原因' : plain
 }
 
 export function cleanupDialogTitle(name: string): string {

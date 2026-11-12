@@ -18,12 +18,18 @@
       <div v-if="uploaded && appInfo.app" class="upload-result">
         <ElAlert type="success" :closable="false" title="上传完成" />
         <ElDescriptions :column="1" border>
-          <ElDescriptionsItem label="应用标识">{{ appInfo.app }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="应用名称">{{ appInfo.title }}</ElDescriptionsItem>
-          <ElDescriptionsItem label="应用描述">{{ appInfo.about }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件标识">{{ appInfo.app }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件名称">{{ appInfo.title }}</ElDescriptionsItem>
+          <ElDescriptionsItem label="插件说明">{{ appInfo.about }}</ElDescriptionsItem>
           <ElDescriptionsItem label="作者">{{ appInfo.author }}</ElDescriptionsItem>
           <ElDescriptionsItem label="版本">{{ appInfo.version }}</ElDescriptionsItem>
         </ElDescriptions>
+        <div class="upload-result-actions">
+          <ElButton @click="visible = false">完成</ElButton>
+          <ElButton type="primary" :disabled="disabled || installStarting" @click="installUploaded">
+            去安装
+          </ElButton>
+        </div>
       </div>
 
       <template v-else>
@@ -45,15 +51,32 @@
             <div class="upload-limit">{{ uploadHint }}</div>
           </div>
         </ElUpload>
+        <input
+          ref="filePicker"
+          type="file"
+          accept=".zip"
+          class="upload-picker"
+          @change="onPickerChange"
+        />
 
         <p v-if="selectedName" class="selected-file">已选择 {{ selectedName }}</p>
         <ElProgress v-if="loading" :percentage="uploadPercent" :stroke-width="8" />
         <p v-if="loading" class="upload-status">正在上传</p>
         <ElAlert v-if="oversizeText" type="warning" :closable="false" :title="oversizeText" />
         <ElAlert v-if="uploadError" type="error" :closable="false" :title="uploadError" />
+        <div v-if="uploadError" class="upload-error-actions">
+          <ElButton size="small" @click="copyUploadError">复制问题信息</ElButton>
+        </div>
 
         <div v-if="selectedName" class="upload-actions">
-          <ElButton type="primary" :loading="loading" :disabled="!selectedFile" @click="startUpload">
+          <ElButton v-if="uploadError" type="primary" @click="reselectFile">重新选择</ElButton>
+          <ElButton
+            v-else
+            type="primary"
+            :loading="loading"
+            :disabled="!selectedFile"
+            @click="startUpload"
+          >
             开始上传
           </ElButton>
           <ElButton :disabled="loading" @click="clearSelection">取消</ElButton>
@@ -65,15 +88,18 @@
 
 <script setup lang="ts">
   import { ref, reactive, computed } from 'vue'
-  import { ElMessage } from 'element-plus'
+  import { ElMessage, ElMessageBox } from 'element-plus'
   import type { UploadFile } from 'element-plus'
   import sandpackageApi, { type AppInfo } from '../api/index'
+  import { useInstallOrchestratorStore } from '../store/install-orchestrator'
+  import type { InstallOrchestrationInput } from './dependency-chain'
   import {
     packageZipMaxBytesValue,
     packageZipOversizeMessage,
     setPackageZipMaxBytes
   } from './failed-upgrade-recovery'
   import { formatUploadLimit } from './upload-limit'
+  import { describeUploadFailure } from './upload-result'
 
   const props = withDefaults(
     defineProps<{
@@ -101,6 +127,11 @@
   const selectedFile = ref<File | null>(null)
   const oversizeText = ref('')
   const uploadError = ref('')
+  /** 「复制问题信息」的原始后端细节；页面上只展示 uploadError 白话。 */
+  const uploadErrorDetail = ref('')
+  const filePicker = ref<HTMLInputElement | null>(null)
+  const installStarting = ref(false)
+  const orchestrator = useInstallOrchestratorStore()
 
   /** 上限由后端 effectiveLimit 下发，取不到时沿用插件包兜底，不在前端定义业务值。 */
   const uploadSize = ref(packageZipMaxBytesValue())
@@ -144,19 +175,37 @@
     ElMessage.closeAll()
     uploaded.value = false
     uploadError.value = ''
+    uploadErrorDetail.value = ''
     oversizeText.value = ''
     uploadPercent.value = 0
+  }
+
+  const selectFile = (file: File): void => {
+    clearUploadResult()
+    selectedName.value = file.name
+    const message = uploadValidationMessage(file)
+    selectedFile.value = message ? null : file
+    if (message) oversizeText.value = message
   }
 
   const onFileChange = (upload: UploadFile): void => {
     if (props.disabled || loading.value) return
     const file = upload.raw
     if (!file) return
-    clearUploadResult()
-    selectedName.value = file.name
-    const message = uploadValidationMessage(file)
-    selectedFile.value = message ? null : file
-    if (message) oversizeText.value = message
+    selectFile(file)
+  }
+
+  const onPickerChange = (event: Event): void => {
+    const input = event.target as HTMLInputElement
+    const file = input.files?.item(0)
+    input.value = ''
+    if (props.disabled || loading.value || !file) return
+    selectFile(file)
+  }
+
+  const reselectFile = (): void => {
+    if (loading.value) return
+    filePicker.value?.click()
   }
 
   const clearSelection = (): void => {
@@ -184,20 +233,88 @@
       const res = await sandpackageApi.uploadApp(dataForm)
       if (!res) {
         uploadError.value = '上传没有完成，请再试一次'
+        uploadErrorDetail.value = uploadError.value
         return
       }
       uploadPercent.value = 100
       Object.assign(appInfo, res)
       uploaded.value = true
+      // 响应已落地就放行关闭入口：列表刷新期间右上角关闭与底部按钮可用。
+      loading.value = false
+      emit('busy-change', false)
       ElMessage.closeAll()
       ElMessage.success('上传成功')
       await props.afterUpload()
       emit('success')
     } catch (error: unknown) {
-      uploadError.value = error instanceof Error && error.message !== '' ? error.message : '上传没有完成，请再试一次'
+      const failure = describeUploadFailure(error)
+      uploadError.value = failure.title
+      uploadErrorDetail.value = failure.detail
     } finally {
       loading.value = false
       emit('busy-change', false)
+    }
+  }
+
+  const copyUploadError = async (): Promise<void> => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(uploadErrorDetail.value)
+      } else {
+        // 非安全上下文没有 clipboard API，退回隐藏输入框选择复制。
+        const textarea = document.createElement('textarea')
+        textarea.value = uploadErrorDetail.value
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        textarea.remove()
+      }
+      ElMessage.success('复制成功')
+    } catch {
+      ElMessage.error('复制失败，请手动复制问题信息')
+    }
+  }
+
+  /** 「去安装」直接接进页面级安装编排，与列表里「继续安装」同一条链。 */
+  const installUploaded = async (): Promise<void> => {
+    if (props.disabled || installStarting.value || !props.canStartWrite()) return
+    const upgrade = appInfo.update === 1
+    if (upgrade) {
+      try {
+        await ElMessageBox.confirm(
+          `将升级 ${appInfo.title || appInfo.app} 到 ${appInfo.version}，并自动升级所需的依赖插件，完成后服务会自动生效。`,
+          '确认升级',
+          { confirmButtonText: '确认升级', cancelButtonText: '取消', type: 'warning' }
+        )
+      } catch {
+        return
+      }
+    }
+    installStarting.value = true
+    // 先关弹窗，安装进度与依赖链提示由页面上的编排器状态呈现。
+    visible.value = false
+    try {
+      const input: InstallOrchestrationInput = {
+        app: appInfo.app,
+        title: appInfo.title || appInfo.app
+      }
+      if (upgrade) {
+        input.confirmation = `UPGRADE ${appInfo.app}@${appInfo.upgrade_from_version ?? ''}->${appInfo.version}`
+      }
+      const outcome = await orchestrator.start(input)
+      if (outcome.kind === 'installed') {
+        ElMessage.success('安装成功')
+      } else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
+        ElMessage.warning(outcome.reason)
+      }
+      // chain-failed：编排器已登记失败并打开命令行说明。
+    } catch {
+      // Error already handled by http utility
+    } finally {
+      installStarting.value = false
+      await props.afterUpload()
     }
   }
 
@@ -264,8 +381,23 @@
     gap: 12px;
   }
 
+  .upload-picker {
+    display: none;
+  }
+
+  .upload-error-actions {
+    display: flex;
+    justify-content: flex-start;
+  }
+
   .upload-result {
     display: grid;
+    gap: 12px;
+  }
+
+  .upload-result-actions {
+    display: flex;
+    justify-content: flex-end;
     gap: 12px;
   }
 </style>

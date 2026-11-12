@@ -53,6 +53,8 @@ class InstallLogic
     public const DEPLOYMENT_MISSING = 7;
     public const FAILED = 8;
     private const DRIVER = 'saipackage-pg-v1';
+    /** 包体无效的专用业务码：上传页据它换成固定白话，原始细节只进复制内容。 */
+    private const INVALID_PACKAGE_CODE = 422;
     private $operationLock = null;
     private $hostLock = null;
     private ?string $commandNonce = null;
@@ -158,36 +160,44 @@ class InstallLogic
     {
         PackageArchivePolicy::assertFile($zipPath);
         $zip = new \ZipArchive();
-        if ($zip->open($zipPath) !== true) throw new ApiException('无法读取 ZIP 安装包');
+        if ($zip->open($zipPath) !== true) throw new ApiException('无法读取 ZIP 安装包', self::INVALID_PACKAGE_CODE);
         $temporary = null;
         try {
             $bytes = 0;
             $names = [];
-            if ($zip->numFiles > 2048) throw new ApiException('安装包文件数量过多');
+            if ($zip->numFiles > 2048) throw new ApiException('插件包内文件超过 2048 个', self::INVALID_PACKAGE_CODE);
             for ($i = 0; $i < $zip->numFiles; $i++) {
                 $entry = $zip->statIndex($i);
-                if (!is_array($entry)) throw new ApiException('安装包目录不可读取');
+                if (!is_array($entry)) throw new ApiException('插件包目录记录无法读取', self::INVALID_PACKAGE_CODE);
                 $name = $entry['name'];
                 $parts = explode('/', rtrim($name, '/'));
                 if ($name === '' || str_contains($name, '\\') || str_contains($name, ':')
                     || preg_match('/[\x00-\x1f]/', $name) || array_intersect($parts, ['', '.', '..'])
-                    || isset($names[rtrim($name, '/')])) throw new ApiException('安装包包含不安全或重复路径');
+                    || isset($names[rtrim($name, '/')])) throw new ApiException('插件包包含不安全或重复的路径', self::INVALID_PACKAGE_CODE);
                 $names[rtrim($name, '/')] = true;
                 $zip->getExternalAttributesIndex($i, $os, $attributes);
-                if ((($attributes >> 16) & 0170000) === 0120000) throw new ApiException('安装包不能包含符号链接');
+                if ((($attributes >> 16) & 0170000) === 0120000) throw new ApiException('插件包不能包含符号链接', self::INVALID_PACKAGE_CODE);
                 $bytes += $entry['size'];
-                if ($bytes > 67108864) throw new ApiException('安装包解压大小超过限制');
-                PackageArchivePolicy::verifyEntry($zip, $entry);
+                if ($bytes > 67108864) throw new ApiException('插件包解压后总大小超过 64 MB', self::INVALID_PACKAGE_CODE);
+                try {
+                    PackageArchivePolicy::verifyEntry($zip, $entry);
+                } catch (ApiException $error) {
+                    throw new ApiException($error->getMessage(), self::INVALID_PACKAGE_CODE);
+                }
             }
             $raw = $zip->getFromName('info.ini');
             $info = is_string($raw) ? parse_ini_string($raw, true, INI_SCANNER_TYPED) : false;
-            if (!is_array($info)) throw new ApiException('插件的基础配置信息错误');
+            if (!is_array($info)) throw new ApiException('插件包缺少 info.ini 或 info.ini 内容无法解析', self::INVALID_PACKAGE_CODE);
             $app = (string) ($info['app'] ?? '');
-            $this->assertAppName($app);
+            try {
+                $this->assertAppName($app);
+            } catch (ApiException $error) {
+                throw new ApiException('插件包的 app 标识无效：' . $error->getMessage(), self::INVALID_PACKAGE_CODE);
+            }
             try {
                 $hostFiles = HostPayloadManifest::inspectArchive($zip, $app);
             } catch (Throwable $error) {
-                throw new ApiException('受控宿主载荷清单无效：' . $error->getMessage(), 400);
+                throw new ApiException('受控宿主载荷清单无效：' . $error->getMessage(), self::INVALID_PACKAGE_CODE);
             }
             $this->appName = $app;
             $this->appDir = $this->installDir . $app . DIRECTORY_SEPARATOR;
@@ -221,10 +231,12 @@ class InstallLogic
                 );
             }
             foreach (['app', 'title', 'about', 'author', 'version'] as $key) {
-                if (!isset($info[$key]) || !is_scalar($info[$key])) throw new ApiException('该插件的基础配置信息不完善');
+                if (!isset($info[$key]) || !is_scalar($info[$key])) {
+                    throw new ApiException('插件包 info.ini 缺少 ' . $key . ' 字段', self::INVALID_PACKAGE_CODE);
+                }
             }
             foreach (['install.sql', 'update.sql', 'uninstall.sql', 'config.json'] as $name) {
-                if ($zip->locateName($name) === false) throw new ApiException('插件缺少 ' . $name);
+                if ($zip->locateName($name) === false) throw new ApiException('插件包缺少 ' . $name, self::INVALID_PACKAGE_CODE);
             }
             // Staging lives in the reserved uploads/ area so a crashed extraction
             // never shows up as an occupied plugin directory.
@@ -233,8 +245,12 @@ class InstallLogic
             $temporary = $staging . DIRECTORY_SEPARATOR . 'upload-' . bin2hex(random_bytes(8));
             $this->assertSafePath($temporary);
             if (!mkdir($temporary, 0700) || !$zip->extractTo($temporary)) throw new ApiException('插件解压失败');
-            $config = json_decode((string) file_get_contents($temporary . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
-            if (!is_array($config)) throw new ApiException('插件配置格式错误');
+            try {
+                $config = json_decode((string) file_get_contents($temporary . '/config.json'), true, 512, JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                throw new ApiException('插件包 config.json 无法解析', self::INVALID_PACKAGE_CODE);
+            }
+            if (!is_array($config)) throw new ApiException('插件包 config.json 不是有效的配置', self::INVALID_PACKAGE_CODE);
             if (!empty($config['sand_platform'])) throw new ApiException('此包依赖旧 Sand 平台安装扩展，请使用兼容宿主；未执行安装');
             try {
                 PluginDependencyPolicy::verifyBundles($temporary, $config, $app);
@@ -242,18 +258,24 @@ class InstallLogic
             } catch (\InvalidArgumentException $error) {
                 throw new ApiException($error->getMessage(), 400);
             }
-            if (!is_dir($temporary . '/plugin/' . $app)) throw new ApiException('插件后端目录缺失');
+            if (!is_dir($temporary . '/plugin/' . $app)) {
+                throw new ApiException('插件包缺少 plugin/' . $app . ' 后端目录', self::INVALID_PACKAGE_CODE);
+            }
             try {
                 if (HostPayloadManifest::inspectDirectory($temporary, $app) !== $hostFiles) {
                     throw new \RuntimeException('解压后的宿主载荷与 ZIP 清单不一致');
                 }
             } catch (Throwable $error) {
-                throw new ApiException('受控宿主载荷解压复核失败：' . $error->getMessage(), 400);
+                throw new ApiException('受控宿主载荷解压复核失败：' . $error->getMessage(), self::INVALID_PACKAGE_CODE);
             }
             // Compatibility and registration integrity are decided here, before a
             // candidate directory or registration draft can exist at all.
             $this->assertHostCompatibility($info);
-            $this->assertPackageVersionConsistency($temporary, $app, (string) $info['version']);
+            try {
+                $this->assertPackageVersionConsistency($temporary, $app, (string) $info['version']);
+            } catch (ApiException $error) {
+                throw new ApiException($error->getMessage(), self::INVALID_PACKAGE_CODE);
+            }
             $info = array_intersect_key($info, array_flip(['app', 'title', 'about', 'author', 'version', 'url', 'email', 'support']));
             $info['state'] = self::WAIT_INSTALL;
             $info['lifecycle_driver'] = self::DRIVER;
@@ -2636,7 +2658,7 @@ class InstallLogic
         $infoKeys = ['app', 'title', 'about', 'author', 'version', 'state'];
         foreach ($infoKeys as $value) {
             if (!array_key_exists($value, $info)) {
-                throw new ApiException('该插件的基础配置信息不完善');
+                throw new ApiException('该插件的基础配置信息不完善（缺少 ' . $value . ' 字段）');
             }
         }
         if ($info['app'] !== $this->appName) throw new ApiException('插件标识不匹配');

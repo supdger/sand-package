@@ -23,30 +23,41 @@
           <ElAlert
             v-if="dependencyCommandRows.length > 0"
             class="mb-3"
-            type="info"
+            type="warning"
             :closable="false"
-            title="这个插件还要装依赖，请在服务器上运行下面的命令"
           >
-            <div
-              v-for="row in dependencyCommandRows"
-              :key="row.app"
-              class="dependency-commands"
-            >
-              <div class="dependency-command-plugin">
-                {{ row.title || row.app }}（{{ row.app }}）
-              </div>
-              <div
-                v-for="command in buildDependencyCommands(row)"
-                :key="command.label"
-                class="dependency-command-row"
+            <div class="dependency-bar">
+              <span>{{ dependencyBarText }}</span>
+              <ElLink
+                type="primary"
+                class="dependency-bar-toggle"
+                @click="dependencyCommandsExpanded = !dependencyCommandsExpanded"
               >
-                <span class="dependency-command-label">{{ command.label }}：</span>
-                <code class="dependency-command-text">{{ command.text }}</code>
-                <ElButton size="small" @click="copyDependencyCommand(command.text)">
-                  复制
-                </ElButton>
-              </div>
+                {{ dependencyCommandsExpanded ? '收起命令' : '展开看命令' }}
+              </ElLink>
             </div>
+            <template v-if="dependencyCommandsExpanded">
+              <div
+                v-for="row in dependencyCommandRows"
+                :key="row.app"
+                class="dependency-commands"
+              >
+                <div class="dependency-command-plugin">
+                  {{ row.title || row.app }}（{{ row.app }}）
+                </div>
+                <div
+                  v-for="command in buildDependencyCommands(row)"
+                  :key="command.label"
+                  class="dependency-command-row"
+                >
+                  <span class="dependency-command-label">{{ command.label }}：</span>
+                  <code class="dependency-command-text">{{ command.text }}</code>
+                  <ElButton size="small" @click="copyDependencyCommand(command.text)">
+                    复制
+                  </ElButton>
+                </div>
+              </div>
+            </template>
           </ElAlert>
 
           <ElAlert
@@ -219,6 +230,12 @@
               </template>
               上传插件包
             </ElButton>
+            <span
+              v-if="!hideGlobalPluginWrites && pluginOperationBusy"
+              class="repository-busy-hint"
+            >
+              有插件正在安装，装完再装别的
+            </span>
             <ElButton
               :loading="repositoryLoading"
               :disabled="repositoryDownloading"
@@ -357,23 +374,31 @@
                       {{ item.versions.length > 1 ? '其他版本' : '版本详情' }}
                     </ElButton>
                   </div>
-                  <ElButton
+                  <ElTooltip
                     v-if="item.versions[0]"
-                    class="repository-card-primary-action"
-                    size="small"
-                    :type="repositoryActionType(item.versions[0].action)"
-                    :loading="downloadingKey === repositoryVersionKey(item, item.versions[0])"
-                    :disabled="repositoryActionDisabled(item, item.versions[0])"
-                    @click="handleRepositoryVersionAction(item, item.versions[0])"
+                    :disabled="repositoryDisabledReason(item, item.versions[0]) === ''"
+                    :content="repositoryDisabledReason(item, item.versions[0])"
+                    placement="top"
                   >
-                    {{
-                      downloadingKey === repositoryVersionKey(item, item.versions[0])
-                        ? item.versions[0].action === 'upgrade'
-                          ? '正在升级'
-                          : '正在安装'
-                        : repositoryVersionActionLabel(item, item.versions[0])
-                    }}
-                  </ElButton>
+                    <span class="repository-card-primary-wrap">
+                      <ElButton
+                        class="repository-card-primary-action"
+                        size="small"
+                        :type="repositoryActionType(item.versions[0].action)"
+                        :loading="downloadingKey === repositoryVersionKey(item, item.versions[0])"
+                        :disabled="repositoryActionDisabled(item, item.versions[0])"
+                        @click="handleRepositoryVersionAction(item, item.versions[0])"
+                      >
+                        {{
+                          downloadingKey === repositoryVersionKey(item, item.versions[0])
+                            ? item.versions[0].action === 'upgrade'
+                              ? '正在升级'
+                              : '正在安装'
+                            : repositoryVersionActionLabel(item, item.versions[0])
+                        }}
+                      </ElButton>
+                    </span>
+                  </ElTooltip>
                 </div>
               </div>
             </article>
@@ -423,6 +448,14 @@
           :closable="false"
           :title="detailBanner(selectedLocalRow)"
         />
+        <div v-if="isFailedInstallRow(selectedLocalRow)" class="detail-failure">
+          <p class="detail-failure-reason">
+            失败原因：{{ failedInstallReason(selectedLocalRow) }}
+          </p>
+          <ElButton size="small" @click="copyLocalFailure(selectedLocalRow)">
+            复制问题信息
+          </ElButton>
+        </div>
       </template>
       <template #footer>
         <div
@@ -437,6 +470,30 @@
             一键续做
           </ElButton>
           <ElButton
+            type="danger"
+            :disabled="pluginOperationBusy"
+            @click="handleWithdrawInstall(selectedLocalRow)"
+          >
+            撤回安装
+          </ElButton>
+        </div>
+        <div
+          v-else-if="
+            selectedLocalRow &&
+            selectedLocalRow.state === 4 &&
+            canResumeInstall(selectedLocalRow)
+          "
+          class="detail-actions"
+        >
+          <ElButton
+            type="primary"
+            :disabled="pluginOperationBusy"
+            @click="handleResumeChain(selectedLocalRow)"
+          >
+            一键续做
+          </ElButton>
+          <ElButton
+            v-if="canWithdrawInstall(selectedLocalRow)"
             type="danger"
             :disabled="pluginOperationBusy"
             @click="handleWithdrawInstall(selectedLocalRow)"
@@ -699,7 +756,6 @@
           <details v-if="cleanupCompleted.archive" class="cleanup-paths">
             <summary>展开看详情</summary>
             <p>插件文件已另存到备份目录。</p>
-            <ElButton size="small" @click="copyCleanupProblem">复制问题信息</ElButton>
           </details>
           <ElAlert
             v-if="cleanupCompleted.warning"
@@ -728,53 +784,6 @@
           </div>
         </ElAlert>
 
-        <details v-if="!cleanupRangeLocked" class="cleanup-section cleanup-package">
-          <summary>展开看详情</summary>
-          <p class="cleanup-package-label">
-            {{ cleanupInspection ? '更换清理包（可选）' : '补充清理范围' }}
-          </p>
-          <p class="cleanup-empty">
-            可选择同一插件的已发布版本补充识别残留；此操作不会安装插件，也不会改数据库。
-          </p>
-          <div v-if="repositoryLoading" class="cleanup-package-state" v-loading="true">
-            正在读取插件仓库
-          </div>
-          <ElAlert
-            v-else-if="repositoryError"
-            class="mt-3"
-            type="error"
-            :closable="false"
-            title="插件仓库读取失败"
-          >
-            <ElButton size="small" @click="fetchRepositoryCatalog">重新读取仓库</ElButton>
-          </ElAlert>
-          <p v-else-if="cleanupRepositoryVersions.length === 0" class="cleanup-empty mt-3">
-            仓库中没有该插件的已发布版本，可刷新仓库后重试。
-          </p>
-          <div v-else class="cleanup-package-action">
-            <ElSelect
-              v-model="cleanupPackageVersion"
-              :disabled="cleanupPackageLoading"
-              aria-label="补充清理包版本"
-            >
-              <ElOption
-                v-for="item in cleanupRepositoryVersions"
-                :key="item.version"
-                :label="`v${item.version}${item.version === cleanupTargetVersion ? '（安装记录版本）' : ''}`"
-                :value="item.version"
-              />
-            </ElSelect>
-            <ElButton
-              type="primary"
-              :loading="cleanupPackageLoading"
-              :disabled="cleanupPackageVersion === '' || pluginOperationBusy"
-              @click="prepareCleanupPackage"
-            >
-              使用此版本检查清理范围
-            </ElButton>
-          </div>
-        </details>
-
         <template v-if="cleanupInspection">
           <ElDescriptions :column="1" border>
             <ElDescriptionsItem label="插件">
@@ -782,10 +791,7 @@
             </ElDescriptionsItem>
             <ElDescriptionsItem label="插件标识">{{ cleanupInspection.app }}</ElDescriptionsItem>
             <ElDescriptionsItem label="版本">
-              <div>安装记录版本 {{ cleanupInspection.version || '未知' }}</div>
-              <div v-if="cleanupInspection.cleanup_package_version">
-                补充清理包 {{ cleanupInspection.cleanup_package_version }}
-              </div>
+              {{ cleanupInspection.version || '未知' }}
             </ElDescriptionsItem>
           </ElDescriptions>
 
@@ -796,18 +802,6 @@
             :closable="false"
             title="数据库清理步骤已经完成，请继续完成文件清理。"
           />
-
-          <section class="cleanup-section">
-            <p>
-              {{
-                describeCleanupFold(
-                  cleanupInspection.tables.length,
-                  cleanupInspection.menus.length
-                )
-              }}
-            </p>
-            <ElButton size="small" @click="copyCleanupProblem">复制问题信息</ElButton>
-          </section>
 
           <ElAlert class="mt-3" type="warning" :closable="false" title="确认清理影响">
             {{
@@ -829,46 +823,108 @@
             />
           </div>
         </template>
+
+        <div
+          v-if="
+            !cleanupRangeLocked &&
+            (repositoryLoading || repositoryError !== '' || cleanupRepositoryVersions.length > 0)
+          "
+          class="cleanup-package"
+        >
+          <p class="cleanup-package-label">换一个版本来找残留（可选）</p>
+          <p class="cleanup-empty">
+            可以选这个插件已发布的版本重新找一遍残留；不会安装插件，也不动数据。
+          </p>
+          <div v-if="repositoryLoading" class="cleanup-package-state" v-loading="true">
+            正在读取插件仓库
+          </div>
+          <ElAlert
+            v-else-if="repositoryError"
+            class="mt-3"
+            type="error"
+            :closable="false"
+            title="插件仓库读取失败"
+          >
+            <ElButton size="small" @click="fetchRepositoryCatalog">重新读取仓库</ElButton>
+          </ElAlert>
+          <div v-else class="cleanup-package-action">
+            <ElSelect
+              v-model="cleanupPackageVersion"
+              :disabled="cleanupPackageLoading"
+              aria-label="换一个版本来找残留"
+            >
+              <ElOption
+                v-for="item in cleanupRepositoryVersions"
+                :key="item.version"
+                :label="`v${item.version}${item.version === cleanupTargetVersion ? '（安装记录版本）' : ''}`"
+                :value="item.version"
+              />
+            </ElSelect>
+            <ElButton
+              type="primary"
+              :loading="cleanupPackageLoading"
+              :disabled="cleanupPackageVersion === '' || pluginOperationBusy"
+              @click="prepareCleanupPackage"
+            >
+              使用此版本检查清理范围
+            </ElButton>
+          </div>
+        </div>
       </template>
 
       <template #footer>
-        <template v-if="cleanupCompleted">
-          <ElButton :disabled="cleanupReloading" @click="cleanupVisible = false">关闭</ElButton>
+        <div class="cleanup-footer">
           <ElButton
-            v-if="cleanupReloadError"
-            size="small"
-            :loading="cleanupReloading"
-            @click="reloadCleanupBackend"
+            v-if="cleanupInspection || (cleanupCompleted && cleanupCompleted.archive)"
+            @click="copyCleanupProblem"
           >
-            重试
+            复制清理明细
           </ElButton>
-          <ElButton
-            type="primary"
-            :disabled="cleanupReloading || cleanupCompleted.restart_required"
-            @click="goToRepositoryAfterCleanup"
-          >
-            去插件仓库
-          </ElButton>
-        </template>
-        <template v-else>
-          <ElButton
-            :disabled="cleanupSubmitting || cleanupPackageLoading"
-            @click="cleanupVisible = false"
-          >
-            取消
-          </ElButton>
-          <ElButton
-            v-if="cleanupInspection"
-            type="danger"
-            :loading="cleanupSubmitting"
-            :disabled="!canSubmitCleanup"
-            @click="submitCleanup"
-          >
-            {{
-              cleanupInspection.phase === 'files_pending' ? '继续完成清理' : '清理并允许重新安装'
-            }}
-          </ElButton>
-        </template>
+          <span v-else></span>
+          <div class="cleanup-footer-actions">
+            <template v-if="cleanupCompleted">
+              <ElButton :disabled="cleanupReloading" @click="cleanupVisible = false"
+                >关闭</ElButton
+              >
+              <ElButton
+                v-if="cleanupReloadError"
+                size="small"
+                :loading="cleanupReloading"
+                @click="reloadCleanupBackend"
+              >
+                重试
+              </ElButton>
+              <ElButton
+                type="primary"
+                :disabled="cleanupReloading || cleanupCompleted.restart_required"
+                @click="goToRepositoryAfterCleanup"
+              >
+                去插件仓库
+              </ElButton>
+            </template>
+            <template v-else>
+              <ElButton
+                :disabled="cleanupSubmitting || cleanupPackageLoading"
+                @click="cleanupVisible = false"
+              >
+                取消
+              </ElButton>
+              <ElButton
+                v-if="cleanupInspection"
+                type="danger"
+                :loading="cleanupSubmitting"
+                :disabled="!canSubmitCleanup"
+                @click="submitCleanup"
+              >
+                {{
+                  cleanupInspection.phase === 'files_pending'
+                    ? '继续完成清理'
+                    : '清理并允许重新安装'
+                }}
+              </ElButton>
+            </template>
+          </div>
+        </div>
       </template>
     </ElDialog>
 
@@ -908,10 +964,17 @@
               兼容 SandAdmin {{ item.host_min
               }}{{ item.host_max ? ` 至 ${item.host_max}` : ' 及以上' }}
             </div>
-            <div class="version-remark">{{ stripCodedNotes(item.notes || '') }}</div>
+            <div class="version-remark">{{ describeReleaseNotes(item.notes || '') }}</div>
             <div v-if="item.action_reason" class="version-action-reason">
               {{ stripCodedNotes(item.action_reason) }}
             </div>
+            <details v-if="(item.notes || '').trim() !== ''" class="version-notes-raw">
+              <summary>查看原始说明</summary>
+              <p>{{ item.notes }}</p>
+              <ElButton size="small" @click="copyDependencyCommand(item.notes)">
+                复制
+              </ElButton>
+            </details>
           </div>
           <ElSpace wrap>
             <ElButton size="small" @click="openRepositoryDocument(currentRepositoryPlugin, item, 'changelog')">
@@ -920,21 +983,29 @@
             <ElButton size="small" @click="openRepositoryDocument(currentRepositoryPlugin, item)">
               查看文档
             </ElButton>
-            <ElButton
-              :type="repositoryActionType(item.action)"
-              size="small"
-              :loading="downloadingKey === repositoryVersionKey(currentRepositoryPlugin, item)"
-              :disabled="repositoryActionDisabled(currentRepositoryPlugin, item)"
-              @click="handleRepositoryVersionAction(currentRepositoryPlugin, item)"
+            <ElTooltip
+              :disabled="repositoryDisabledReason(currentRepositoryPlugin, item) === ''"
+              :content="repositoryDisabledReason(currentRepositoryPlugin, item)"
+              placement="top"
             >
-              {{
-                downloadingKey === repositoryVersionKey(currentRepositoryPlugin, item)
-                  ? item.action === 'upgrade'
-                    ? '正在升级'
-                    : '正在安装'
-                  : repositoryActionLabel(item.action)
-              }}
-            </ElButton>
+              <span>
+                <ElButton
+                  :type="repositoryActionType(item.action)"
+                  size="small"
+                  :loading="downloadingKey === repositoryVersionKey(currentRepositoryPlugin, item)"
+                  :disabled="repositoryActionDisabled(currentRepositoryPlugin, item)"
+                  @click="handleRepositoryVersionAction(currentRepositoryPlugin, item)"
+                >
+                  {{
+                    downloadingKey === repositoryVersionKey(currentRepositoryPlugin, item)
+                      ? item.action === 'upgrade'
+                        ? '正在升级'
+                        : '正在安装'
+                      : repositoryActionLabel(item.action)
+                  }}
+                </ElButton>
+              </span>
+            </ElTooltip>
           </ElSpace>
         </div>
         <ElEmpty
@@ -999,7 +1070,7 @@
     type CleanupResult
   } from '../api/index'
   import { checkVersionCompatibility } from './version-compatibility'
-  import { stripCodedNotes } from './plain-notes'
+  import { describeReleaseNotes, stripCodedNotes } from './plain-notes'
   import { formatSupportText } from './support-label'
   import { renderPlainMarkdown } from './safe-markdown'
   import {
@@ -1008,9 +1079,9 @@
     canWithdrawInstall,
     cleanupDialogTitle,
     cleanupProblemText,
-    describeCleanupFold,
     describeCleanupImpact,
     describeFailedDetail,
+    describeFailedReason,
     describeInterruptDetail,
     describePluginStatus,
     describeWaitingDetail,
@@ -1133,6 +1204,7 @@
   const installFormRef = ref<InstallFormBox | null>(null)
   const dependencyNoticeVisible = ref(false)
   const dependencyGap = ref<{ message: string; commands: DependencyCommand[] } | null>(null)
+  const dependencyCommandsExpanded = ref(false)
   const retryingApp = ref('')
   const installList = ref<SandpackageInstallRow[]>([])
   /** 首次列表读取是否已完成；完成前空态不渲染，避免「还没有装插件」闪屏。 */
@@ -1875,11 +1947,28 @@
     if (isInstallInterrupted(record)) return describeInterruptDetail()
     if (canResumeInstall(record) && record.state === 4) return describeWaitingDetail()
     if (record.state === 8 && !isLegacyFailedUpgradeRecovery(record)) {
-      const raw = record.recovery_reason || record.last_error || record.stage_label || ''
-      const reason = stripCodedNotes(raw)
-      return describeFailedDetail(raw.trim() === '' || reason === stripCodedNotes('') ? '' : reason)
+      return describeFailedDetail()
     }
     return localDetailReason(record)
+  }
+
+  const isFailedInstallRow = (record: SandpackageInstallRow): boolean =>
+    record.state === 8 && !isLegacyFailedUpgradeRecovery(record)
+
+  /** 抽屉里的失败原因：只写白话；技术细节留在「复制问题信息」里。 */
+  const failedInstallReason = (record: SandpackageInstallRow): string => {
+    const raw = record.recovery_reason || record.last_error || record.stage_label || ''
+    return describeFailedReason(stripCodedNotes(raw, ''))
+  }
+
+  const copyLocalFailure = async (record: SandpackageInstallRow): Promise<void> => {
+    const raw = (record.recovery_reason || record.last_error || record.stage_label || '').trim()
+    const text = [
+      `插件：${record.title || record.app}（${record.app}）`,
+      `状态：${stateText(record)}`,
+      `失败原因：${raw === '' ? '页面没有记录' : raw}`
+    ].join('\n')
+    await copyDependencyCommand(text)
   }
 
   const localDetailReason = (record: SandpackageInstallRow): string => {
@@ -2624,21 +2713,42 @@
     )
   )
 
-  /** 提示条按插件逐行给出的三条命令；依赖命令只在服务器命令行执行。 */
-  const buildDependencyCommands = (row: SandpackageInstallRow): DependencyCommand[] => [
-    {
-      label: '装后台依赖',
-      text: `php webman sandpackage:dependency run ${row.app} composer`
-    },
-    {
-      label: '装页面依赖',
-      text: `php webman sandpackage:dependency run ${row.app} npm`
-    },
-    {
-      label: '安装中断后先检查一下',
-      text: `php webman sandpackage:recover inspect-dependency ${row.app}`
+  /** 黄条第一行：收起时报个数，展开时按一个/多个换说法。 */
+  const dependencyBarText = computed(() => {
+    const count = dependencyCommandRows.value.length
+    if (dependencyCommandsExpanded.value) {
+      return count === 1
+        ? '这个插件还差依赖没装好，需要在服务器上运行命令：'
+        : `下面 ${count} 个插件还差依赖没装好，需要在服务器上运行命令：`
     }
-  ]
+    return count === 1
+      ? '这个插件还差依赖没装好，需要在服务器上运行命令。'
+      : `有 ${count} 个插件还差依赖没装好，需要在服务器上运行命令。`
+  })
+
+  /** 每个插件只列它需要的命令：纯等依赖的行不给「先检查」，中断过的行才给。 */
+  const buildDependencyCommands = (row: SandpackageInstallRow): DependencyCommand[] => {
+    const commands: DependencyCommand[] = []
+    if (row.composer_dependent_wait_install === 1) {
+      commands.push({
+        label: '装后台依赖',
+        text: `php webman sandpackage:dependency run ${row.app} composer`
+      })
+    }
+    if (row.npm_dependent_wait_install === 1) {
+      commands.push({
+        label: '装页面依赖',
+        text: `php webman sandpackage:dependency run ${row.app} npm`
+      })
+    }
+    if (isInstallInterrupted(row)) {
+      commands.push({
+        label: '安装中断后先检查一下',
+        text: `php webman sandpackage:recover inspect-dependency ${row.app}`
+      })
+    }
+    return commands
+  }
 
   const copyDependencyCommand = async (text: string): Promise<void> => {
     try {
@@ -2694,24 +2804,27 @@
     void orchestrator.retryChain().then(async (outcome) => {
       await Promise.all([getList(), fetchRepositoryCatalog()])
       if (outcome?.kind === 'installed') {
+        dependencyGap.value = null
+        dependencyNoticeVisible.value = false
         notifySuccess(`${failed.title || failed.app} 依赖安装完成`)
       }
     })
   }
 
   const columns: ColumnOption[] = [
-    { prop: 'title', label: '插件名称', minWidth: 220, useSlot: true },
-    { prop: 'author', label: '作者', minWidth: 88 },
+    { prop: 'title', label: '插件名称', minWidth: 190, useSlot: true },
+    { prop: 'author', label: '作者', width: 76 },
     { prop: 'version', label: '版本', width: 58 },
-    { prop: 'support', label: '框架兼容', width: 148, useSlot: true },
-    { prop: 'state', label: '插件状态', width: 140, useSlot: true },
-    { prop: 'npm', label: '前端依赖', width: 88, useSlot: true },
-    { prop: 'composer', label: '后端依赖', width: 88, useSlot: true },
+    { prop: 'support', label: '框架兼容', width: 110, useSlot: true },
+    { prop: 'state', label: '插件状态', width: 128, useSlot: true },
+    { prop: 'npm', label: '前端依赖', width: 80, useSlot: true },
+    { prop: 'composer', label: '后端依赖', width: 80, useSlot: true },
     {
       prop: 'operation',
       label: '操作',
-      width: 196,
-      useSlot: true
+      width: 216,
+      useSlot: true,
+      fixed: 'right'
     }
   ]
 
@@ -2735,6 +2848,9 @@
     }
     if (finished > 0) {
       await getList()
+      // 装完就关掉「还差依赖」弹窗，只留成功提示；还没装完的行仍由顶部黄条提示。
+      dependencyGap.value = null
+      dependencyNoticeVisible.value = false
       notifySuccess(finished === 1 ? '依赖已经齐了，安装已完成' : `${finished} 个插件已装完`)
     }
   }
@@ -2950,6 +3066,22 @@
     }
     if (item.action !== 'install' && item.action !== 'upgrade') return true
     return !plugin || plugin.local.blocked || repositoryWritesBlocked.value
+  }
+
+  /** 安装/升级按钮变灰的原因；空串表示按钮能点，不用解释。 */
+  const repositoryDisabledReason = (
+    plugin: RepositoryPlugin | null,
+    item: RepositoryPluginVersion
+  ): string => {
+    if (item.action === 'manage') {
+      return pluginOperationBusy.value ? '有插件正在安装，装完再装别的' : ''
+    }
+    if (item.action !== 'install' && item.action !== 'upgrade') return ''
+    if (plugin?.local.blocked) {
+      return plugin.local.reason || '本地插件状态不允许安装，请到插件管理查看'
+    }
+    if (repositoryWritesBlocked.value) return '有插件正在安装，装完再装别的'
+    return ''
   }
 
   const goToPluginManagement = (): void => {
@@ -3425,16 +3557,6 @@
     align-items: center;
   }
 
-  .cleanup-section {
-    margin-top: 18px;
-
-    h4 {
-      margin: 0 0 10px;
-      font-size: 14px;
-      color: var(--el-text-color-primary);
-    }
-  }
-
   .cleanup-tags {
     display: flex;
     flex-wrap: wrap;
@@ -3465,20 +3587,20 @@
     color: var(--el-text-color-secondary);
   }
 
+  .cleanup-package {
+    margin-top: 18px;
+  }
+
+  .cleanup-package-label {
+    margin: 0 0 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--el-text-color-primary);
+  }
+
   .cleanup-package-state {
     min-height: 80px;
     margin-top: 12px;
-  }
-
-  .cleanup-package summary {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--el-color-primary);
-    cursor: pointer;
-  }
-
-  .cleanup-package[open] summary {
-    margin-bottom: 10px;
   }
 
   .cleanup-package-action {
@@ -3486,6 +3608,19 @@
     grid-template-columns: minmax(0, 1fr) auto;
     gap: 10px;
     margin-top: 12px;
+  }
+
+  .cleanup-footer {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .cleanup-footer-actions {
+    display: flex;
+    gap: 12px;
+    align-items: center;
   }
 
   .cleanup-paths {
@@ -3523,6 +3658,35 @@
     justify-content: center;
     min-height: 160px;
     color: var(--el-text-color-secondary);
+  }
+
+  .dependency-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .dependency-bar-toggle {
+    flex: none;
+  }
+
+  .repository-busy-hint {
+    font-size: 13px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .detail-failure {
+    margin-top: 12px;
+  }
+
+  .detail-failure-reason {
+    margin: 0 0 8px;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--el-text-color-regular);
+    overflow-wrap: anywhere;
   }
 
   .dependency-commands {
@@ -3765,6 +3929,11 @@
     min-height: 24px;
   }
 
+  .repository-card-primary-wrap {
+    display: inline-flex;
+    flex: 0 0 auto;
+  }
+
   .repository-card-primary-action {
     flex: 0 0 auto;
     white-space: nowrap;
@@ -3851,6 +4020,24 @@
     font-size: 12px;
     line-height: 1.5;
     color: var(--el-text-color-secondary);
+  }
+
+  .version-notes-raw {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+  }
+
+  .version-notes-raw summary {
+    color: var(--el-color-primary);
+    cursor: pointer;
+  }
+
+  .version-notes-raw p {
+    margin: 6px 0;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .repository-document {

@@ -7,8 +7,8 @@
       </div>
       <ElButton :loading="operation === 'status'" :disabled="busy" @click="loadStatus">检查更新</ElButton>
     </div>
-    <ElAlert v-if="lookupFailed" type="warning" :closable="false" title="暂时查不到有没有新版本，请稍后点「检查更新」再试">
-      <ElButton size="small" :disabled="lookupDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
+    <ElAlert v-if="lookupFailed && !environmentUnsupported" type="warning" :closable="false" title="暂时查不到有没有新版本，请稍后点「检查更新」再试">
+      <ElButton size="small" :disabled="problemDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
     </ElAlert>
     <ElAlert v-if="error" type="error" :closable="false" title="操作未完成">
       <p>{{ error }}</p>
@@ -16,8 +16,8 @@
     </ElAlert>
     <ElAlert v-if="!status && !error && !lookupFailed" type="info" :closable="false" title="正在读取版本和升级条件" />
     <template v-if="status">
-      <ElAlert v-if="environmentReason" type="warning" :closable="false" title="当前环境尚不能执行系统更新">
-        {{ environmentReason }}
+      <ElAlert v-if="environmentUnsupported" type="warning" :closable="false" :title="ENVIRONMENT_UNSUPPORTED_MESSAGE">
+        <ElButton size="small" :disabled="problemDetail === ''" @click="copyProblemDetail">复制问题信息</ElButton>
       </ElAlert>
       <div class="version-list" aria-label="系统组件版本">
         <div v-for="item in status.installed" :key="item.package" class="version-row">
@@ -34,9 +34,13 @@
         <strong>{{ release.name }} {{ release.version }} · 更新说明</strong>
         <p>{{ release.notes || '此版本未提供更新说明。' }}</p>
       </div>
-      <details v-if="checks.length" class="check-details" :open="checks.some(check => check.state !== 'ok')">
+      <details v-if="environmentUnsupported || checks.length" class="check-details" :open="environmentUnsupported || checks.some(check => check.state !== 'ok')">
         <summary>升级检查详情</summary>
-        <ul class="check-list" aria-label="升级检查结果">
+        <template v-if="environmentUnsupported">
+          <p>升级前检查：没通过</p>
+          <p>{{ ENVIRONMENT_UNSUPPORTED_MESSAGE }}</p>
+        </template>
+        <ul v-else class="check-list" aria-label="升级检查结果">
         <li v-for="check in checks" :key="check.code">
           <div class="check-heading"><strong>{{ check.label }}</strong><ElTag :type="check.state === 'ok' ? 'success' : 'danger'">{{ check.state === 'ok' ? '通过' : '未通过' }}</ElTag></div>
           <p>{{ check.message }}</p>
@@ -89,7 +93,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemUpdateApi, type SystemPackage, type UpdateInspection, type UpdateStatus, type UpdateTask, type UpdateTarget } from '../api/system-update'
-import { describeRequestFailure, isReleaseReadFailed, readReleaseFailure } from './release-lookup'
+import { describeRequestFailure, isReleaseReadFailed } from './release-lookup'
+import { ENVIRONMENT_UNSUPPORTED_MESSAGE, describeUpdateProblem, isEnvironmentUnsupported } from './update-environment'
 
 const props = defineProps<{ externalBusy: boolean }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()
@@ -114,8 +119,8 @@ const updateBlocked = computed(() => outcomeUnconfirmed.value || task.value?.sta
 const targets = computed<UpdateTarget[]>(() => (Object.entries(selected.value) as [SystemPackage, string][]).filter(([, version]) => !!version).map(([packageName, version]) => ({ package: packageName, version })))
 const hasAvailableUpdates = computed(() => (status.value?.installed ?? []).some(item => releasesFor(item.package).some(release => release.version !== item.version)))
 const lookupFailed = computed(() => isReleaseReadFailed(status.value?.checks ?? null, requestFailure.value))
-const lookupDetail = computed(() => requestFailure.value !== '' ? requestFailure.value : readReleaseFailure(status.value?.checks ?? []))
-const environmentReason = computed(() => (status.value?.checks ?? []).filter(check => check.state === 'fail' && check.code !== 'repository').map(check => check.message).join('；'))
+const environmentUnsupported = computed(() => isEnvironmentUnsupported(status.value?.checks ?? null))
+const problemDetail = computed(() => describeUpdateProblem(status.value?.checks ?? null, requestFailure.value))
 const checks = computed(() =>
   (inspection.value?.checks ?? status.value?.checks ?? []).filter(
     (check) => !(check.code === 'repository' && check.state === 'fail')
@@ -182,7 +187,7 @@ async function loadStatus() {
 }
 async function reconnect() { if (taskRunning.value) await pollTask(); else await loadStatus() }
 async function copyProblemDetail() {
-  const detail = lookupDetail.value
+  const detail = problemDetail.value
   if (detail === '') return
   try {
     await navigator.clipboard.writeText(detail)

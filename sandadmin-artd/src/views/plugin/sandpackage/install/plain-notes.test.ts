@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { stripCodedNotes } from './plain-notes.ts'
+import { describeReleaseNotes, stripCodedNotes } from './plain-notes.ts'
 
 describe('stripCodedNotes', () => {
   it('含标识和代码的句子不进页面', () => {
@@ -19,5 +19,18 @@ describe('stripCodedNotes', () => {
       stripCodedNotes('ux_p2b showErrorMessage `.env`'),
       '该版本尚未提供更新摘要，可查看包内更新日志。'
     )
+  })
+})
+
+describe('describeReleaseNotes', () => {
+  it('核验套话不进弹窗，没有白话时写占位句', () => {
+    const notes =
+      '访问矩阵补 showErrorMessage:false，宿主 toast 不再直出英文原文。无新增数据库迁移，install/update/uninstall SQL 与 0.9.4 逐字节一致；构建 1055 文件/条目一致、独立双阶段构建位一致；本次未执行安装/升级 SQL 或重跑业务验收。'
+    assert.equal(describeReleaseNotes(notes), '这个版本没写更新说明')
+  })
+
+  it('白话句保留，核验句去掉', () => {
+    const notes = '修复了上传失败时的提示。构建 1055 文件/条目一致。'
+    assert.equal(describeReleaseNotes(notes), '修复了上传失败时的提示。')
   })
 })

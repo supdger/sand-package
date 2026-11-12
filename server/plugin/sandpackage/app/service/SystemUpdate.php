@@ -62,18 +62,18 @@ final class SystemUpdate
         try { $plan = $this->plan($targets); }
         catch (Throwable $error) {
             // A silent can_start=false leaves the user without a reason to act on.
-            $checks[] = $this->check('plan', '宿主更新计划', false, \SandSystemUpdateRuntime::redact($error->getMessage()));
+            $checks[] = $this->check('plan', '系统更新计划', false, \SandSystemUpdateRuntime::redact($error->getMessage()));
             return ['confirmation' => '', 'targets' => $this->publicTargets($targets), 'checks' => $checks, 'can_start' => false, 'expires_at' => time()];
         }
         $candidateHost = $installed['supdger/sand-core'] ?? '';
         foreach ($targets as $target) if ($target['package'] === 'supdger/sand-core') $candidateHost = $target['version'];
         foreach ($targets as $target) {
             $range = '>=' . $target['host_min'] . (isset($target['host_max']) && $target['host_max'] !== '' ? ' <=' . $target['host_max'] : '');
-            $checks[] = $this->check('release-' . basename($target['package']), $target['name'] . ' 发行兼容', HostVersionCompatibility::matches($range, $candidateHost), '目标宿主 ' . $candidateHost . '，发行要求 ' . $range);
+            $checks[] = $this->check('release-' . basename($target['package']), $target['name'] . ' 发行兼容', HostVersionCompatibility::matches($range, $candidateHost), '目标系统版本 ' . $candidateHost . '，发行要求 ' . $range);
         }
         foreach ((new PluginStorage())->runtimePlugins() as $app => $plugin) {
             if (in_array($app, ['sandadmin', 'sandpackage', 'saiadmin', 'saipackage'], true)) continue;
-            $checks[] = $this->check('plugin-' . $app, ($plugin['title'] ?? $app) . ' 宿主兼容', HostVersionCompatibility::matches($plugin['support'] ?? null, $candidateHost), '插件 ' . $app . ' 声明 ' . ($plugin['support'] ?? '缺失') . '，目标宿主 ' . $candidateHost);
+            $checks[] = $this->check('plugin-' . $app, ($plugin['title'] ?? $app) . ' 系统兼容', HostVersionCompatibility::matches($plugin['support'] ?? null, $candidateHost), '插件 ' . $app . ' 声明 ' . ($plugin['support'] ?? '缺失') . '，目标系统版本 ' . $candidateHost);
         }
         $handles = [];
         if (!$this->failed($checks)) {
@@ -87,7 +87,7 @@ final class SystemUpdate
                 \SandSystemUpdateRuntime::command(\SandSystemUpdateRuntime::composerArguments($plan, true), $this->server, static function (string $line): void {}, 120);
                 $checks[] = $this->check('solver', '依赖兼容', true, '精确版本 Composer 求解通过，不执行安装钩子');
                 $plan['fingerprint'] = \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($plan));
-            } catch (Throwable $error) { $checks[] = $this->check('preflight', '宿主升级预检', false, \SandSystemUpdateRuntime::redact($error->getMessage())); }
+            } catch (Throwable $error) { $checks[] = $this->check('preflight', '系统升级预检', false, \SandSystemUpdateRuntime::redact($error->getMessage())); }
             finally { \SandSystemUpdateRuntime::unlock($handles); }
         }
         $confirmation = bin2hex(random_bytes(32));
@@ -110,11 +110,11 @@ final class SystemUpdate
             if ($record['expires_at'] < time()) throw new ApiException('预检已过期，请重新检查', 400);
             // One scan of the managed scopes answers both the gate and the frozen plan.
             $fingerprint = \SandSystemUpdateRuntime::fingerprint(\SandSystemUpdateRuntime::scopes($record['plan']));
-            if (!hash_equals($record['plan']['fingerprint'], $fingerprint)) throw new ApiException('预检后宿主文件已变化，请重新检查', 400);
+            if (!hash_equals($record['plan']['fingerprint'], $fingerprint)) throw new ApiException('预检后系统文件已变化，请重新检查', 400);
             // Local deployment commands must not change between inspection and execution.
             $current = $this->plan($record['plan']['targets']);
             unset($record['plan']['fingerprint']);
-            if ($current !== $record['plan']) throw new ApiException('宿主更新配置已变化，请重新检查', 400);
+            if ($current !== $record['plan']) throw new ApiException('系统更新配置已变化，请重新检查', 400);
             $record['plan']['fingerprint'] = $fingerprint;
             $id = bin2hex(random_bytes(16));
             $directory = $this->root . '/jobs/' . $id;
@@ -160,7 +160,7 @@ final class SystemUpdate
                             // Nothing was changed, so nothing needs recovering: a plain failure
                             // keeps the user one click away from checking updates again.
                             $task['state'] = 'failed';
-                            $task['error'] = '独立升级进程在改动任何宿主文件之前已中断，宿主仍是原版本，可重新检查更新。' . \SandSystemUpdateRuntime::manualHint($directory);
+                            $task['error'] = '独立升级进程在改动任何系统文件之前已中断，系统仍是原版本，可重新检查更新。' . \SandSystemUpdateRuntime::manualHint($directory);
                         } else {
                             $task['state'] = 'recovery_required';
                             $task['error'] = '独立升级进程已中断，请检查任务日志和备份后恢复。' . \SandSystemUpdateRuntime::manualHint($directory);
@@ -282,7 +282,7 @@ final class SystemUpdate
                 if (!str_starts_with($url, 'https://github.com/supdger/' . $repository . '/releases/download/')) throw new RuntimeException('官方发行契约地址无效');
                 $contract = $this->fetch($url);
                 self::validateContract($contract, $package, $match[1]);
-                $releases[] = $contract + ['name' => $plugin === 'sandadmin' ? '宿主核心' : '插件管理器', 'notes' => substr($release['body'] ?? '', 0, 8000)];
+                $releases[] = $contract + ['name' => $plugin === 'sandadmin' ? '系统' : '插件管理器', 'notes' => substr($release['body'] ?? '', 0, 8000)];
                 break; // Latest stable eligible release per package.
             }
         }
@@ -296,12 +296,12 @@ final class SystemUpdate
         if (($contract['format'] ?? null) !== 1 || ($contract['package'] ?? '') !== $package || ($contract['version'] ?? '') !== $version
             || ($contract['schema_changes'] ?? null) !== false || ($contract['skeleton_changes'] ?? null) !== false
             || !preg_match('/^[a-f0-9]{40}$/D', $contract['reference'] ?? '') || !preg_match('/^\d+\.\d+\.\d+$/D', $contract['host_min'] ?? '')
-            || !is_array($contract['files'] ?? null) || !$contract['files']) throw new RuntimeException('发行缺少无数据库/宿主骨架变更的有效更新契约');
+            || !is_array($contract['files'] ?? null) || !$contract['files']) throw new RuntimeException('发行缺少无数据库/系统骨架变更的有效更新契约');
         foreach ($contract['files'] as $path => $hash) {
             \SandSystemUpdateRuntime::relative($path);
             if (!preg_match('#^(server|sandadmin-artd|tools)/#', $path) || !is_string($hash) || !preg_match('/^[a-f0-9]{64}$/D', $hash)) throw new RuntimeException('发行文件摘要清单无效');
         }
-        if (isset($contract['host_max']) && $contract['host_max'] !== '' && (!preg_match('/^\d+\.\d+\.\d+$/D', $contract['host_max']) || version_compare($contract['host_max'], $contract['host_min'], '<'))) throw new RuntimeException('发行宿主兼容范围无效');
+        if (isset($contract['host_max']) && $contract['host_max'] !== '' && (!preg_match('/^\d+\.\d+\.\d+$/D', $contract['host_max']) || version_compare($contract['host_max'], $contract['host_min'], '<'))) throw new RuntimeException('发行系统兼容范围无效');
     }
 
     private function fetch(string $url, bool $api = false): array
@@ -340,7 +340,7 @@ final class SystemUpdate
     private function environmentChecks(): array
     {
         try { $plan = $this->plan([]); }
-        catch (Throwable $error) { return [$this->check('deployment', '宿主自动准备', false, $error->getMessage())]; }
+        catch (Throwable $error) { return [$this->check('deployment', '系统自动准备', false, $error->getMessage())]; }
         $native = function_exists('proc_open');
         $reason = '';
         if (PHP_OS_FAMILY === 'Windows') {
@@ -351,7 +351,7 @@ final class SystemUpdate
         foreach (['reload' => '服务重载', 'health' => '健康检查', 'composer' => 'Composer', 'pnpm' => '前端构建'] as $key => $label) {
             $automatic = in_array($key, ['reload', 'health'], true) && $plan[$key] === [] && !empty($plan['deployment']);
             $ok = $automatic || (is_array($plan[$key]) && array_is_list($plan[$key]) && count($plan[$key]) > 0);
-            $message = $automatic ? '框架自动执行宿主' . $label : ($ok ? '宿主固定命令可用：' . implode(' ', $plan[$key]) : '框架未找到可执行的' . $label . '程序');
+            $message = $automatic ? '系统自动执行' . $label : ($ok ? '系统已配置命令：' . implode(' ', $plan[$key]) : '系统未找到可执行的' . $label . '程序');
             // "Configured" is not "working": a crashing shim must fail here, not mid-upgrade.
             if ($ok && $native && !$automatic && in_array($key, ['composer', 'pnpm'], true)) {
                 [$ok, $probe] = $this->probe($key, [...$plan[$key], '--version'], $key === 'pnpm' ? $plan['frontend'] : $plan['server']);
@@ -363,12 +363,12 @@ final class SystemUpdate
             [$phpOk, $phpProbe] = $this->probe('php', [$plan['php'], '-v'], $this->server);
             $checks[] = $this->check('php', 'PHP CLI', $phpOk, $phpOk ? '命令验活通过：' . $plan['php'] . ' → ' . $phpProbe : 'PHP CLI 无法执行：' . $phpProbe);
         }
-        try { SystemUpdateEnvironment::staticFiles($plan); $checks[] = $this->check('static', '静态发布目录', true, '框架自动核对并准备专用静态发布基线'); }
+        try { SystemUpdateEnvironment::staticFiles($plan); $checks[] = $this->check('static', '静态发布目录', true, '系统自动核对并准备专用静态发布基线'); }
         catch (Throwable $error) { $checks[] = $this->check('static', '静态发布目录', false, \SandSystemUpdateRuntime::redact($error->getMessage())); }
         try { [$readyOk, $readyMessage] = SystemUpdateEnvironment::runtimeReadiness($this->server, $plan, config('static.enable')); }
         catch (Throwable $error) { $readyOk = false; $readyMessage = \SandSystemUpdateRuntime::redact($error->getMessage()); }
         $checks[] = $this->check('runtime', '重载与健康路径', $readyOk, $readyMessage);
-        foreach (['frontend' => '前端源码', 'server' => '宿主目录'] as $key => $label) $checks[] = $this->check($key, $label, is_dir($plan[$key]) && is_writable($plan[$key]), is_dir($plan[$key]) && is_writable($plan[$key]) ? '目录存在且可写' : $label . '不可写或不存在');
+        foreach (['frontend' => '前端源码', 'server' => '系统目录'] as $key => $label) $checks[] = $this->check($key, $label, is_dir($plan[$key]) && is_writable($plan[$key]), is_dir($plan[$key]) && is_writable($plan[$key]) ? '目录存在且可写' : $label . '不可写或不存在');
         return $checks;
     }
 
@@ -379,7 +379,7 @@ final class SystemUpdate
             if (!isset(\SandSystemUpdateRuntime::PACKAGES[$package['name']])) continue;
             $pins[$package['name']] = ['version' => ltrim($package['version'], 'v'), 'reference' => $package['source']['reference'] ?? '', 'files' => \SandSystemUpdateRuntime::tree($this->server . '/vendor/' . $package['name'], \SandSystemUpdateRuntime::VOLATILE)];
         }
-        if (count($pins) !== 2) throw new RuntimeException('宿主缺少完整基础包锁定版本');
+        if (count($pins) !== 2) throw new RuntimeException('系统缺少完整基础包锁定版本');
         return $pins;
     }
 
@@ -388,7 +388,7 @@ final class SystemUpdate
         $versions = [];
         foreach (\SandSystemUpdateRuntime::readJson($this->server . '/composer.lock')['packages'] ?? [] as $package) {
             if (!isset(\SandSystemUpdateRuntime::PACKAGES[$package['name']])) continue;
-            $versions[] = ['package' => $package['name'], 'name' => $package['name'] === 'supdger/sand-core' ? '宿主核心' : '插件管理器', 'version' => ltrim($package['version'], 'v')];
+            $versions[] = ['package' => $package['name'], 'name' => $package['name'] === 'supdger/sand-core' ? '系统' : '插件管理器', 'version' => ltrim($package['version'], 'v')];
         }
         return $versions;
     }
