@@ -467,6 +467,21 @@ class InstallController extends BaseController
         );
     }
 
+    #[Permission(title: '续做没装完的插件', slug: 'sandpackage:install:continueWaitingInstall')]
+    public function continueWaitingInstall(Request $request): Response
+    {
+        if (strtoupper($request->method()) !== 'POST') {
+            throw new ApiException('续做安装仅支持 POST 请求', 400);
+        }
+        $appName = trim((string) $request->post('appName', ''));
+        if ($appName === '') {
+            throw new ApiException('请填写插件标识', 400);
+        }
+        $result = (new InstallLogic($appName))->continueWaitingInstall();
+        $message = ($result['ready'] ?? false) === true ? '安装已完成' : '还差依赖';
+        return $this->success($result, $message);
+    }
+
     /** Read-only inspection of host-level guard records that block every plugin. */
     #[Permission(title: '检查宿主守卫记录', slug: 'sandpackage:install:inspectGlobalGuards')]
     public function inspectGlobalGuards(Request $request): Response

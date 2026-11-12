@@ -48,8 +48,22 @@ export function canRetryFailedInstall(row: PluginStatusRow): boolean {
   return row.state === 8 && row.cleanup_pending !== true && !isInstallInterrupted(row)
 }
 
+export function canResumeInstall(row: PluginStatusRow): boolean {
+  if (row.cleanup_pending === true) return false
+  return (
+    isInstallInterrupted(row) ||
+    row.state === 4 ||
+    row.npm_dependent_wait_install === 1 ||
+    row.composer_dependent_wait_install === 1
+  )
+}
+
 export function describeInterruptDetail(): string {
   return '上次安装到一半停了。先按页面上方的命令检查一下，再点「一键续做」接着装；不想装了可以点「撤回安装」。'
+}
+
+export function describeWaitingDetail(): string {
+  return '还差依赖没装完。点「一键续做」；如果依赖还没齐，页面会写出还差哪个，并给出要复制的命令。装好后点「刷新」。'
 }
 
 export function describeFailedDetail(reason: string): string {
@@ -59,6 +73,41 @@ export function describeFailedDetail(reason: string): string {
 
 export function cleanupDialogTitle(name: string): string {
   return `清理「${name}」的残留`
+}
+
+export function describeCleanupFold(tableCount: number, menuCount: number): string {
+  return `${tableCount} 个数据表、${menuCount} 个菜单、插件文件会另存到备份目录`
+}
+
+export interface CleanupProblemInput {
+  tables: string[]
+  menus: { name: string; code: string }[]
+  paths: string[]
+}
+
+export function cleanupProblemText(input: CleanupProblemInput): string {
+  const tables = input.tables.length > 0 ? input.tables.join('\n') : '没有数据表'
+  const menus =
+    input.menus.length > 0
+      ? input.menus.map((menu) => `${menu.name} ${menu.code}`).join('\n')
+      : '没有菜单'
+  const paths = input.paths.length > 0 ? input.paths.join('\n') : '没有插件文件'
+  return `数据表\n${tables}\n菜单\n${menus}\n插件文件\n${paths}`
+}
+
+export interface RowActionItem {
+  label: string
+}
+
+export function packRowActions<T extends RowActionItem>(actions: T[]): { shown: T[]; extra: T[] } {
+  const seen = new Set<string>()
+  const unique: T[] = []
+  for (const action of actions) {
+    if (seen.has(action.label)) continue
+    seen.add(action.label)
+    unique.push(action)
+  }
+  return { shown: unique.slice(0, 2), extra: unique.slice(2) }
 }
 
 export function describeCleanupImpact(tableCount: number, menuCount: number): string {

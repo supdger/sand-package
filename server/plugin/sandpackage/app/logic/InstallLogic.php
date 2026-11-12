@@ -34,6 +34,7 @@ use plugin\sandpackage\app\service\HostVersionCompatibility;
 use plugin\sandpackage\app\service\PackageArchivePolicy;
 use plugin\sandpackage\app\service\DependencyCommandRecovery;
 use plugin\sandpackage\app\service\LifecycleFailureLog;
+use plugin\sandpackage\app\service\WaitingInstallContinuation;
 use plugin\sandpackage\app\service\WaitingInstallWithdrawal;
 
 /**
@@ -2242,7 +2243,9 @@ class InstallLogic
             throw new ApiException($refusal, 400);
         }
         $inspection = $this->inspectFreshInstallRecovery();
-        $phase = is_string($inspection['phase'] ?? null) ? $inspection['phase'] : '';
+        // 失败后登记会多出诊断编号，检查接口会因此把阶段改写成「不能确认」。
+        // 能不能重跑以恢复记录里的原始阶段为准：停在提交前就可以再装一次。
+        $phase = $this->freshJournalPhase();
         $actions = is_array($inspection['actions'] ?? null) ? $inspection['actions'] : [];
         if (in_array('continue-fresh', $actions, true) && !WaitingInstallWithdrawal::shouldReplaySql($phase)) {
             $confirmation = is_string($inspection['confirmation'] ?? null) ? $inspection['confirmation'] : '';
@@ -2268,15 +2271,198 @@ class InstallLogic
             unset($info['operation_pending']);
             $info['state'] = self::WAIT_INSTALL;
             $this->setInfo([], $info);
+        } finally {
+            $this->unlock();
+        }
+        // 上次失败停在脚本提交前。先把那份未完成记录挪走，再真正重跑安装。
+        $this->retireUncommittedJournal();
+        $installed = $this->install(false);
+        return [
+            'app' => $this->appName,
+            'state' => (int) ($installed['state'] ?? $this->getInstallState()),
+            'replay_sql' => true,
+            'phase' => $phase,
+        ];
+    }
+
+    /**
+     * 依赖已经在磁盘上就收尾成已安装；否则只说明还缺哪个包，以及要复制的命令。
+     *
+     * @return array{ready:bool,state:int,app:string,message:string,commands:list<array{label:string,text:string}>}
+     */
+    public function continueWaitingInstall(): array
+    {
+        $info = $this->getInfo();
+        $state = (int) $this->getInstallState();
+        if ($this->cleanupPending()) {
+            throw new ApiException('上次清理还没做完，请先点「继续清理」', 400);
+        }
+        $refusal = WaitingInstallContinuation::describeContinueRefusal($info, $state);
+        if ($refusal !== null) {
+            throw new ApiException($refusal, 400);
+        }
+        try {
+            $this->lock();
+        } catch (OperationLockException) {
+            throw new ApiException('已有安装操作正在执行，请稍候再点「一键续做」', 400);
+        } catch (ApiException) {
+            if (!$this->resolveStaleDependencyScene()) {
+                return $this->continueGap(
+                    $state,
+                    '上一次依赖命令可能还在跑。请先在服务器执行检查命令，确认停了再点「一键续做」。',
+                    [['label' => '检查依赖命令', 'text' => 'php webman sandpackage:recover inspect-dependency ' . $this->appName]],
+                );
+            }
+            $this->lock();
+        }
+        try {
+            $info = $this->getInfo();
+            $state = (int) $this->getInstallState();
+            $refusal = WaitingInstallContinuation::describeContinueRefusal($info, $state);
+            if ($refusal !== null) {
+                throw new ApiException($refusal, 400);
+            }
+            $marker = $this->installDir . 'locks/host-upstream.process.json';
+            $this->assertSafePath($marker);
+            if (is_file($marker)) {
+                return $this->continueGap(
+                    $state,
+                    '上一次依赖命令可能还在跑。请先在服务器执行检查命令，确认停了再点「一键续做」。',
+                    [['label' => '检查依赖命令', 'text' => 'php webman sandpackage:recover inspect-dependency ' . $this->appName]],
+                );
+            }
+            $declared = Server::getDepend($this->appDir);
+            $present = [];
+            foreach (WaitingInstallContinuation::missingPackages($declared, []) as $item) {
+                try {
+                    if ($this->hostPackagePresent($item['source'], $item['name'])) {
+                        $present[$item['name']] = true;
+                    }
+                } catch (Throwable) {
+                    // 路径读不到就当这个包还没装上。
+                }
+            }
+            $missing = WaitingInstallContinuation::missingPackages($declared, $present);
+            if ($missing !== []) {
+                return $this->continueGap(
+                    $state,
+                    WaitingInstallContinuation::missingText($missing),
+                    WaitingInstallContinuation::commandLines($this->appName, $missing),
+                );
+            }
+            if (!is_dir(base_path() . '/plugin/' . $this->appName)) {
+                return $this->continueGap(
+                    $state,
+                    '依赖已经齐了，但插件文件还没放好，不能标成已安装。可以点「撤回安装」后重新安装。',
+                    [],
+                );
+            }
+            unset(
+                $info['composer_dependent_wait_install'],
+                $info['npm_dependent_wait_install'],
+                $info['dependency_command_nonce'],
+                $info['dependency_failed_nonce'],
+                $info['process_recovery_required'],
+                $info['operation_pending'],
+            );
+            $info['state'] = self::INSTALLED;
+            if ((int) ($info['dependency_restart_pending'] ?? 0) !== 1) {
+                $info['dependency_restart_pending'] = 0;
+            }
+            $this->setInfo([], $info);
+            try {
+                if (UserMenuCache::clearMenuCache() === false) {
+                    throw new RuntimeException('菜单缓存未刷新');
+                }
+            } catch (Throwable $error) {
+                error_log('SandPackage continue cache ' . $this->appName . ': ' . $error->getMessage());
+            }
             return [
+                'ready' => true,
+                'state' => self::INSTALLED,
                 'app' => $this->appName,
-                'state' => self::WAIT_INSTALL,
-                'replay_sql' => true,
-                'phase' => $phase,
+                'message' => '',
+                'commands' => [],
             ];
         } finally {
             $this->unlock();
         }
+    }
+
+    /**
+     * @param list<array{label:string,text:string}> $commands
+     * @return array{ready:bool,state:int,app:string,message:string,commands:list<array{label:string,text:string}>}
+     */
+    private function continueGap(int $state, string $message, array $commands): array
+    {
+        return [
+            'ready' => false,
+            'state' => $state,
+            'app' => $this->appName,
+            'message' => $message,
+            'commands' => $commands,
+        ];
+    }
+
+    /** 恢复记录上的原始阶段。检查接口改写后的阶段不拿来决定能不能重跑。 */
+    private function freshJournalPhase(): string
+    {
+        $path = HostPayloadPlan::directoryPrefix($this->installDir) . 'fresh-recovery/' . $this->appName . '.json';
+        $this->assertSafePath($path);
+        if (!is_file($path)) {
+            return '';
+        }
+        $record = json_decode((string) file_get_contents($path), true);
+        if (!is_array($record)) {
+            return '';
+        }
+        $phase = $record['phase'] ?? '';
+        return is_string($phase) ? $phase : '';
+    }
+
+    /** 脚本还没提交的恢复记录会挡住下一次安装，挪到旁边后再重跑。 */
+    private function retireUncommittedJournal(): void
+    {
+        $path = HostPayloadPlan::directoryPrefix($this->installDir) . 'fresh-recovery/' . $this->appName . '.json';
+        $this->assertSafePath($path);
+        if (!is_file($path)) {
+            return;
+        }
+        $record = json_decode((string) file_get_contents($path), true);
+        if (!is_array($record)) {
+            throw new ApiException('安装恢复记录无法读取', 400);
+        }
+        $phase = is_string($record['phase'] ?? null) ? $record['phase'] : '';
+        if ($phase === 'complete' || $phase === 'cleaned') {
+            return;
+        }
+        if ($phase !== 'sql_not_committed') {
+            throw new ApiException('还不能确认安装脚本有没有执行完，请先撤回安装再重新安装', 400);
+        }
+        $operation = $record['operation'] ?? '';
+        if (!is_string($operation) || preg_match('/^[a-f0-9]{32}$/D', $operation) !== 1) {
+            throw new ApiException('安装恢复记录无法读取', 400);
+        }
+        $history = $path . '.' . $operation . '.history';
+        $this->assertSafePath($history);
+        if (is_file($history)) {
+            throw new ApiException('上次安装记录还在，请先撤回安装再重新安装', 400);
+        }
+        if (!rename($path, $history)) {
+            throw new ApiException('无法保留上次安装记录', 400);
+        }
+    }
+
+    private function hostPackagePresent(string $source, string $name): bool
+    {
+        if ($source === 'composer') {
+            $path = base_path() . '/vendor/' . $name . '/composer.json';
+        } else {
+            $path = dirname(base_path()) . DIRECTORY_SEPARATOR . env('FRONTEND_DIR', 'sandadmin-artd')
+                . '/node_modules/' . $name . '/package.json';
+        }
+        $this->assertSafePath($path);
+        return is_file($path) && !is_link($path);
     }
 
     /** @return array<string,mixed> */
@@ -2903,7 +3089,7 @@ class InstallLogic
             $reason = match ($state) {
                 self::WAIT_INSTALL => '已有待安装候选，请从插件仓库继续',
                 self::CONFLICT_PENDING => '存在依赖冲突候选，请从已安装插件管理页继续',
-                self::DEPENDENT_WAIT_INSTALL => '存在待执行依赖任务，请从已安装插件管理页继续',
+                self::DEPENDENT_WAIT_INSTALL => '还差依赖没装完，点「一键续做」',
                 default => '当前安装状态需要检查，请从已安装插件管理页处理',
             };
             if ($state === self::WAIT_INSTALL) {

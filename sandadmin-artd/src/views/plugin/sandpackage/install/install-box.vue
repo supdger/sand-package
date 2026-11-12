@@ -140,13 +140,19 @@
     return undefined
   }
 
+  const clearUploadResult = (): void => {
+    ElMessage.closeAll()
+    uploaded.value = false
+    uploadError.value = ''
+    oversizeText.value = ''
+    uploadPercent.value = 0
+  }
+
   const onFileChange = (upload: UploadFile): void => {
     if (props.disabled || loading.value) return
     const file = upload.raw
     if (!file) return
-    uploaded.value = false
-    uploadError.value = ''
-    oversizeText.value = ''
+    clearUploadResult()
     selectedName.value = file.name
     const message = uploadValidationMessage(file)
     selectedFile.value = message ? null : file
@@ -157,10 +163,7 @@
     if (loading.value) return
     selectedFile.value = null
     selectedName.value = ''
-    oversizeText.value = ''
-    uploadError.value = ''
-    uploaded.value = false
-    uploadPercent.value = 0
+    clearUploadResult()
   }
 
   const startUpload = async (): Promise<void> => {
@@ -171,9 +174,9 @@
       oversizeText.value = message
       return
     }
+    clearUploadResult()
     loading.value = true
     uploadPercent.value = 35
-    uploadError.value = ''
     emit('busy-change', true)
     try {
       const dataForm = new FormData()

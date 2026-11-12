@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
+  canResumeInstall,
   canRetryFailedInstall,
   canWithdrawInstall,
   cleanupDialogTitle,
+  cleanupProblemText,
+  describeCleanupFold,
   describeCleanupImpact,
+  describeWaitingDetail,
+  packRowActions,
   describeFailedDetail,
   describeInterruptDetail,
   describePluginStatus,
@@ -60,5 +65,41 @@ describe('等待依赖安装的撤回', () => {
     )
     assert.match(describeCleanupImpact(2, 1), /2 张数据表/)
     assert.match(describeCleanupImpact(2, 1), /1 个菜单/)
+  })
+
+  it('等待依赖的说明指出要点「一键续做」', () => {
+    assert.match(describeWaitingDetail(), /一键续做/)
+    assert.equal(describeWaitingDetail().includes('已安装插件管理页'), false)
+    assert.equal(canResumeInstall({ state: 4 }), true)
+    assert.equal(canResumeInstall({ state: 8 }), false)
+  })
+
+  it('清理展开只用数量，表名和路径放进复制文本', () => {
+    assert.equal(describeCleanupFold(2, 1), '2 个数据表、1 个菜单、插件文件会另存到备份目录')
+    const copied = cleanupProblemText({
+      tables: ['public.sand_ca_residue_item'],
+      menus: [{ name: '菜单', code: 'ca-residue:list' }],
+      paths: ['/tmp/ca-residue']
+    })
+    assert.match(copied, /sand_ca_residue_item/)
+    assert.match(copied, /\/tmp\/ca-residue/)
+    assert.equal(describeCleanupFold(2, 1).includes('sand_ca_residue_item'), false)
+  })
+
+  it('同一行同名按钮只留一个，第三个起放进更多', () => {
+    const packed = packRowActions([
+      { label: '一键续做' },
+      { label: '一键续做' },
+      { label: '撤回安装' },
+      { label: '查看详情' }
+    ])
+    assert.deepEqual(
+      packed.shown.map((item) => item.label),
+      ['一键续做', '撤回安装']
+    )
+    assert.deepEqual(
+      packed.extra.map((item) => item.label),
+      ['查看详情']
+    )
   })
 })

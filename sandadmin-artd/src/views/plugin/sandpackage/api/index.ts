@@ -283,7 +283,11 @@ export default {
    * 上传插件包
    */
   uploadApp(data: FormData) {
-    return request.post<AppInfo>({ url: '/app/sandpackage/install/upload', data })
+    return request.post<AppInfo>({
+      url: '/app/sandpackage/install/upload',
+      data,
+      showErrorMessage: false
+    })
   },
 
   /** 只读检查从未开始的首次安装候选能否撤回。 */
@@ -306,7 +310,23 @@ export default {
   retryFailedInstall(data: { appName: string }) {
     return request.post<{ app: string; state: number; replay_sql: boolean }>({
       url: '/app/sandpackage/install/retryFailedInstall',
-      data
+      data,
+      showErrorMessage: false
+    })
+  },
+
+  /** 依赖已经齐就装完；没齐就返回还缺的包和要复制的命令。 */
+  continueWaitingInstall(data: { appName: string }) {
+    return request.post<{
+      ready: boolean
+      state: number
+      app: string
+      message: string
+      commands: { label: string; text: string }[]
+    }>({
+      url: '/app/sandpackage/install/continueWaitingInstall',
+      data,
+      showErrorMessage: false
     })
   },
 

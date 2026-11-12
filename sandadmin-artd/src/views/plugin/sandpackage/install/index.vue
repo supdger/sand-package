@@ -137,17 +137,10 @@
               </div>
             </template>
 
-            <!-- 前端依赖列 -->
+            <!-- 前端依赖列：按钮只放在操作列，避免同一行出现两个「一键续做」 -->
             <template #npm="{ row }">
               <ElTag v-if="isLegacyFailedUpgradeRecovery(row)" type="info">-</ElTag>
-              <ElLink
-                v-else-if="row.npm_dependent_wait_install === 1"
-                type="primary"
-                :disabled="pluginOperationBusy"
-                @click="handleResumeChain(row)"
-              >
-                <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
-              </ElLink>
+              <ElTag v-else-if="row.npm_dependent_wait_install === 1" type="warning">待安装</ElTag>
               <ElTag v-else-if="row.state === 1" type="success">已安装</ElTag>
               <ElTag v-else type="info">-</ElTag>
             </template>
@@ -155,144 +148,45 @@
             <!-- 后端依赖列 -->
             <template #composer="{ row }">
               <ElTag v-if="isLegacyFailedUpgradeRecovery(row)" type="info">-</ElTag>
-              <ElLink
-                v-else-if="row.composer_dependent_wait_install === 1"
-                type="primary"
-                :disabled="pluginOperationBusy"
-                @click="handleResumeChain(row)"
-              >
-                <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
-              </ElLink>
+              <ElTag v-else-if="row.composer_dependent_wait_install === 1" type="warning">待安装</ElTag>
               <ElTag v-else-if="row.state === 1" type="success">已安装</ElTag>
               <ElTag v-else type="info">-</ElTag>
             </template>
 
-            <!-- 操作列 -->
+            <!-- 操作列：同名只留一个，第三个起收进「更多」 -->
             <template #operation="{ row }">
-              <ElSpace class="operation-links" wrap>
+              <div class="operation-cell">
+                <p v-if="operationNote(row)" class="operation-note">{{ operationNote(row) }}</p>
+                <div class="operation-links">
                 <ElLink
-                  v-if="isInstallInterrupted(row)"
-                  type="primary"
+                  v-for="item in packRowActions(operationItems(row)).shown"
+                  :key="item.label"
+                  :type="item.tone"
                   :disabled="pluginOperationBusy"
-                  @click="handleResumeChain(row)"
+                  @click="item.run(row)"
                 >
-                  <ArtSvgIcon icon="ri:play-circle-line" class="mr-1" />一键续做
+                  {{ item.label }}
                 </ElLink>
-                <ElLink
-                  v-if="canRetryFailedInstall(row) && !isLegacyFailedUpgradeRecovery(row)"
-                  type="primary"
-                  :disabled="pluginOperationBusy"
-                  @click="handleRetryFailed(row)"
+                <ElDropdown
+                  v-if="packRowActions(operationItems(row)).extra.length > 0"
+                  trigger="click"
                 >
-                  <ArtSvgIcon icon="ri:refresh-line" class="mr-1" />重新安装
-                </ElLink>
-                <ElLink
-                  :type="isLegacyFailedUpgradeRecovery(row) ? 'warning' : 'info'"
-                  :disabled="pluginOperationBusy"
-                  @click="openLocalDetail(row)"
-                >
-                  <ArtSvgIcon icon="ri:file-info-line" class="mr-1" />
-                  {{ isLegacyFailedUpgradeRecovery(row) ? '恢复处理' : '查看详情' }}
-                </ElLink>
-                <ElLink
-                  v-if="canCleanupLocal(row)"
-                  type="danger"
-                  :disabled="pluginOperationBusy"
-                  @click="openCleanupDialog(row)"
-                >
-                  <ArtSvgIcon icon="ri:delete-bin-2-line" class="mr-1" />
-                  {{ row.cleanup_pending ? '继续清理' : '清理残留' }}
-                </ElLink>
-                <template v-if="!isLegacyFailedUpgradeRecovery(row)">
-                  <ElLink
-                    v-if="row.registration_candidate === 1"
-                    type="primary"
-                    :disabled="pluginOperationBusy"
-                    @click="handleRegisterExisting(row)"
-                  >
-                    <ArtSvgIcon icon="ri:shield-check-line" class="mr-1" />登记现有插件
-                  </ElLink>
-                  <template v-else-if="isCompatibleUpgradeCandidate(row)">
-                    <ElLink
-                      type="primary"
-                      :disabled="pluginOperationBusy"
-                      @click="handleUpgradeCandidate(row)"
-                    >
-                      <ArtSvgIcon icon="ri:arrow-up-circle-line" class="mr-1" />确认升级
-                    </ElLink>
-                    <ElLink
-                      v-if="!isPostgresqlLifecycleRecord(row)"
-                      type="warning"
-                      :disabled="pluginOperationBusy"
-                      @click="handleDiscardCandidate(row)"
-                    >
-                      <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回升级包
-                    </ElLink>
+                  <ElLink type="info" :disabled="pluginOperationBusy">更多</ElLink>
+                  <template #dropdown>
+                    <ElDropdownMenu>
+                      <ElDropdownItem
+                        v-for="item in packRowActions(operationItems(row)).extra"
+                        :key="item.label"
+                        :disabled="pluginOperationBusy"
+                        @click="item.run(row)"
+                      >
+                        {{ item.label }}
+                      </ElDropdownItem>
+                    </ElDropdownMenu>
                   </template>
-                  <template v-else-if="isLegacyRecoverableCandidate(row)">
-                    <ElTag type="warning">这是较早版本上传的升级包，请先撤回后重新上传</ElTag>
-                    <ElLink
-                      type="warning"
-                      :disabled="pluginOperationBusy"
-                      @click="handleDiscardCandidate(row)"
-                    >
-                      <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回升级包
-                    </ElLink>
-                  </template>
-                  <template v-else-if="isReadyUpgradeCandidate(row)">
-                    <ElTag type="warning">
-                      {{
-                        isPostgresqlLifecycleRecord(row)
-                          ? '与当前宿主版本不兼容，不能升级'
-                          : '与当前宿主版本不兼容，仅可撤回升级包'
-                      }}
-                    </ElTag>
-                    <ElLink
-                      v-if="!isPostgresqlLifecycleRecord(row)"
-                      type="warning"
-                      :disabled="pluginOperationBusy"
-                      @click="handleDiscardCandidate(row)"
-                    >
-                      <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回升级包
-                    </ElLink>
-                  </template>
-                  <ElTag v-else-if="isUpgradeCandidateStage(row)" type="danger"
-                    >升级包不完整，请联系管理员</ElTag
-                  >
-                  <ElLink
-                    v-if="row.state === 2"
-                    type="warning"
-                    :disabled="pluginOperationBusy"
-                    @click="handleDiscardFreshCandidate(row)"
-                  >
-                    <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回候选
-                  </ElLink>
-                  <ElLink
-                    v-if="row.state === 8 && row.existing_schema_attach_pending === 1"
-                    type="warning"
-                    :disabled="pluginOperationBusy"
-                    @click="handleExistingSchemaAttachRecovery(row)"
-                  >
-                    <ArtSvgIcon icon="ri:refresh-line" class="mr-1" />继续数据库重接恢复
-                  </ElLink>
-                  <ElLink
-                    v-if="canWithdrawInstall(row)"
-                    type="danger"
-                    :disabled="pluginOperationBusy"
-                    @click="handleWithdrawInstall(row)"
-                  >
-                    <ArtSvgIcon icon="ri:arrow-go-back-line" class="mr-1" />撤回安装
-                  </ElLink>
-                  <ElLink
-                    v-if="canUninstallLocal(row)"
-                    type="danger"
-                    :disabled="pluginOperationBusy"
-                    @click="handleUninstall(row)"
-                  >
-                    <ArtSvgIcon icon="ri:delete-bin-5-line" class="mr-1" />卸载
-                  </ElLink>
-                </template>
-              </ElSpace>
+                </ElDropdown>
+                </div>
+              </div>
             </template>
           </ArtTable>
           <ElEmpty v-else description="还没有装插件">
@@ -561,6 +455,7 @@
           <ElButton
             type="primary"
             :disabled="pluginOperationBusy"
+            :loading="retryingApp === selectedLocalRow.app"
             @click="handleRetryFailed(selectedLocalRow)"
           >
             重新安装
@@ -741,9 +636,17 @@
       </section>
     </ElDrawer>
 
-    <ElDialog v-model="dependencyNoticeVisible" title="依赖命令需在服务器执行" width="640">
+    <ElDialog v-model="dependencyNoticeVisible" :title="dependencyGap ? '还差依赖' : '依赖命令需在服务器执行'" width="640">
+      <template v-if="dependencyGap">
+        <p>{{ dependencyGap.message }}</p>
+        <div v-for="command in dependencyGap.commands" :key="command.text" class="dependency-command-row">
+          <span class="dependency-command-label">{{ command.label }}：</span>
+          <code class="dependency-command-text">{{ command.text }}</code>
+          <ElButton size="small" @click="copyDependencyCommand(command.text)">复制</ElButton>
+        </div>
+      </template>
       <ElAlert
-        v-if="orchestrator.failure"
+        v-else-if="orchestrator.failure"
         type="warning"
         :closable="false"
         :title="`${orchestrator.failure.label}未完成`"
@@ -754,14 +657,14 @@
       <template #footer>
         <ElButton @click="dependencyNoticeVisible = false">关闭</ElButton>
         <ElButton
-          v-if="orchestrator.failure?.plan === true"
+          v-if="!dependencyGap && orchestrator.failure?.plan === true"
           type="primary"
           :loading="orchestrator.busy"
           @click="retryDependencyChain"
         >
           重试依赖计划
         </ElButton>
-        <ElButton type="primary" @click="getList()">刷新状态</ElButton>
+        <ElButton type="primary" @click="refreshLocalList()">刷新</ElButton>
       </template>
     </ElDialog>
 
@@ -795,7 +698,8 @@
           </p>
           <details v-if="cleanupCompleted.archive" class="cleanup-paths">
             <summary>展开看详情</summary>
-            <p>另存位置：{{ cleanupCompleted.archive }}</p>
+            <p>插件文件已另存到备份目录。</p>
+            <ElButton size="small" @click="copyCleanupProblem">复制问题信息</ElButton>
           </details>
           <ElAlert
             v-if="cleanupCompleted.warning"
@@ -830,7 +734,7 @@
             {{ cleanupInspection ? '更换清理包（可选）' : '补充清理范围' }}
           </p>
           <p class="cleanup-empty">
-            可选择同一插件的已发布版本补充识别残留；此操作不会安装插件，也不会执行包内 SQL。
+            可选择同一插件的已发布版本补充识别残留；此操作不会安装插件，也不会改数据库。
           </p>
           <div v-if="repositoryLoading" class="cleanup-package-state" v-loading="true">
             正在读取插件仓库
@@ -894,48 +798,15 @@
           />
 
           <section class="cleanup-section">
-            <h4>留下的数据表（{{ cleanupInspection.tables.length }}）</h4>
-            <details v-if="cleanupInspection.tables.length" class="cleanup-residue-details">
-              <summary>展开看数据表</summary>
-              <div class="cleanup-residue-scroll cleanup-tags">
-                <ElTag v-for="table in cleanupInspection.tables" :key="table" type="danger">
-                  {{ table }}
-                </ElTag>
-              </div>
-            </details>
-            <p v-else class="cleanup-empty">没有发现这个插件留下的数据表。</p>
-          </section>
-
-          <section class="cleanup-section">
-            <h4>留下的菜单（{{ cleanupInspection.menus.length }}）</h4>
-            <details v-if="cleanupInspection.menus.length" class="cleanup-residue-details">
-              <summary>展开查看菜单</summary>
-              <div class="cleanup-residue-scroll">
-                <ElDescriptions :column="1" border size="small">
-                  <ElDescriptionsItem
-                    v-for="menu in cleanupInspection.menus"
-                    :key="menu.id"
-                    :label="menu.name || menu.code || menu.id"
-                  >
-                    {{ menu.code || '无权限标识' }} · ID {{ menu.id }}
-                  </ElDescriptionsItem>
-                </ElDescriptions>
-              </div>
-            </details>
-            <p v-else class="cleanup-empty">没有发现插件菜单残留。</p>
-          </section>
-
-          <section class="cleanup-section">
-            <h4>插件文件</h4>
-            <p v-if="!cleanupInspection.paths.length" class="cleanup-empty">
-              没有发现需要另存的插件文件。
+            <p>
+              {{
+                describeCleanupFold(
+                  cleanupInspection.tables.length,
+                  cleanupInspection.menus.length
+                )
+              }}
             </p>
-            <details v-else class="cleanup-residue-details">
-              <summary>展开看详情</summary>
-              <ul class="cleanup-paths">
-                <li v-for="path in cleanupInspection.paths" :key="path">{{ path }}</li>
-              </ul>
-            </details>
+            <ElButton size="small" @click="copyCleanupProblem">复制问题信息</ElButton>
           </section>
 
           <ElAlert class="mt-3" type="warning" :closable="false" title="确认清理影响">
@@ -1112,7 +983,7 @@
   import { useUserStore } from '@/store/modules/user'
   import { isRecoverableInitializationError } from '@/utils/http/error'
   import { createRecoverableRead } from './read-recovery'
-  import { ElMessage, ElMessageBox, ElCheckbox } from 'element-plus'
+  import { ElDropdown, ElDropdownItem, ElDropdownMenu, ElMessage, ElMessageBox, ElCheckbox } from 'element-plus'
   import type { ColumnOption } from '@/types'
   import type { UploadFile } from 'element-plus'
   import sandpackageApi, {
@@ -1132,15 +1003,20 @@
   import { formatSupportText } from './support-label'
   import { renderPlainMarkdown } from './safe-markdown'
   import {
+    canResumeInstall,
     canRetryFailedInstall,
     canWithdrawInstall,
     cleanupDialogTitle,
+    cleanupProblemText,
+    describeCleanupFold,
     describeCleanupImpact,
     describeFailedDetail,
     describeInterruptDetail,
     describePluginStatus,
+    describeWaitingDetail,
     describeWithdrawEffect,
     isInstallInterrupted,
+    packRowActions,
     withdrawConfirmTitle,
     withdrawSuccessText
   } from './plugin-status'
@@ -1256,6 +1132,8 @@
   const localDetailRecoveryExpected = ref(false)
   const installFormRef = ref<InstallFormBox | null>(null)
   const dependencyNoticeVisible = ref(false)
+  const dependencyGap = ref<{ message: string; commands: DependencyCommand[] } | null>(null)
+  const retryingApp = ref('')
   const installList = ref<SandpackageInstallRow[]>([])
   /** 首次列表读取是否已完成；完成前空态不渲染，避免「还没有装插件」闪屏。 */
   const installListLoaded = ref(false)
@@ -1993,7 +1871,9 @@
   }
 
   const detailBanner = (record: SandpackageInstallRow): string => {
+    if (retryingApp.value === record.app) return '正在重新安装，请稍候。'
     if (isInstallInterrupted(record)) return describeInterruptDetail()
+    if (canResumeInstall(record) && record.state === 4) return describeWaitingDetail()
     if (record.state === 8 && !isLegacyFailedUpgradeRecovery(record)) {
       const raw = record.recovery_reason || record.last_error || record.stage_label || ''
       const reason = stripCodedNotes(raw)
@@ -2003,6 +1883,9 @@
   }
 
   const localDetailReason = (record: SandpackageInstallRow): string => {
+    if (canResumeInstall(record) && record.state === 4 && !isInstallInterrupted(record)) {
+      return describeWaitingDetail()
+    }
     if (record.cleanup_pending === true) {
       return record.recovery_reason || '上次清理尚未完成，请继续清理。'
     }
@@ -2531,25 +2414,30 @@
   }
 
   const handleRetryFailed = async (record: SandpackageInstallRow): Promise<void> => {
-    if (pluginOperationBusy.value || !canRetryFailedInstall(record)) return
-    if (isLegacyFailedUpgradeRecovery(record)) return
+    if (pluginOperationBusy.value) {
+      ElMessage.warning('上一个操作还在进行，请稍候再点')
+      return
+    }
+    if (!canRetryFailedInstall(record) || isLegacyFailedUpgradeRecovery(record)) return
     const name = record.title || record.app
     if (!acquireLocalWrite('install')) return
+    retryingApp.value = record.app
     try {
       const result = await sandpackageApi.retryFailedInstall({ appName: record.app })
-      if (result.replay_sql) {
-        const outcome = await orchestrator.start({ app: record.app, title: name })
-        if (outcome.kind === 'installed') notifySuccess(`${name} 已重新安装`)
-        else if (outcome.kind === 'install-failed' || outcome.kind === 'unconfirmed') {
-          ElMessage.warning(outcome.reason)
-        }
-      } else {
+      await getList()
+      const current = installList.value.find((row) => row.app === record.app)
+      const state = current?.state ?? result.state
+      if (state === 1) {
         notifySuccess(`${name} 已重新安装`)
+        localDetailVisible.value = false
+        return
       }
-      localDetailVisible.value = false
-    } catch {
-      // 失败原因由请求层提示，这一行留在列表里。
+      ElMessage.warning(`${name} 重新安装没有完成，请看这一行的说明`)
+    } catch (error: unknown) {
+      const text = error instanceof Error && error.message !== '' ? error.message : '重新安装没有完成'
+      ElMessage.warning(text)
     } finally {
+      retryingApp.value = ''
       await getList()
       releaseLocalWrite('install')
     }
@@ -2588,15 +2476,132 @@
     return 'info'
   }
 
-  // 「一键续做」：把等待依赖安装的行重新交给编排器续完剩余依赖任务。
+  // 「一键续做」：依赖已经在服务器上就装完；否则说明还缺哪个包，并给出要复制的命令。
   const handleResumeChain = async (record: SandpackageInstallRow) => {
-    if (pluginOperationBusy.value) return
-    if (!isInstallInterrupted(record) && rejectOrdinaryAction(record)) return
-    const outcome = await orchestrator.resumeChainForRow(record.app, record.title || record.app)
-    await getList()
-    if (outcome?.kind === 'installed') {
-      notifySuccess(`${record.title || record.app} 依赖安装完成`)
+    if (pluginOperationBusy.value) {
+      ElMessage.warning('上一个操作还在进行，请稍候再点')
+      return
     }
+    if (!canResumeInstall(record)) return
+    if (!isInstallInterrupted(record) && rejectOrdinaryAction(record)) return
+    const name = record.title || record.app
+    if (!acquireLocalWrite('install')) return
+    try {
+      const result = await sandpackageApi.continueWaitingInstall({ appName: record.app })
+      if (result.ready) {
+        dependencyGap.value = null
+        dependencyNoticeVisible.value = false
+        localDetailVisible.value = false
+        notifySuccess(`${name} 已安装`)
+        return
+      }
+      dependencyGap.value = {
+        message: result.message,
+        commands: result.commands
+      }
+      dependencyNoticeVisible.value = true
+    } catch (error: unknown) {
+      const text = error instanceof Error && error.message !== '' ? error.message : '没能接着安装'
+      ElMessage.warning(text)
+    } finally {
+      await getList()
+      releaseLocalWrite('install')
+    }
+  }
+
+  interface OperationItem {
+    label: string
+    tone: 'primary' | 'info' | 'warning' | 'danger'
+    run: (row: SandpackageInstallRow) => void
+  }
+
+  const operationNote = (row: SandpackageInstallRow): string => {
+    if (isLegacyFailedUpgradeRecovery(row) || isCompatibleUpgradeCandidate(row)) return ''
+    if (isLegacyRecoverableCandidate(row)) return '这是较早版本上传的升级包，请先撤回后重新上传'
+    if (isReadyUpgradeCandidate(row)) {
+      return isPostgresqlLifecycleRecord(row)
+        ? '与当前宿主版本不兼容，不能升级'
+        : '与当前宿主版本不兼容，仅可撤回升级包'
+    }
+    if (isUpgradeCandidateStage(row)) return '升级包不完整，请联系管理员'
+    return ''
+  }
+
+  const operationItems = (row: SandpackageInstallRow): OperationItem[] => {
+    const items: OperationItem[] = []
+    const push = (
+      label: string,
+      tone: OperationItem['tone'],
+      run: (target: SandpackageInstallRow) => void
+    ): void => {
+      items.push({ label, tone, run })
+    }
+    if (canResumeInstall(row)) {
+      push('一键续做', 'primary', (target) => {
+        void handleResumeChain(target)
+      })
+    }
+    if (canRetryFailedInstall(row) && !isLegacyFailedUpgradeRecovery(row)) {
+      push('重新安装', 'primary', (target) => {
+        void handleRetryFailed(target)
+      })
+    }
+    if (canWithdrawInstall(row)) {
+      push('撤回安装', 'danger', (target) => {
+        void handleWithdrawInstall(target)
+      })
+    }
+    if (canCleanupLocal(row)) {
+      push(row.cleanup_pending ? '继续清理' : '清理残留', 'danger', (target) => {
+        openCleanupDialog(target)
+      })
+    }
+    if (!isLegacyFailedUpgradeRecovery(row)) {
+      if (row.registration_candidate === 1) {
+        push('登记现有插件', 'primary', (target) => {
+          void handleRegisterExisting(target)
+        })
+      } else if (isCompatibleUpgradeCandidate(row)) {
+        push('确认升级', 'primary', (target) => {
+          void handleUpgradeCandidate(target)
+        })
+        if (!isPostgresqlLifecycleRecord(row)) {
+          push('撤回升级包', 'warning', (target) => {
+            void handleDiscardCandidate(target)
+          })
+        }
+      } else if (
+        isLegacyRecoverableCandidate(row) ||
+        (isReadyUpgradeCandidate(row) && !isPostgresqlLifecycleRecord(row))
+      ) {
+        push('撤回升级包', 'warning', (target) => {
+          void handleDiscardCandidate(target)
+        })
+      }
+      if (row.state === 2) {
+        push('撤回候选', 'warning', (target) => {
+          void handleDiscardFreshCandidate(target)
+        })
+      }
+      if (row.state === 8 && row.existing_schema_attach_pending === 1) {
+        push('继续数据库重接恢复', 'warning', (target) => {
+          void handleExistingSchemaAttachRecovery(target)
+        })
+      }
+      if (canUninstallLocal(row)) {
+        push('卸载', 'danger', (target) => {
+          void handleUninstall(target)
+        })
+      }
+    }
+    push(
+      isLegacyFailedUpgradeRecovery(row) ? '恢复处理' : '查看详情',
+      isLegacyFailedUpgradeRecovery(row) ? 'warning' : 'info',
+      (target) => {
+        openLocalDetail(target)
+      }
+    )
+    return items
   }
 
   interface DependencyCommand {
@@ -2676,7 +2681,10 @@
   watch(
     () => orchestrator.panelTick,
     () => {
-      if (orchestrator.failure) dependencyNoticeVisible.value = true
+      if (orchestrator.failure) {
+        dependencyGap.value = null
+        dependencyNoticeVisible.value = true
+      }
     }
   )
 
@@ -2697,12 +2705,12 @@
     { prop: 'version', label: '版本', width: 58 },
     { prop: 'support', label: '框架兼容', width: 148, useSlot: true },
     { prop: 'state', label: '插件状态', width: 140, useSlot: true },
-    { prop: 'npm', label: '前端依赖', width: 118, useSlot: true },
-    { prop: 'composer', label: '后端依赖', width: 118, useSlot: true },
+    { prop: 'npm', label: '前端依赖', width: 88, useSlot: true },
+    { prop: 'composer', label: '后端依赖', width: 88, useSlot: true },
     {
       prop: 'operation',
       label: '操作',
-      minWidth: 280,
+      width: 196,
       useSlot: true
     }
   ]
@@ -2712,9 +2720,42 @@
   const userStore = useUserStore()
   let readsActive = true
 
-  function refreshLocalList(): void {
+  async function refreshLocalList(): Promise<void> {
     dismissNotice()
-    void getList()
+    await getList()
+    const pending = installList.value.filter((row) => canResumeInstall(row))
+    let finished = 0
+    for (const row of pending) {
+      try {
+        const result = await sandpackageApi.continueWaitingInstall({ appName: row.app })
+        if (result.ready) finished += 1
+      } catch {
+        // 这一行续不上时留在列表里。
+      }
+    }
+    if (finished > 0) {
+      await getList()
+      notifySuccess(finished === 1 ? '依赖已经齐了，安装已完成' : `${finished} 个插件已装完`)
+    }
+  }
+
+  const copyCleanupProblem = async (): Promise<void> => {
+    const inspection = cleanupInspection.value
+    const archive = cleanupCompleted.value?.archive ?? ''
+    const parts: string[] = []
+    if (inspection) {
+      parts.push(
+        cleanupProblemText({
+          tables: inspection.tables,
+          menus: inspection.menus.map((menu) => ({ name: menu.name, code: menu.code })),
+          paths: inspection.paths
+        })
+      )
+    }
+    if (archive !== '') parts.push(archive)
+    const text = parts.join('\n')
+    if (text === '') return
+    await copyDependencyCommand(text)
   }
 
   async function getList(preserveRecoverySession = false): Promise<void> {
@@ -3528,9 +3569,24 @@
     white-space: normal;
   }
 
+  .operation-cell {
+    max-width: 100%;
+  }
+
   .operation-links {
-    flex-wrap: wrap;
-    row-gap: 4px;
+    display: inline-flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 8px;
+    max-width: 100%;
+    white-space: nowrap;
+  }
+
+  .operation-note {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: normal;
   }
 
   .local-about {
