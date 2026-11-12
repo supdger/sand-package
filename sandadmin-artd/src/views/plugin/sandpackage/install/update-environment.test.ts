@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import {
   describeEnvironmentUnsupported,
   describeUpdateProblem,
+  isCheckDetailsVisible,
   isEnvironmentUnsupported,
   readEnvironmentFailure
 } from './update-environment.ts'
@@ -33,6 +34,19 @@ describe('isEnvironmentUnsupported', () => {
     assert.equal(isEnvironmentUnsupported([{ code: 'repository', state: 'fail', message: '官方发行读取失败（HTTP 403）' }]), false)
     assert.equal(isEnvironmentUnsupported(null), false)
     assert.equal(isEnvironmentUnsupported([{ code: 'php', state: 'ok', message: '通过' }]), false)
+  })
+})
+
+describe('isCheckDetailsVisible', () => {
+  it('环境不支持时整块不渲染，有检查项也不显示', () => {
+    assert.equal(isCheckDetailsVisible(true, 0), false)
+    assert.equal(isCheckDetailsVisible(true, 3), false)
+  })
+
+  it('环境支持且有检查项时才渲染', () => {
+    assert.equal(isCheckDetailsVisible(false, 0), false)
+    assert.equal(isCheckDetailsVisible(false, 1), true)
+    assert.equal(isCheckDetailsVisible(false, 3), true)
   })
 })
 

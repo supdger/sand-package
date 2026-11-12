@@ -28,6 +28,11 @@ export function isEnvironmentUnsupported(checks: EnvironmentCheck[] | null): boo
   return readEnvironmentFailure(checks ?? []) !== ''
 }
 
+/** 「升级检查详情」整块只在环境支持且有检查项时渲染；不支持时黄条已经说明原因，不再重复一块。 */
+export function isCheckDetailsVisible(environmentUnsupported: boolean, checkCount: number): boolean {
+  return !environmentUnsupported && checkCount > 0
+}
+
 /** 「复制问题信息」的完整技术细节：请求级失败优先，否则全部检查失败原因合并。 */
 export function describeUpdateProblem(checks: EnvironmentCheck[] | null, requestError: string): string {
   if (requestError.trim() !== '') return requestError.trim()

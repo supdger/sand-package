@@ -24,7 +24,7 @@
           <div><strong>{{ item.name }}</strong><p>已安装版本：{{ item.version }}</p></div>
           <label class="version-select">
             <span>目标版本</span>
-            <ElSelect v-model="selected[item.package]" :disabled="busy || externalBusy" placeholder="暂无可用更新" clearable @change="invalidateInspection">
+            <ElSelect v-model="selected[item.package]" :disabled="busy || externalBusy" :placeholder="describeTargetPlaceholder(releasesFor(item.package).length > 0)" clearable @change="invalidateInspection">
               <ElOption v-for="release in releasesFor(item.package)" :key="release.version" :label="release.version" :value="release.version" />
             </ElSelect>
           </label>
@@ -34,13 +34,9 @@
         <strong>{{ release.name }} {{ release.version }} · 更新说明</strong>
         <p>{{ release.notes || '此版本未提供更新说明。' }}</p>
       </div>
-      <details v-if="environmentUnsupported || checks.length" class="check-details" :open="environmentUnsupported || checks.some(check => check.state !== 'ok')">
+      <details v-if="isCheckDetailsVisible(environmentUnsupported, checks.length)" class="check-details" :open="checks.some(check => check.state !== 'ok')">
         <summary>升级检查详情</summary>
-        <template v-if="environmentUnsupported">
-          <p>升级前检查：没通过</p>
-          <p>{{ unsupportedMessage }}</p>
-        </template>
-        <ul v-else class="check-list" aria-label="升级检查结果">
+        <ul class="check-list" aria-label="升级检查结果">
         <li v-for="check in checks" :key="check.code">
           <div class="check-heading"><strong>{{ check.label }}</strong><ElTag :type="check.state === 'ok' ? 'success' : 'danger'">{{ check.state === 'ok' ? '通过' : '未通过' }}</ElTag></div>
           <p>{{ check.message }}</p>
@@ -93,8 +89,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { systemUpdateApi, type SystemPackage, type UpdateInspection, type UpdateStatus, type UpdateTask, type UpdateTarget } from '../api/system-update'
-import { describeRequestFailure, isReleaseReadFailed } from './release-lookup'
-import { describeEnvironmentUnsupported, describeUpdateProblem, isEnvironmentUnsupported } from './update-environment'
+import { describeRequestFailure, describeTargetPlaceholder, isReleaseReadFailed } from './release-lookup'
+import { describeEnvironmentUnsupported, describeUpdateProblem, isCheckDetailsVisible, isEnvironmentUnsupported } from './update-environment'
 
 const props = defineProps<{ externalBusy: boolean }>()
 const emit = defineEmits<{ busy: [value: boolean] }>()

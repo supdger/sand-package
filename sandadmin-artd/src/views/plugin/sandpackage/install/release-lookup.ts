@@ -17,6 +17,11 @@ export function isReleaseReadFailed(checks: ReleaseCheck[] | null, requestError:
   return readReleaseFailure(checks ?? []) !== ''
 }
 
+/** 目标版本下拉的占位字：有可选版本引导挑一个看更新说明，没有就直说没有新版本。 */
+export function describeTargetPlaceholder(hasVersions: boolean): string {
+  return hasVersions ? '选一个版本看更新说明' : '没有新版本'
+}
+
 /** 复制用的技术原因。页面上不展示这段，只保留状态码或超时。 */
 export function describeRequestFailure(message: string, statusCode: number, timedOut: boolean): string {
   if (timedOut) return '请求超时'

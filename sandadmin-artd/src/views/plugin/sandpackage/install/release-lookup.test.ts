@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { describeRequestFailure, isReleaseReadFailed, readReleaseFailure } from './release-lookup.ts'
+import { describeRequestFailure, describeTargetPlaceholder, isReleaseReadFailed, readReleaseFailure } from './release-lookup.ts'
+
+describe('describeTargetPlaceholder', () => {
+  it('有可选版本时引导挑一个看更新说明', () => {
+    assert.equal(describeTargetPlaceholder(true), '选一个版本看更新说明')
+  })
+
+  it('没有可选版本时直说没有新版本', () => {
+    assert.equal(describeTargetPlaceholder(false), '没有新版本')
+  })
+})
 
 describe('isReleaseReadFailed', () => {
   it('官方发行返回 403 时算读取失败，技术原因只留在详情里', () => {
