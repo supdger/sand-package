@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.26（2026-11-16）
+
+- 安装路由收口：原先走 webman 默认路由的 8 个动作（`index`/`upload`/`install`/`uninstall`/`reload`/`inspectCandidate`/`inspectDependencyRecovery`/`recoverDependency`）逐条关闭默认路由并改为方法绑定的显式路由（`index` 为 GET，其余为 POST），显式声明 `CheckLogin`，与控制器 `#[Middleware]` 属性双保险（#55）。
+- `InstallController` 与 `SystemUpdateController` 构造器的超管门禁由 `ApiException` 改为 `SystemException`，普通管理员（非 `id=1`）访问安装与系统更新接口返回真实 HTTP 403 + `code:403`，不再是 HTTP 200 + 失败码（#55）。
+- 其余显式路由（系统更新、仓库、清理、恢复与续作入口）在路由表统一补声明 `CheckLogin`，与上述 8 条对齐；登录校验不再只依赖控制器注解。`systemUpdate/probe` 维持环回加随机挑战的独立协议，不加 `CheckLogin`。
+- 新增 `tools/assert-install-auth-http.php`：自举临时 webman 宿主与临时 PostgreSQL，断言未登录请求返回 `code:401`、普通管理员令牌返回真实 HTTP 403，可重复执行。
+- 本版本是修复 GHSA-g7rv-6hmp-476c（0.2.25 删除 HTTP 终端）之后首个带安装路由收口与真实 403 的版本。
+
 ## 0.2.25（2026-11-10）
 
 - 移除 HTTP 在线终端与依赖启动执行面。`/app/sandpackage/index/terminal` 与 `POST /app/sandpackage/install/inspectDependencyStart` 不再注册。依赖安装改为宿主 `server/` 目录的 `php webman sandpackage:dependency run <插件标识> composer|npm`；中断恢复仍是 `php webman sandpackage:recover inspect-dependency` / `recover-dependency`。管理端源码不再提供「依赖安装终端」按钮或指向该 HTTP 地址的客户端，`composer run-script sand:publish` 不会再把该入口发布出去。

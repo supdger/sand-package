@@ -10,11 +10,11 @@ declare(strict_types=1);
  *
  * Every public action of InstallController and SystemUpdateController must
  * disable its default route and re-register as an explicit, method-bound
- * route. The eight former default-route actions additionally carry an
- * explicit CheckLogin middleware on the route itself (the controller
- * Middleware attribute still applies; the route-level declaration is the
- * auditable second latch). Super-admin gating in both constructors must use
- * SystemException with a real HTTP 403 status.
+ * route, and every such route must declare CheckLogin middleware on the
+ * route itself (the controller Middleware attribute still applies; the
+ * route-level declaration is the auditable second latch). Super-admin
+ * gating in both constructors must use SystemException with a real HTTP
+ * 403 status.
  */
 
 $root = dirname(__DIR__);
@@ -69,11 +69,18 @@ foreach ($controllers as $controller => $file) {
         }
         $explicit = preg_match(
             '/Route::(?:get|post|any|put|delete|patch)\(\s*[\'"][^\'"]+[\'"]\s*,\s*\[\s*plugin\\\\sandpackage\\\\app\\\\controller\\\\'
-                . $controller . '::class\s*,\s*\'' . preg_quote($method, '/') . '\'\s*\]/',
+                . $controller . '::class\s*,\s*\'' . preg_quote($method, '/') . '\'\s*\][^;]*;/s',
             $route,
+            $statement,
         ) === 1;
         if (!$explicit && !in_array($method, $recoveryActions, true)) {
             $fail("{$controller}::{$method} 未注册显式路由（也不在恢复 foreach 清单中）");
+            continue;
+        }
+        if ($explicit
+            && (!str_contains($statement[0], 'middleware(')
+                || !str_contains($statement[0], 'CheckLogin'))) {
+            $fail("{$controller}::{$method} 显式路由未声明 CheckLogin middleware");
         }
     }
 
@@ -92,6 +99,14 @@ foreach ($controllers as $controller => $file) {
     if (preg_match('/new SystemException\([^;]*,\s*403\s*,\s*null\s*,\s*403\s*\)/', $ctor[1]) !== 1) {
         $fail("{$controller} 构造器 SystemException 未携带业务码 403 与 httpStatus 403");
     }
+}
+
+// Recovery foreach must declare CheckLogin on the generated route as well.
+$assertions++;
+if (preg_match('/Route::post\([^;]*\$sandpackageRecoveryAction[^;]*;/s', $route, $recoveryStatement) !== 1
+    || !str_contains($recoveryStatement[0], 'middleware(')
+    || !str_contains($recoveryStatement[0], 'CheckLogin')) {
+    $fail('恢复 foreach 生成的显式路由未声明 CheckLogin middleware');
 }
 
 // The eight former default-route actions must declare CheckLogin on the route.
