@@ -6,6 +6,7 @@ use plugin\sandadmin\app\middleware\CheckLogin;
 use plugin\sandadmin\app\middleware\SystemLog;
 use plugin\sandadmin\basic\BaseController;
 use plugin\sandadmin\exception\ApiException;
+use plugin\sandadmin\exception\SystemException;
 use plugin\sandpackage\app\service\SystemUpdate;
 use support\annotation\Middleware;
 use support\Request;
@@ -18,7 +19,7 @@ final class SystemUpdateController extends BaseController
     public function __construct()
     {
         parent::__construct();
-        if ($this->adminId !== 1) throw new ApiException('仅超级管理员能够执行系统更新', 400);
+        if ($this->adminId !== 1) throw new SystemException('仅超级管理员能够执行系统更新', 403, null, 403);
     }
     private function respond(callable $action): Response
     {

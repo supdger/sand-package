@@ -2,6 +2,34 @@
 
 use Webman\Route;
 
+// Remaining install actions are explicit, method-bound routes. CheckLogin is
+// declared here in addition to the controller Middleware attribute so the
+// route table alone shows every entry requires an authenticated admin.
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'index']);
+Route::get('/app/sandpackage/install/index', [plugin\sandpackage\app\controller\InstallController::class, 'index'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'upload']);
+Route::post('/app/sandpackage/install/upload', [plugin\sandpackage\app\controller\InstallController::class, 'upload'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'install']);
+Route::post('/app/sandpackage/install/install', [plugin\sandpackage\app\controller\InstallController::class, 'install'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'uninstall']);
+Route::post('/app/sandpackage/install/uninstall', [plugin\sandpackage\app\controller\InstallController::class, 'uninstall'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'reload']);
+Route::post('/app/sandpackage/install/reload', [plugin\sandpackage\app\controller\InstallController::class, 'reload'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectCandidate']);
+Route::post('/app/sandpackage/install/inspectCandidate', [plugin\sandpackage\app\controller\InstallController::class, 'inspectCandidate'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencyRecovery']);
+Route::post('/app/sandpackage/install/inspectDependencyRecovery', [plugin\sandpackage\app\controller\InstallController::class, 'inspectDependencyRecovery'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'recoverDependency']);
+Route::post('/app/sandpackage/install/recoverDependency', [plugin\sandpackage\app\controller\InstallController::class, 'recoverDependency'])
+    ->middleware(\plugin\sandadmin\app\middleware\CheckLogin::class);
+
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'registerExisting']);
 Route::post('/app/sandpackage/install/registerExisting', [plugin\sandpackage\app\controller\InstallController::class, 'registerExisting']);
 Route::disableDefaultRoute([plugin\sandpackage\app\controller\InstallController::class, 'inspectExistingSchemaAttach']);
