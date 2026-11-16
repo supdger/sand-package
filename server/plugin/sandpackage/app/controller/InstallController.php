@@ -8,6 +8,7 @@ use plugin\sandadmin\app\middleware\CheckLogin;
 use plugin\sandadmin\app\middleware\CheckAuth;
 use plugin\sandadmin\basic\BaseController;
 use plugin\sandadmin\exception\ApiException;
+use plugin\sandadmin\exception\SystemException;
 use plugin\sandadmin\service\Permission;
 use plugin\sandpackage\app\logic\InstallLogic;
 use plugin\sandpackage\app\logic\LegacyInstallLogic;
@@ -30,7 +31,7 @@ class InstallController extends BaseController
     {
         parent::__construct();
         if ($this->adminId !== 1) {
-            throw new ApiException('仅超级管理员能够操作');
+            throw new SystemException('仅超级管理员能够操作', 403, null, 403);
         }
     }
 

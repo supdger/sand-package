@@ -21,13 +21,13 @@ function assert_true(bool $cond, string $message): void
     fwrite(STDOUT, "OK: $message\n");
 }
 
-$tmp = sys_get_temp_dir() . '/sandpackage-full-restart-' . bin2hex(random_bytes(4));
-mkdir($tmp . '/empty/config', 0777, true);
-mkdir($tmp . '/ai/config', 0777, true);
-mkdir($tmp . '/ai2/config', 0777, true);
+$fixtureRoot = sys_get_temp_dir() . '/sandpackage-full-restart-' . bin2hex(random_bytes(4));
+mkdir($fixtureRoot . '/empty/config', 0777, true);
+mkdir($fixtureRoot . '/aiSingle/config', 0777, true);
+mkdir($fixtureRoot . '/aiPair/config', 0777, true);
 
-file_put_contents($tmp . '/empty/config/process.php', "<?php\nreturn [];\n");
-file_put_contents($tmp . '/ai/config/process.php', <<<'PHP'
+file_put_contents($fixtureRoot . '/empty/config/process.php', "<?php\nreturn [];\n");
+file_put_contents($fixtureRoot . '/aiSingle/config/process.php', <<<'PHP'
 <?php
 return [
     'sand_ai_task_worker' => [
@@ -37,7 +37,7 @@ return [
     ],
 ];
 PHP);
-file_put_contents($tmp . '/ai2/config/process.php', <<<'PHP'
+file_put_contents($fixtureRoot . '/aiPair/config/process.php', <<<'PHP'
 <?php
 return [
     'sand_ai_task_worker' => [
@@ -48,17 +48,17 @@ return [
 ];
 PHP);
 
-$empty = PluginProcessFingerprint::configPath($tmp . '/empty');
-$ai = PluginProcessFingerprint::configPath($tmp . '/ai');
-$ai2 = PluginProcessFingerprint::configPath($tmp . '/ai2');
+$empty = PluginProcessFingerprint::configPath($fixtureRoot . '/empty');
+$ai = PluginProcessFingerprint::configPath($fixtureRoot . '/aiSingle');
+$aiPair = PluginProcessFingerprint::configPath($fixtureRoot . '/aiPair');
 
 assert_true(!PluginProcessFingerprint::declaresCustomProcesses($empty), 'empty process.php declares nothing');
 assert_true(PluginProcessFingerprint::declaresCustomProcesses($ai), 'SandAI-like process.php declares custom processes');
 assert_true(PluginProcessFingerprint::requiresFullRestart(false, $ai, null), 'fresh install with process.php requires full_restart');
 assert_true(!PluginProcessFingerprint::requiresFullRestart(false, $empty, null), 'fresh install without processes stays reload');
 assert_true(!PluginProcessFingerprint::requiresFullRestart(true, $ai, $ai), 'unchanged process fingerprint allows reload');
-assert_true(PluginProcessFingerprint::requiresFullRestart(true, $ai2, $ai), 'changed count fingerprint requires full_restart');
-assert_true(PluginProcessFingerprint::fingerprint($ai) !== PluginProcessFingerprint::fingerprint($ai2), 'fingerprints differ when count changes');
+assert_true(PluginProcessFingerprint::requiresFullRestart(true, $aiPair, $ai), 'changed count fingerprint requires full_restart');
+assert_true(PluginProcessFingerprint::fingerprint($ai) !== PluginProcessFingerprint::fingerprint($aiPair), 'fingerprints differ when count changes');
 assert_true(PluginProcessFingerprint::processNames($ai) === ['sand_ai_task_worker'], 'processNames extracts worker name');
 
 $server = file_get_contents($root . '/server/compat/Saithink/Saipackage/service/Server.php');
@@ -98,18 +98,18 @@ assert_true(str_contains($serverSource, "'listeners'"), 'detachFullRestart passe
 assert_true(str_contains($serverSource, 'isRuntimeEnvName'), 'installByRelation preserves existing .env');
 
 $app = include $root . '/server/plugin/sandpackage/config/app.php';
-assert_true(($app['version'] ?? null) === '0.2.24', 'version bumped to 0.2.24');
+assert_true(($app['version'] ?? null) === '0.2.25', 'version bumped to 0.2.25');
 
 // cleanup
-foreach ([$empty, $ai, $ai2] as $file) {
+foreach ([$empty, $ai, $aiPair] as $file) {
     @unlink($file);
 }
-@rmdir($tmp . '/empty/config');
-@rmdir($tmp . '/empty');
-@rmdir($tmp . '/ai/config');
-@rmdir($tmp . '/ai');
-@rmdir($tmp . '/ai2/config');
-@rmdir($tmp . '/ai2');
-@rmdir($tmp);
+@rmdir($fixtureRoot . '/empty/config');
+@rmdir($fixtureRoot . '/empty');
+@rmdir($fixtureRoot . '/aiSingle/config');
+@rmdir($fixtureRoot . '/aiSingle');
+@rmdir($fixtureRoot . '/aiPair/config');
+@rmdir($fixtureRoot . '/aiPair');
+@rmdir($fixtureRoot);
 
 fwrite(STDOUT, "All full_restart semantics assertions passed.\n");
