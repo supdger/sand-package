@@ -98,7 +98,7 @@ assert_true(str_contains($serverSource, "'listeners'"), 'detachFullRestart passe
 assert_true(str_contains($serverSource, 'isRuntimeEnvName'), 'installByRelation preserves existing .env');
 
 $app = include $root . '/server/plugin/sandpackage/config/app.php';
-assert_true(($app['version'] ?? null) === '0.2.25', 'version bumped to 0.2.25');
+assert_true(($app['version'] ?? null) === '0.2.26', 'version bumped to 0.2.26');
 
 // cleanup
 foreach ([$empty, $ai, $aiPair] as $file) {
